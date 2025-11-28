@@ -1,7 +1,7 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use rustpython_parser::Parse;
 use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt, Suite};
 use rustpython_parser::text_size::{TextRange, TextSize};
-use rustpython_parser::Parse;
 use std::collections::{HashMap, HashSet};
 mod ops;
 use ops::infer_matmul;
@@ -39,7 +39,8 @@ struct VarState {
 #[derive(Default)]
 struct Imports {
     torch_aliases: HashSet<Identifier>,
-    mm_aliases: HashSet<Identifier>,
+    /// Maps simple function name (e.g., "mm") to all aliases in scope.
+    func_aliases: HashMap<String, HashSet<Identifier>>,
 }
 
 pub fn analyze_source(source: &str) -> Analysis {
@@ -288,11 +289,28 @@ fn infer_expr_shape(
         }
         Expr::Call(call) => {
             if let Expr::Name(func_name) = call.func.as_ref() {
-                if imports.mm_aliases.contains(&func_name.id) {
+                if is_alias_of("mm", &func_name.id, imports) {
                     if let (Some(arg0), Some(arg1)) = (call.args.get(0), call.args.get(1)) {
                         return infer_matmul_shapes(
                             arg0,
                             arg1,
+                            vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        );
+                    }
+                }
+                if is_alias_of("view", &func_name.id, imports)
+                    || is_alias_of("reshape", &func_name.id, imports)
+                {
+                    if let Some(arg0) = call.args.get(0) {
+                        let args = call.args.iter().skip(1).collect::<Vec<_>>();
+                        return infer_view_like(
+                            arg0,
+                            &args,
                             vars,
                             diagnostics,
                             hover_entries,
@@ -371,6 +389,22 @@ fn infer_expr_shape(
                         }
                     }
                 }
+                if (attr_name == "view" || attr_name == "reshape")
+                    && lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
+                        .is_some()
+                {
+                    let args = call.args.iter().collect::<Vec<_>>();
+                    return infer_view_like(
+                        &attr.value,
+                        &args,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
+                }
             }
             None
         }
@@ -424,6 +458,144 @@ fn infer_matmul_shapes(
     }
 }
 
+fn infer_view_like(
+    base_expr: &Expr,
+    args: &[&Expr],
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    let base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source);
+    let target_tokens = args
+        .iter()
+        .filter_map(|e| expr_to_dim_token(e))
+        .collect::<Vec<_>>();
+    if target_tokens.is_empty() {
+        return None;
+    }
+    let res = infer_reshape_dims(base_shape.as_ref(), &target_tokens);
+    match res {
+        Ok(shape) => Some(shape),
+        Err(msg) => {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: msg,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            None
+        }
+    }
+}
+
+fn infer_reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String> {
+    let mut tokens = target.to_vec();
+    let mut minus_one_idx = None;
+    for (i, t) in tokens.iter().enumerate() {
+        if t == "-1" {
+            if minus_one_idx.is_some() {
+                return Err("Only one -1 is allowed in view/reshape".into());
+            }
+            minus_one_idx = Some(i);
+        }
+    }
+
+    if let Some(base_shape) = base {
+        let mut remaining = flatten_dims(&base_shape.dims);
+        if let Some(idx) = minus_one_idx {
+            let mut target_factors = Vec::new();
+            for t in &tokens {
+                if t == "-1" {
+                    continue;
+                }
+                let facs = split_dim(t);
+                target_factors.extend(facs);
+            }
+            for f in &target_factors {
+                if let Some(pos) = remaining.iter().position(|x| x == f) {
+                    remaining.remove(pos);
+                }
+            }
+            let inferred = if remaining.is_empty() {
+                "1".to_string()
+            } else {
+                remaining.join("*")
+            };
+            tokens[idx] = inferred;
+        }
+        return Ok(Shape {
+            dtype: base_shape.dtype.clone(),
+            dims: tokens,
+        });
+    }
+
+    // No base shape: still return with -1 replaced by "Infer"
+    if let Some(idx) = minus_one_idx {
+        tokens[idx] = "Infer".to_string();
+    }
+    Ok(Shape {
+        dtype: None,
+        dims: tokens,
+    })
+}
+
+fn expr_to_dim_token(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::Int(i) => {
+                let s = i.to_string();
+                if s == "0" {
+                    Some("O".to_string())
+                } else {
+                    Some(s)
+                }
+            }
+            _ => None,
+        },
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::BinOp(bin) => {
+            if matches!(bin.op, Operator::Mult) {
+                let l = expr_to_dim_token(&bin.left)?;
+                let r = expr_to_dim_token(&bin.right)?;
+                Some(format!("{l}*{r}"))
+            } else {
+                None
+            }
+        }
+        Expr::UnaryOp(u) => {
+            if matches!(u.op, ast::UnaryOp::USub) {
+                if let Expr::Constant(c) = u.operand.as_ref() {
+                    if let ast::Constant::Int(i) = &c.value {
+                        let s = i.to_string();
+                        return Some(format!("-{s}"));
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn flatten_dims(dims: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in dims {
+        out.extend(split_dim(d));
+    }
+    out
+}
+
+fn split_dim(dim: &str) -> Vec<String> {
+    dim.split('*').map(|s| s.to_string()).collect()
+}
 fn lookup_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
@@ -455,18 +627,41 @@ fn is_torch_base(expr: &Expr, imports: &Imports) -> bool {
     }
 }
 
+fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
+    imports
+        .func_aliases
+        .get(canonical)
+        .map(|set| set.contains(ident))
+        .unwrap_or(false)
+}
+
 fn collect_imports(module: &[Stmt]) -> Imports {
     let mut imports = Imports::default();
+    // seed known function names
+    for fname in ["mm", "view", "reshape"] {
+        imports
+            .func_aliases
+            .entry(fname.to_string())
+            .or_insert_with(HashSet::new);
+    }
+    imports
+        .torch_aliases
+        .insert(Identifier::from("torch".to_string()));
+
     for stmt in module {
         match stmt {
             Stmt::Import(import) => {
                 for alias in &import.names {
-                    if alias.name.to_string() == "torch" {
-                        let alias_id = alias
-                            .asname
-                            .clone()
-                            .unwrap_or_else(|| Identifier::from("torch".to_string()));
-                        imports.torch_aliases.insert(alias_id);
+                    let name = alias.name.to_string();
+                    let as_id = alias
+                        .asname
+                        .clone()
+                        .unwrap_or_else(|| Identifier::from(name.clone()));
+                    if name == "torch" {
+                        imports.torch_aliases.insert(as_id.clone());
+                    }
+                    if imports.func_aliases.contains_key(&name) {
+                        imports.func_aliases.entry(name).or_default().insert(as_id);
                     }
                 }
             }
@@ -474,12 +669,13 @@ fn collect_imports(module: &[Stmt]) -> Imports {
                 if let Some(module) = &f.module {
                     if module.to_string() == "torch" {
                         for alias in &f.names {
-                            if alias.name.to_string() == "mm" {
+                            let name = alias.name.to_string();
+                            if imports.func_aliases.contains_key(&name) {
                                 let id = alias
                                     .asname
                                     .clone()
-                                    .unwrap_or_else(|| Identifier::from("mm".to_string()));
-                                imports.mm_aliases.insert(id);
+                                    .unwrap_or_else(|| Identifier::from(name.clone()));
+                                imports.func_aliases.entry(name).or_default().insert(id);
                             }
                         }
                     }
