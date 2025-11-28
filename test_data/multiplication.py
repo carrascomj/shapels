@@ -31,6 +31,25 @@ from jaxtyping import Float as F
 from torch import Tensor as T
 
 def hover_on_inferred_should_work(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B S"]:
-    # hovering z should return [F, `B S`]
+    # hovering z should return [F, "B S"]
+    z = x @ y
+    return z 
+
+
+# test 5
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+
+def hovering_with_inference_on_arg_should_return_inferred_shape():
+    B, X, R, O = 4, 8, 16, 32
+    x: F[T, "B X R"] = torch.Tensor(B, X, R)
+    y: F[T, "R O"] = torch.Tensor(R, O)
+    # hovering z should return [F, "B O"]
+    z = multiply_child_unnanotated(x, y)
+    return z
+
+
+def multiply_child_unnanotated(x, y):
     z = x @ y
     return z 

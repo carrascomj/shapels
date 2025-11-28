@@ -38,11 +38,22 @@ pub fn analyze_source(source: &str) -> Analysis {
     let mut analysis = Analysis::default();
     match parse_program(source, "<memory>") {
         Ok(module) => {
+            // collect function definitions first
+            let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
+            for stmt in &module {
+                if let Stmt::FunctionDef(func) = stmt {
+                    func_map.insert(func.name.clone(), (func.args.clone(), func.body.clone()));
+                }
+            }
+
             for stmt in module {
                 if let Stmt::FunctionDef(func) = stmt {
-                    let mut func_analysis = analyze_function(&func.args, &func.body, source);
+                    let mut func_analysis =
+                        analyze_function(&func.args, &func.body, source, &func_map, &mut Vec::new());
                     analysis.diagnostics.append(&mut func_analysis.diagnostics);
-                    analysis.hover_entries.append(&mut func_analysis.hover_entries);
+                    analysis
+                        .hover_entries
+                        .append(&mut func_analysis.hover_entries);
                 }
             }
         }
@@ -63,30 +74,53 @@ pub fn analyze_source(source: &str) -> Analysis {
     analysis
 }
 
-fn analyze_function(args: &Arguments, body: &[Stmt], source: &str) -> Analysis {
+fn analyze_function(
+    args: &Arguments,
+    body: &[Stmt],
+    source: &str,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    call_stack: &mut Vec<Identifier>,
+) -> Analysis {
+    let (diagnostics, hover_entries, _) = simulate_function(
+        args,
+        body,
+        source,
+        func_map,
+        call_stack,
+        HashMap::new(),
+        true,
+    );
+
+    Analysis {
+        diagnostics,
+        hover_entries,
+    }
+}
+
+fn simulate_function(
+    args: &Arguments,
+    body: &[Stmt],
+    source: &str,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    call_stack: &mut Vec<Identifier>,
+    mut initial_vars: HashMap<Identifier, VarState>,
+    record_hovers: bool,
+) -> (Vec<Diagnostic>, Vec<(Range, HoverInfo)>, Option<Shape>) {
     let mut diagnostics = Vec::new();
     let mut hover_entries = Vec::new();
     let mut vars: HashMap<Identifier, VarState> = HashMap::new();
 
-    for arg in &args.args {
-        if let Some(shape) = arg
-            .def
-            .annotation
-            .as_ref()
-            .and_then(|expr| parse_shape_annotation(expr.as_ref()))
-        {
-            let range = text_range_to_lsp(arg.def.range, source);
-            vars.insert(
-                arg.def.arg.clone(),
-                VarState {
-                    annotated: Some(shape.clone()),
-                    inferred: None,
-                    range,
-                },
-            );
-            hover_entries.push((range, HoverInfo { shape: Some(shape) }));
-        }
-    }
+    seed_args_from_annotations(
+        args,
+        source,
+        &mut vars,
+        &mut hover_entries,
+        &mut diagnostics,
+        Some(&mut initial_vars),
+        record_hovers,
+    );
+
+    let mut return_shape = None;
 
     for stmt in body {
         match stmt {
@@ -96,7 +130,14 @@ fn analyze_function(args: &Arguments, body: &[Stmt], source: &str) -> Analysis {
                     let range = text_range_to_lsp(assign.range, source);
                     let mut inferred = None;
                     if let Some(val) = &assign.value {
-                        inferred = infer_expr_shape(val, &vars, &mut diagnostics, source);
+                        inferred = infer_expr_shape(
+                            val,
+                            &vars,
+                            func_map,
+                            call_stack,
+                            &mut diagnostics,
+                            source,
+                        );
                     }
                     if let (Some(ann), Some(inf)) = (ann_shape.clone(), inferred.clone()) {
                         if ann.dims != inf.dims {
@@ -127,7 +168,9 @@ fn analyze_function(args: &Arguments, body: &[Stmt], source: &str) -> Analysis {
                                 range,
                             },
                         );
-                        hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                        if record_hovers {
+                            hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                        }
                     }
                 }
             }
@@ -135,7 +178,14 @@ fn analyze_function(args: &Arguments, body: &[Stmt], source: &str) -> Analysis {
                 if assign.targets.len() == 1 {
                     if let Some(name) = name_from_expr(&assign.targets[0]) {
                         let range = text_range_to_lsp(assign.range, source);
-                        if let Some(shape) = infer_expr_shape(&assign.value, &vars, &mut diagnostics, source) {
+                        if let Some(shape) = infer_expr_shape(
+                            &assign.value,
+                            &vars,
+                            func_map,
+                            call_stack,
+                            &mut diagnostics,
+                            source,
+                        ) {
                             vars.insert(
                                 name.clone(),
                                 VarState {
@@ -144,29 +194,47 @@ fn analyze_function(args: &Arguments, body: &[Stmt], source: &str) -> Analysis {
                                     range,
                                 },
                             );
-                            hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                            if record_hovers {
+                                hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                            }
                         }
                     }
+                }
+            }
+            Stmt::Return(ret) => {
+                if let Some(val) = &ret.value {
+                    return_shape = infer_expr_shape(
+                        val,
+                        &vars,
+                        func_map,
+                        call_stack,
+                        &mut diagnostics,
+                        source,
+                    )
                 }
             }
             _ => {}
         }
     }
 
-    Analysis {
-        diagnostics,
-        hover_entries,
-    }
+    (diagnostics, hover_entries, return_shape)
 }
 
 fn infer_expr_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
 ) -> Option<Shape> {
     match expr {
-        Expr::BinOp(ExprBinOp { left, op, right, range: expr_range }) => {
+        Expr::BinOp(ExprBinOp {
+            left,
+            op,
+            right,
+            range: expr_range,
+        }) => {
             if matches!(op, Operator::MatMult) {
                 let left_shape = lookup_shape(left, vars);
                 let right_shape = lookup_shape(right, vars);
@@ -188,24 +256,58 @@ fn infer_expr_shape(
                             None
                         }
                     },
-                    _ => {
-                        diagnostics.push(Diagnostic {
-                            range: text_range_to_lsp(*expr_range, source),
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: None,
-                            code_description: None,
-                            source: Some("shapelsp".into()),
-                            message: "Cannot infer matmul operands".into(),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
-                        None
-                    }
+                    _ => None,
                 }
             } else {
                 None
             }
+        }
+        Expr::Call(call) => {
+            if let Expr::Name(func_name) = call.func.as_ref() {
+                if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
+                    // avoid infinite recursion
+                    if call_stack.iter().any(|id| id == &func_name.id) {
+                        return None;
+                    }
+                    // build argument binding map
+                    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
+                    for (idx, param) in callee_args.args.iter().enumerate() {
+                        if let Some(arg_expr) = call.args.get(idx) {
+                            if let Some(shape) = infer_expr_shape(
+                                arg_expr,
+                                vars,
+                                func_map,
+                                call_stack,
+                                diagnostics,
+                                source,
+                            ) {
+                                arg_shapes.insert(
+                                    param.def.arg.clone(),
+                                    VarState {
+                                        annotated: None,
+                                        inferred: Some(shape),
+                                        range: text_range_to_lsp(param.def.range, source),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    call_stack.push(func_name.id.clone());
+                    let (mut diag, _, ret_shape) = simulate_function(
+                        callee_args.as_ref(),
+                        callee_body,
+                        source,
+                        func_map,
+                        call_stack,
+                        arg_shapes,
+                        false,
+                    );
+                    diagnostics.append(&mut diag);
+                    call_stack.pop();
+                    return ret_shape;
+                }
+            }
+            None
         }
         Expr::Name(expr_name) => vars
             .get(&expr_name.id)
@@ -315,6 +417,67 @@ fn name_from_expr(expr: &Expr) -> Option<Identifier> {
     }
 }
 
+fn seed_args_from_annotations(
+    args: &Arguments,
+    source: &str,
+    vars: &mut HashMap<Identifier, VarState>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    diagnostics: &mut Vec<Diagnostic>,
+    provided: Option<&mut HashMap<Identifier, VarState>>,
+    record_hovers: bool,
+) {
+    for arg in &args.args {
+        let ann_shape = arg
+            .def
+            .annotation
+            .as_ref()
+            .and_then(|expr| parse_shape_annotation(expr.as_ref()));
+        let range = text_range_to_lsp(arg.def.range, source);
+        let mut provided_state = provided
+            .as_ref()
+            .and_then(|p| p.get(&arg.def.arg))
+            .cloned();
+
+        if let (Some(ann), Some(inf_state)) =
+            (ann_shape.clone(), provided_state.as_ref().and_then(|s| s.inferred.clone()))
+        {
+            if ann.dims != inf_state.dims {
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapelsp".into()),
+                    message: format!(
+                        "Shape mismatch: annotation {} vs inferred {}",
+                        ann.render(),
+                        inf_state.render()
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+
+        let state = VarState {
+            annotated: ann_shape.clone(),
+            inferred: provided_state
+                .take()
+                .and_then(|s| s.inferred)
+                .or(None),
+            range,
+        };
+
+        if state.annotated.is_some() || state.inferred.is_some() {
+            vars.insert(arg.def.arg.clone(), state.clone());
+            if record_hovers {
+                hover_entries.push((range, HoverInfo { shape: state.annotated.or(state.inferred) }));
+            }
+        }
+    }
+}
+
 fn text_range_to_lsp(range: TextRange, source: &str) -> Range {
     Range {
         start: offset_to_position(source, range.start().to_usize()),
@@ -369,7 +532,8 @@ impl Analysis {
 fn within(range: &Range, pos: &Position) -> bool {
     (pos.line > range.start.line
         || (pos.line == range.start.line && pos.character >= range.start.character))
-        && (pos.line < range.end.line || (pos.line == range.end.line && pos.character <= range.end.character))
+        && (pos.line < range.end.line
+            || (pos.line == range.end.line && pos.character <= range.end.character))
 }
 
 #[cfg(test)]
@@ -432,8 +596,37 @@ mod tests {
                 break;
             }
         }
-        let hover = analysis.hover(Position { line: line_idx, character: col_idx }).expect("hover info");
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
         assert_eq!(shape.render(), "B S");
+    }
+
+    #[test]
+    fn test_hover_inferred_shape_from_caller_to_callee() {
+        let src = extract_test_case(5);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 0);
+        let mut line_idx = 0u32;
+        let mut col_idx = 0u32;
+        for (idx, line) in src.lines().enumerate() {
+            if let Some(pos) = line.find("z =") {
+                line_idx = idx as u32;
+                col_idx = pos as u32;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.render(), "B O");
     }
 }
