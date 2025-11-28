@@ -51,5 +51,6 @@ def hovering_with_inference_on_arg_should_return_inferred_shape():
 
 
 def multiply_child_unnanotated(x, y):
-    z = x @ y
-    return z 
+    mat_mul_result = x @ y
+    return mat_mul_result
+

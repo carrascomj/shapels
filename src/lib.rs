@@ -1,7 +1,7 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt};
-use rustpython_parser::parse_program;
-use rustpython_parser::text_size::TextRange;
+use rustpython_parser::Parse;
+use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt, Suite};
+use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +36,7 @@ struct VarState {
 
 pub fn analyze_source(source: &str) -> Analysis {
     let mut analysis = Analysis::default();
-    match parse_program(source, "<memory>") {
+    match Suite::parse(source, "<memory>") {
         Ok(module) => {
             // collect function definitions first
             let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
@@ -48,8 +48,13 @@ pub fn analyze_source(source: &str) -> Analysis {
 
             for stmt in module {
                 if let Stmt::FunctionDef(func) = stmt {
-                    let mut func_analysis =
-                        analyze_function(&func.args, &func.body, source, &func_map, &mut Vec::new());
+                    let mut func_analysis = analyze_function(
+                        &func.args,
+                        &func.body,
+                        source,
+                        &func_map,
+                        &mut Vec::new(),
+                    );
                     analysis.diagnostics.append(&mut func_analysis.diagnostics);
                     analysis
                         .hover_entries
@@ -127,7 +132,7 @@ fn simulate_function(
             Stmt::AnnAssign(assign) => {
                 if let Some(name) = name_from_expr(&assign.target) {
                     let ann_shape = parse_shape_annotation(&assign.annotation);
-                    let range = text_range_to_lsp(assign.range, source);
+                    let range = text_range_to_lsp(expr_text_range(&assign.target), source);
                     let mut inferred = None;
                     if let Some(val) = &assign.value {
                         inferred = infer_expr_shape(
@@ -136,6 +141,8 @@ fn simulate_function(
                             func_map,
                             call_stack,
                             &mut diagnostics,
+                            &mut hover_entries,
+                            record_hovers,
                             source,
                         );
                     }
@@ -177,13 +184,15 @@ fn simulate_function(
             Stmt::Assign(assign) => {
                 if assign.targets.len() == 1 {
                     if let Some(name) = name_from_expr(&assign.targets[0]) {
-                        let range = text_range_to_lsp(assign.range, source);
+                        let range = text_range_to_lsp(expr_text_range(&assign.targets[0]), source);
                         if let Some(shape) = infer_expr_shape(
                             &assign.value,
                             &vars,
                             func_map,
                             call_stack,
                             &mut diagnostics,
+                            &mut hover_entries,
+                            record_hovers,
                             source,
                         ) {
                             vars.insert(
@@ -209,8 +218,17 @@ fn simulate_function(
                         func_map,
                         call_stack,
                         &mut diagnostics,
+                        &mut hover_entries,
+                        record_hovers,
                         source,
                     )
+                    .or(return_shape);
+                    if record_hovers {
+                        if let Some(shape) = return_shape.clone() {
+                            let range = text_range_to_lsp(expr_text_range(val), source);
+                            hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                        }
+                    }
                 }
             }
             _ => {}
@@ -226,6 +244,8 @@ fn infer_expr_shape(
     func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
     source: &str,
 ) -> Option<Shape> {
     match expr {
@@ -236,8 +256,8 @@ fn infer_expr_shape(
             range: expr_range,
         }) => {
             if matches!(op, Operator::MatMult) {
-                let left_shape = lookup_shape(left, vars);
-                let right_shape = lookup_shape(right, vars);
+                let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source);
+                let right_shape = lookup_shape(right, vars, hover_entries, record_hovers, source);
                 match (left_shape, right_shape) {
                     (Some(l), Some(r)) => match infer_matmul(&l, &r) {
                         Ok(shape) => Some(shape),
@@ -279,6 +299,8 @@ fn infer_expr_shape(
                                 func_map,
                                 call_stack,
                                 diagnostics,
+                                hover_entries,
+                                record_hovers,
                                 source,
                             ) {
                                 arg_shapes.insert(
@@ -293,7 +315,7 @@ fn infer_expr_shape(
                         }
                     }
                     call_stack.push(func_name.id.clone());
-                    let (mut diag, _, ret_shape) = simulate_function(
+                    let (mut diag, mut hovers, ret_shape) = simulate_function(
                         callee_args.as_ref(),
                         callee_body,
                         source,
@@ -303,15 +325,27 @@ fn infer_expr_shape(
                         false,
                     );
                     diagnostics.append(&mut diag);
+                    if record_hovers {
+                        hover_entries.append(&mut hovers);
+                    }
                     call_stack.pop();
                     return ret_shape;
                 }
             }
             None
         }
-        Expr::Name(expr_name) => vars
-            .get(&expr_name.id)
-            .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone())),
+        Expr::Name(expr_name) => {
+            let shape = vars
+                .get(&expr_name.id)
+                .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
+            if record_hovers {
+                if let Some(s) = shape.clone() {
+                    let range = text_range_to_lsp(expr_text_range(expr), source);
+                    hover_entries.push((range, HoverInfo { shape: Some(s) }));
+                }
+            }
+            shape
+        }
         _ => None,
     }
 }
@@ -337,11 +371,26 @@ fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
     })
 }
 
-fn lookup_shape(expr: &Expr, vars: &HashMap<Identifier, VarState>) -> Option<Shape> {
+fn lookup_shape(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+) -> Option<Shape> {
     match expr {
-        Expr::Name(expr_name) => vars
-            .get(&expr_name.id)
-            .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone())),
+        Expr::Name(expr_name) => {
+            let shape = vars
+                .get(&expr_name.id)
+                .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
+            if record_hovers {
+                if let Some(s) = shape.clone() {
+                    let range = text_range_to_lsp(expr_text_range(expr), source);
+                    hover_entries.push((range, HoverInfo { shape: Some(s) }));
+                }
+            }
+            shape
+        }
         _ => None,
     }
 }
@@ -402,10 +451,6 @@ fn string_literal_value(expr: &Expr) -> Option<String> {
 
 fn normalize_shape_tokens(raw: &str) -> Vec<String> {
     raw.split_whitespace()
-        .filter(|token| {
-            let t = token.trim_matches('"');
-            !matches!(t, "x" | "X" | "*")
-        })
         .map(|s| s.trim_matches('"').to_string())
         .collect()
 }
@@ -433,14 +478,12 @@ fn seed_args_from_annotations(
             .as_ref()
             .and_then(|expr| parse_shape_annotation(expr.as_ref()));
         let range = text_range_to_lsp(arg.def.range, source);
-        let mut provided_state = provided
-            .as_ref()
-            .and_then(|p| p.get(&arg.def.arg))
-            .cloned();
+        let mut provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg)).cloned();
 
-        if let (Some(ann), Some(inf_state)) =
-            (ann_shape.clone(), provided_state.as_ref().and_then(|s| s.inferred.clone()))
-        {
+        if let (Some(ann), Some(inf_state)) = (
+            ann_shape.clone(),
+            provided_state.as_ref().and_then(|s| s.inferred.clone()),
+        ) {
             if ann.dims != inf_state.dims {
                 diagnostics.push(Diagnostic {
                     range,
@@ -462,17 +505,19 @@ fn seed_args_from_annotations(
 
         let state = VarState {
             annotated: ann_shape.clone(),
-            inferred: provided_state
-                .take()
-                .and_then(|s| s.inferred)
-                .or(None),
+            inferred: provided_state.take().and_then(|s| s.inferred).or(None),
             range,
         };
 
         if state.annotated.is_some() || state.inferred.is_some() {
             vars.insert(arg.def.arg.clone(), state.clone());
             if record_hovers {
-                hover_entries.push((range, HoverInfo { shape: state.annotated.or(state.inferred) }));
+                hover_entries.push((
+                    range,
+                    HoverInfo {
+                        shape: state.annotated.or(state.inferred),
+                    },
+                ));
             }
         }
     }
@@ -482,6 +527,20 @@ fn text_range_to_lsp(range: TextRange, source: &str) -> Range {
     Range {
         start: offset_to_position(source, range.start().to_usize()),
         end: offset_to_position(source, range.end().to_usize()),
+    }
+}
+
+fn expr_text_range(expr: &Expr) -> TextRange {
+    match expr {
+        Expr::Name(n) => n.range,
+        Expr::BinOp(b) => b.range,
+        Expr::Call(c) => c.range,
+        Expr::Subscript(s) => s.range,
+        Expr::Attribute(a) => a.range,
+        Expr::Constant(c) => c.range,
+        Expr::JoinedStr(j) => j.range,
+        Expr::Tuple(t) => t.range,
+        _ => TextRange::new(TextSize::from(0), TextSize::from(0)),
     }
 }
 
@@ -522,10 +581,30 @@ fn default_range() -> Range {
 
 impl Analysis {
     pub fn hover(&self, position: Position) -> Option<&HoverInfo> {
-        self.hover_entries
+        // Prefer exact containment with smallest span.
+        if let Some((_, info)) = self
+            .hover_entries
             .iter()
-            .find(|(range, _)| within(range, &position))
-            .map(|(_, info)| info)
+            .filter(|(range, _)| within(range, &position))
+            .min_by_key(|(range, _)| range_span(range, &position))
+        {
+            return Some(info);
+        }
+
+        // Fallback: nearest entry on the same line to the left.
+        if let Some((_, info)) = self
+            .hover_entries
+            .iter()
+            .filter(|(range, _)| range.start.line == position.line)
+            .min_by_key(|(range, _)| {
+                let a = range.start.character as i64;
+                let b = position.character as i64;
+                (a - b).abs()
+            })
+        {
+            return Some(info);
+        }
+        None
     }
 }
 
@@ -534,6 +613,17 @@ fn within(range: &Range, pos: &Position) -> bool {
         || (pos.line == range.start.line && pos.character >= range.start.character))
         && (pos.line < range.end.line
             || (pos.line == range.end.line && pos.character <= range.end.character))
+}
+
+fn range_span(range: &Range, _pos: &Position) -> u32 {
+    // Prioritize entries that wrap the position tightly.
+    let line_span = (range.end.line as i64 - range.start.line as i64).abs() as u32;
+    let char_span = if range.start.line == range.end.line {
+        (range.end.character as i64 - range.start.character as i64).abs() as u32
+    } else {
+        1000
+    };
+    line_span * 1000 + char_span
 }
 
 #[cfg(test)]
@@ -587,6 +677,7 @@ mod tests {
         let src = extract_test_case(4);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
+        eprintln!("hover count {}", analysis.hover_entries.len());
         let mut line_idx = 0u32;
         let mut col_idx = 0u32;
         for (idx, line) in src.lines().enumerate() {
@@ -628,5 +719,54 @@ mod tests {
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
         assert_eq!(shape.render(), "B O");
+    }
+
+    #[test]
+    fn test_hover_infer_shape_on_return() {
+        let src = extract_test_case(1);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 0);
+        let mut line_idx = 0u32;
+        let mut col_idx = 0u32;
+        for (idx, line) in src.lines().enumerate() {
+            if let Some(pos) = line.find("return z") {
+                line_idx = idx as u32;
+                col_idx = pos as u32 + 7;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.render(), "B S");
+    }
+
+    #[test]
+    fn test_hover_infer_shape_same_stack_with_other_variables() {
+        let src = extract_test_case(5);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 0);
+        let mut line_idx = 0u32;
+        let mut col_idx = 0u32;
+        for (idx, line) in src.lines().enumerate() {
+            // this is the first x, inside the parent function (early break)
+            if let Some(pos) = line.find("x,") {
+                line_idx = idx as u32;
+                col_idx = pos as u32 - 1;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.render(), "B X R");
     }
 }
