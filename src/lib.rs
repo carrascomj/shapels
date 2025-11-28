@@ -362,9 +362,9 @@ fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
             left_inner, right_inner
         ));
     }
-    let mut dims = Vec::new();
-    dims.push(left.dims.first().unwrap().clone());
-    dims.push(right.dims.last().unwrap().clone());
+    // batch dims: keep all left dims except the last, then all right dims except the first
+    let mut dims: Vec<String> = left.dims[..left.dims.len() - 1].to_vec();
+    dims.extend_from_slice(&right.dims[1..]);
     Ok(Shape {
         dtype: left.dtype.clone().or(right.dtype.clone()),
         dims,
@@ -666,10 +666,10 @@ mod tests {
     }
 
     #[test]
-    fn test_alias_annotation_produces_diag() {
+    fn test_alias_annotation_does_not_produce_diag() {
         let src = extract_test_case(3);
         let analysis = analyze_source(&src);
-        assert!(!analysis.diagnostics.is_empty());
+        assert!(analysis.diagnostics.is_empty());
     }
 
     #[test]
@@ -694,7 +694,7 @@ mod tests {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "B S");
+        assert_eq!(shape.render(), "B X S");
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "B O");
+        assert_eq!(shape.render(), "B X O");
     }
 
     #[test]
@@ -742,7 +742,7 @@ mod tests {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "B S");
+        assert_eq!(shape.render(), "B X S");
     }
 
     #[test]
