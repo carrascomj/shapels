@@ -1,0 +1,36 @@
+# test 1
+import jaxtyping
+import torch
+
+def proper_multiply_not_produce_diagnostics(x: jaxtyping.Float[torch.Tensor, "B X R"], y: jaxtyping.Float[torch.Tensor, "R S"]) -> jaxtyping.Float[torch.Tensor, "B S"]:
+    z = x @ y 
+    return z 
+
+# test 2
+import jaxtyping
+import torch
+
+def proper_multiply_bad_annotation_should_produce_diagnostics(x: jaxtyping.Float[torch.Tensor, "B X R"], y: jaxtyping.Float[torch.Tensor, "R S"]) -> jaxtyping.Float[torch.Tensor, "B S"]:
+    z: jaxtyping.Float[torch.Tensor, "B X R"] = x @ y
+    return z 
+
+
+
+# test 3
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def proper_multiply_should_not_produce_diagnostics_with_import_aliases(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B S"]:
+    z: F[T, "B X R"] = x @ y
+    return z
+
+
+
+# test 4
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def hover_on_inferred_should_work(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B S"]:
+    # hovering z should return [F, `B S`]
+    z = x @ y
+    return z 
