@@ -2,10 +2,11 @@ use lsp_server::{Connection, Message, Request, Response};
 use lsp_types::{
     notification::PublishDiagnostics,
     request::{DocumentDiagnosticRequest, HoverRequest},
-    DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    FullDocumentDiagnosticReport, Hover, HoverContents, HoverParams, HoverProviderCapability, MarkupContent,
-    MarkupKind, PublishDiagnosticsParams, RelatedFullDocumentDiagnosticReport, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, FullDocumentDiagnosticReport, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, MarkupContent, MarkupKind, PublishDiagnosticsParams,
+    RelatedFullDocumentDiagnosticReport, ServerCapabilities, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Url,
 };
 use serde_json;
 use shapelsp::analyze_source;
@@ -42,8 +43,9 @@ fn main() {
             Message::Notification(notif) => {
                 match notif.method.as_str() {
                     "textDocument/didOpen" => {
-                        if let Ok(params) =
-                            serde_json::from_value::<lsp_types::DidOpenTextDocumentParams>(notif.params.clone())
+                        if let Ok(params) = serde_json::from_value::<
+                            lsp_types::DidOpenTextDocumentParams,
+                        >(notif.params.clone())
                         {
                             let uri = params.text_document.uri.clone();
                             documents.insert(uri.clone(), params.text_document.text);
@@ -51,8 +53,9 @@ fn main() {
                         }
                     }
                     "textDocument/didChange" => {
-                        if let Ok(params) =
-                            serde_json::from_value::<lsp_types::DidChangeTextDocumentParams>(notif.params.clone())
+                        if let Ok(params) = serde_json::from_value::<
+                            lsp_types::DidChangeTextDocumentParams,
+                        >(notif.params.clone())
                         {
                             if let Some(first) = params.content_changes.first() {
                                 let uri = params.text_document.uri.clone();
@@ -72,11 +75,7 @@ fn main() {
     io_threads.join().expect("Failed to join IO threads");
 }
 
-fn handle_request(
-    req: &Request,
-    connection: &Connection,
-    documents: &mut HashMap<Url, String>,
-) {
+fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMap<Url, String>) {
     match req.method.as_str() {
         <HoverRequest as lsp_types::request::Request>::METHOD => {
             let id = req.id.clone();
@@ -88,11 +87,12 @@ fn handle_request(
                 analysis.hover(pos).and_then(|info| {
                     info.shape.as_ref().map(|shape| Hover {
                         contents: HoverContents::Markup(MarkupContent {
-                            kind: MarkupKind::PlainText,
-                            value: match &shape.dtype {
-                                Some(dt) => format!("dtype: {dt}\nshape: {}", shape.render()),
-                                None => format!("shape: {}", shape.render()),
-                            },
+                            kind: MarkupKind::Markdown,
+                            value: format!(
+                                "`[{}]`: {}",
+                                shape.render(),
+                                shape.dtype.as_ref().map(|s| s.as_str()).unwrap_or("")
+                            ),
                         }),
                         range: None,
                     })
@@ -103,7 +103,8 @@ fn handle_request(
         }
         <DocumentDiagnosticRequest as lsp_types::request::Request>::METHOD => {
             let id = req.id.clone();
-            let params: DocumentDiagnosticParams = serde_json::from_value(req.params.clone()).unwrap();
+            let params: DocumentDiagnosticParams =
+                serde_json::from_value(req.params.clone()).unwrap();
             let uri = params.text_document.uri;
             let diagnostics = documents
                 .get(&uri)
