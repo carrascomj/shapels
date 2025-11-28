@@ -1,15 +1,15 @@
 use lsp_server::{Connection, Message, Request, Response};
 use lsp_types::{
-    notification::PublishDiagnostics,
-    request::{DocumentDiagnosticRequest, HoverRequest},
     DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
     DocumentDiagnosticReport, FullDocumentDiagnosticReport, Hover, HoverContents, HoverParams,
     HoverProviderCapability, MarkupContent, MarkupKind, PublishDiagnosticsParams,
     RelatedFullDocumentDiagnosticReport, ServerCapabilities, TextDocumentSyncCapability,
     TextDocumentSyncKind, Url,
+    notification::PublishDiagnostics,
+    request::{DocumentDiagnosticRequest, HoverRequest},
 };
 use serde_json;
-use shapelsp::analyze_source;
+use shapels::analyze_source;
 use std::collections::HashMap;
 
 fn main() {
