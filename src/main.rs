@@ -12,6 +12,9 @@ use serde_json;
 use shapels::analyze_source;
 use std::collections::HashMap;
 
+#[cfg(test)]
+mod tests;
+
 fn main() {
     let (connection, io_threads) = Connection::stdio();
 
@@ -91,7 +94,7 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
                             value: format!(
                                 "`[{}]`: {}",
                                 shape.render(),
-                                shape.dtype.as_ref().map(|s| s.as_str()).unwrap_or("")
+                                shape.dtype.as_deref().unwrap_or("")
                             ),
                         }),
                         range: None,
