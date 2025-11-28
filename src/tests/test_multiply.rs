@@ -122,3 +122,53 @@ fn test_hover_infer_shape_same_stack_with_other_variables() {
     let shape = hover.shape.as_ref().unwrap();
     assert_eq!(shape.render(), "B X R");
 }
+
+#[test]
+fn test_hover_inferred_shape_from_caller_to_callee_torchmm() {
+    let src = extract_test_case(PY_DATA, 6);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    let mut line_idx = 0u32;
+    let mut col_idx = 0u32;
+    for (idx, line) in src.lines().enumerate() {
+        if let Some(pos) = line.find("z =") {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+            break;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect("hover info");
+    let shape = hover.shape.as_ref().unwrap();
+    assert_eq!(shape.render(), "B X O");
+}
+
+#[test]
+fn test_hover_inferred_shape_from_caller_to_callee_mm() {
+    let src = extract_test_case(PY_DATA, 7);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    let mut line_idx = 0u32;
+    let mut col_idx = 0u32;
+    for (pat, offset) in [("z =", 0), ("return z", 7)] {
+        for (idx, line) in src.lines().enumerate() {
+            if let Some(pos) = line.find(pat) {
+                line_idx = idx as u32;
+                col_idx = pos as u32 + offset;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.render(), "B X O");
+    }
+}

@@ -1,8 +1,10 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-use rustpython_parser::Parse;
 use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt, Suite};
 use rustpython_parser::text_size::{TextRange, TextSize};
-use std::collections::HashMap;
+use rustpython_parser::Parse;
+use std::collections::{HashMap, HashSet};
+mod ops;
+use ops::infer_matmul;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -34,10 +36,17 @@ struct VarState {
     range: Range,
 }
 
+#[derive(Default)]
+struct Imports {
+    torch_aliases: HashSet<Identifier>,
+    mm_aliases: HashSet<Identifier>,
+}
+
 pub fn analyze_source(source: &str) -> Analysis {
     let mut analysis = Analysis::default();
     match Suite::parse(source, "<memory>") {
         Ok(module) => {
+            let imports = collect_imports(&module);
             // collect function definitions first
             let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
             for stmt in &module {
@@ -53,6 +62,7 @@ pub fn analyze_source(source: &str) -> Analysis {
                         &func.body,
                         source,
                         &func_map,
+                        &imports,
                         &mut Vec::new(),
                     );
                     analysis.diagnostics.append(&mut func_analysis.diagnostics);
@@ -84,6 +94,7 @@ fn analyze_function(
     body: &[Stmt],
     source: &str,
     func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
     call_stack: &mut Vec<Identifier>,
 ) -> Analysis {
     let (diagnostics, hover_entries, _) = simulate_function(
@@ -91,6 +102,7 @@ fn analyze_function(
         body,
         source,
         func_map,
+        imports,
         call_stack,
         HashMap::new(),
         true,
@@ -107,6 +119,7 @@ fn simulate_function(
     body: &[Stmt],
     source: &str,
     func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     mut initial_vars: HashMap<Identifier, VarState>,
     record_hovers: bool,
@@ -139,6 +152,7 @@ fn simulate_function(
                             val,
                             &vars,
                             func_map,
+                            imports,
                             call_stack,
                             &mut diagnostics,
                             &mut hover_entries,
@@ -189,6 +203,7 @@ fn simulate_function(
                             &assign.value,
                             &vars,
                             func_map,
+                            imports,
                             call_stack,
                             &mut diagnostics,
                             &mut hover_entries,
@@ -216,6 +231,7 @@ fn simulate_function(
                         val,
                         &vars,
                         func_map,
+                        imports,
                         call_stack,
                         &mut diagnostics,
                         &mut hover_entries,
@@ -242,6 +258,7 @@ fn infer_expr_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
     func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -256,34 +273,35 @@ fn infer_expr_shape(
             range: expr_range,
         }) => {
             if matches!(op, Operator::MatMult) {
-                let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source);
-                let right_shape = lookup_shape(right, vars, hover_entries, record_hovers, source);
-                match (left_shape, right_shape) {
-                    (Some(l), Some(r)) => match infer_matmul(&l, &r) {
-                        Ok(shape) => Some(shape),
-                        Err(msg) => {
-                            diagnostics.push(Diagnostic {
-                                range: text_range_to_lsp(*expr_range, source),
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                code: None,
-                                code_description: None,
-                                source: Some("shapels".into()),
-                                message: msg,
-                                related_information: None,
-                                tags: None,
-                                data: None,
-                            });
-                            None
-                        }
-                    },
-                    _ => None,
-                }
-            } else {
-                None
+                return infer_matmul_shapes(
+                    left,
+                    right,
+                    vars,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    *expr_range,
+                );
             }
+            None
         }
         Expr::Call(call) => {
             if let Expr::Name(func_name) = call.func.as_ref() {
+                if imports.mm_aliases.contains(&func_name.id) {
+                    if let (Some(arg0), Some(arg1)) = (call.args.get(0), call.args.get(1)) {
+                        return infer_matmul_shapes(
+                            arg0,
+                            arg1,
+                            vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        );
+                    }
+                }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
                     // avoid infinite recursion
                     if call_stack.iter().any(|id| id == &func_name.id) {
@@ -297,6 +315,7 @@ fn infer_expr_shape(
                                 arg_expr,
                                 vars,
                                 func_map,
+                                imports,
                                 call_stack,
                                 diagnostics,
                                 hover_entries,
@@ -320,6 +339,7 @@ fn infer_expr_shape(
                         callee_body,
                         source,
                         func_map,
+                        imports,
                         call_stack,
                         arg_shapes,
                         false,
@@ -330,6 +350,26 @@ fn infer_expr_shape(
                     }
                     call_stack.pop();
                     return ret_shape;
+                }
+            }
+            // torch.mm(x, y)
+            if let Expr::Attribute(attr) = call.func.as_ref() {
+                let attr_name: &str = attr.attr.as_ref();
+                if attr_name == "mm" && is_torch_base(&attr.value, imports) {
+                    if let Some(arg0) = call.args.get(0) {
+                        if let Some(arg1) = call.args.get(1) {
+                            return infer_matmul_shapes(
+                                arg0,
+                                arg1,
+                                vars,
+                                diagnostics,
+                                hover_entries,
+                                record_hovers,
+                                source,
+                                call.range,
+                            );
+                        }
+                    }
                 }
             }
             None
@@ -350,25 +390,38 @@ fn infer_expr_shape(
     }
 }
 
-fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
-    if left.dims.is_empty() || right.dims.is_empty() {
-        return Err("Matmul requires both operands to have shapes".into());
+fn infer_matmul_shapes(
+    left: &Expr,
+    right: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source);
+    let right_shape = lookup_shape(right, vars, hover_entries, record_hovers, source);
+    match (left_shape, right_shape) {
+        (Some(l), Some(r)) => match infer_matmul(&l, &r) {
+            Ok(shape) => Some(shape),
+            Err(msg) => {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: msg,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                None
+            }
+        },
+        _ => None,
     }
-    let left_inner = left.dims.last().unwrap();
-    let right_inner = right.dims.first().unwrap();
-    if left_inner != right_inner {
-        return Err(format!(
-            "Matmul inner dimensions mismatch: {} vs {}",
-            left_inner, right_inner
-        ));
-    }
-    // batch dims: keep all left dims except the last, then all right dims except the first
-    let mut dims: Vec<String> = left.dims[..left.dims.len() - 1].to_vec();
-    dims.extend_from_slice(&right.dims[1..]);
-    Ok(Shape {
-        dtype: left.dtype.clone().or(right.dtype.clone()),
-        dims,
-    })
 }
 
 fn lookup_shape(
@@ -393,6 +446,49 @@ fn lookup_shape(
         }
         _ => None,
     }
+}
+
+fn is_torch_base(expr: &Expr, imports: &Imports) -> bool {
+    match expr {
+        Expr::Name(n) => n.id.to_string() == "torch" || imports.torch_aliases.contains(&n.id),
+        _ => false,
+    }
+}
+
+fn collect_imports(module: &[Stmt]) -> Imports {
+    let mut imports = Imports::default();
+    for stmt in module {
+        match stmt {
+            Stmt::Import(import) => {
+                for alias in &import.names {
+                    if alias.name.to_string() == "torch" {
+                        let alias_id = alias
+                            .asname
+                            .clone()
+                            .unwrap_or_else(|| Identifier::from("torch".to_string()));
+                        imports.torch_aliases.insert(alias_id);
+                    }
+                }
+            }
+            Stmt::ImportFrom(f) => {
+                if let Some(module) = &f.module {
+                    if module.to_string() == "torch" {
+                        for alias in &f.names {
+                            if alias.name.to_string() == "mm" {
+                                let id = alias
+                                    .asname
+                                    .clone()
+                                    .unwrap_or_else(|| Identifier::from("mm".to_string()));
+                                imports.mm_aliases.insert(id);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    imports
 }
 
 fn parse_shape_annotation(expr: &Expr) -> Option<Shape> {

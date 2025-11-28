@@ -54,3 +54,42 @@ def multiply_child_unnanotated(x, y):
     mat_mul_result = x @ y
     return mat_mul_result
 
+
+# test 6
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+
+def hovering_with_inference_on_arg_with_torch_mm():
+    B, X, R, O = 4, 8, 16, 32
+    x: F[T, "B X R"] = torch.Tensor(B, X, R)
+    y: F[T, "R O"] = torch.Tensor(R, O)
+    # hovering z should return [F, "B X O"]
+    z = multiply_child_unnanotated_torch_mm(x, y)
+    return z
+
+
+def multiply_child_unnanotated_torch_mm(x, y):
+    mat_mul_result = torch.mm(x, y)
+    return mat_mul_result
+
+
+
+# test 7
+from torch import mm as whatever
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+
+def hovering_with_inference_on_arg_with_mm():
+    B, X, R, O = 4, 2, 16, 8
+    x: F[T, "B X R"] = torch.Tensor(B, X, R)
+    y: F[T, "R O"] = torch.Tensor(R, O)
+    # hovering z should return [F, "B X O"]
+    z = multiply_child_unnanotated_torch_mm_aliased(x, y)
+    return z
+
+
+def multiply_child_unnanotated_torch_mm_aliased(x, y):
+    mat_mul_result = whatever(x, y)
+    return mat_mul_result
