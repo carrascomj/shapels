@@ -162,7 +162,7 @@ fn simulate_function(
                         );
                     }
                     if let (Some(ann), Some(inf)) = (ann_shape.clone(), inferred.clone()) {
-                        if ann.dims != inf.dims {
+                        if !shape_dims_equal(&ann, &inf) {
                             diagnostics.push(Diagnostic {
                                 range,
                                 severity: Some(DiagnosticSeverity::ERROR),
@@ -200,7 +200,7 @@ fn simulate_function(
                 if assign.targets.len() == 1 {
                     if let Some(name) = name_from_expr(&assign.targets[0]) {
                         let range = text_range_to_lsp(expr_text_range(&assign.targets[0]), source);
-                        if let Some(shape) = infer_expr_shape(
+                        let mut shape = infer_expr_shape(
                             &assign.value,
                             &vars,
                             func_map,
@@ -210,7 +210,45 @@ fn simulate_function(
                             &mut hover_entries,
                             record_hovers,
                             source,
-                        ) {
+                        );
+                        // fallback for squeeze/unsqueeze when inference failed
+                        if shape.is_none() {
+                            if let Expr::Call(call) = &*assign.value {
+                                if let Expr::Attribute(attr) = call.func.as_ref() {
+                                    let attr_name: &str = attr.attr.as_ref();
+                                    if attr_name == "squeeze" {
+                                        shape = infer_squeeze(
+                                            &attr.value,
+                                            call.args.get(0),
+                                            &vars,
+                                            func_map,
+                                            imports,
+                                            call_stack,
+                                            &mut diagnostics,
+                                            &mut hover_entries,
+                                            record_hovers,
+                                            source,
+                                            call.range,
+                                        );
+                                    } else if attr_name == "unsqueeze" {
+                                        shape = infer_unsqueeze(
+                                            &attr.value,
+                                            call.args.get(0),
+                                            &vars,
+                                            func_map,
+                                            imports,
+                                            call_stack,
+                                            &mut diagnostics,
+                                            &mut hover_entries,
+                                            record_hovers,
+                                            source,
+                                            call.range,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(shape) = shape {
                             vars.insert(
                                 name.clone(),
                                 VarState {
@@ -278,6 +316,9 @@ fn infer_expr_shape(
                     left,
                     right,
                     vars,
+                    func_map,
+                    imports,
+                    call_stack,
                     diagnostics,
                     hover_entries,
                     record_hovers,
@@ -295,6 +336,9 @@ fn infer_expr_shape(
                             arg0,
                             arg1,
                             vars,
+                            func_map,
+                            imports,
+                            call_stack,
                             diagnostics,
                             hover_entries,
                             record_hovers,
@@ -312,6 +356,40 @@ fn infer_expr_shape(
                             arg0,
                             &args,
                             vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        );
+                    }
+                }
+                if is_alias_of("unsqueeze", &func_name.id, imports) {
+                    if let Some(arg0) = call.args.get(0) {
+                        return infer_unsqueeze(
+                            arg0,
+                            call.args.get(1),
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        );
+                    }
+                }
+                if is_alias_of("squeeze", &func_name.id, imports) {
+                    if let Some(arg0) = call.args.get(0) {
+                        return infer_squeeze(
+                            arg0,
+                            call.args.get(1),
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
                             diagnostics,
                             hover_entries,
                             record_hovers,
@@ -370,7 +448,6 @@ fn infer_expr_shape(
                     return ret_shape;
                 }
             }
-            // torch.mm(x, y)
             if let Expr::Attribute(attr) = call.func.as_ref() {
                 let attr_name: &str = attr.attr.as_ref();
                 if attr_name == "mm" && is_torch_base(&attr.value, imports) {
@@ -380,6 +457,9 @@ fn infer_expr_shape(
                                 arg0,
                                 arg1,
                                 vars,
+                                func_map,
+                                imports,
+                                call_stack,
                                 diagnostics,
                                 hover_entries,
                                 record_hovers,
@@ -389,15 +469,44 @@ fn infer_expr_shape(
                         }
                     }
                 }
-                if (attr_name == "view" || attr_name == "reshape")
-                    && lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
+                if attr_name == "view" || attr_name == "reshape" {
+                    if lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
                         .is_some()
-                {
-                    let args = call.args.iter().collect::<Vec<_>>();
-                    return infer_view_like(
+                    {
+                        let args = call.args.iter().collect::<Vec<_>>();
+                        return infer_view_like(
+                            &attr.value,
+                            &args,
+                            vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        );
+                    }
+                } else if attr_name == "unsqueeze" {
+                    return infer_unsqueeze(
                         &attr.value,
-                        &args,
+                        call.args.get(0),
                         vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
+                } else if attr_name == "squeeze" {
+                    return infer_squeeze(
+                        &attr.value,
+                        call.args.get(0),
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
                         diagnostics,
                         hover_entries,
                         record_hovers,
@@ -428,14 +537,42 @@ fn infer_matmul_shapes(
     left: &Expr,
     right: &Expr,
     vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
     whole_range: TextRange,
 ) -> Option<Shape> {
-    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source);
-    let right_shape = lookup_shape(right, vars, hover_entries, record_hovers, source);
+    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
+        infer_expr_shape(
+            left,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            false,
+            source,
+        )
+    });
+    let right_shape =
+        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
+            infer_expr_shape(
+                right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+            )
+        });
     match (left_shape, right_shape) {
         (Some(l), Some(r)) => match infer_matmul(&l, &r) {
             Ok(shape) => Some(shape),
@@ -456,6 +593,10 @@ fn infer_matmul_shapes(
         },
         _ => None,
     }
+}
+
+fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
+    flatten_dims(&a.dims) == flatten_dims(&b.dims)
 }
 
 fn infer_view_like(
@@ -595,6 +736,118 @@ fn flatten_dims(dims: &[String]) -> Vec<String> {
 
 fn split_dim(dim: &str) -> Vec<String> {
     dim.split('*').map(|s| s.to_string()).collect()
+}
+
+fn normalize_dim_index_unsqueeze(idx: i64, len: usize) -> Option<usize> {
+    let size = len + 1;
+    let adj = if idx >= 0 { idx } else { size as i64 + idx };
+    if adj >= 0 && (adj as usize) < size {
+        Some(adj as usize)
+    } else {
+        None
+    }
+}
+
+fn normalize_dim_index_squeeze(idx: i64, len: usize) -> Option<usize> {
+    let size = len;
+    let adj = if idx >= 0 { idx } else { size as i64 + idx };
+    if adj >= 0 && (adj as usize) < size {
+        Some(adj as usize)
+    } else {
+        None
+    }
+}
+
+fn infer_unsqueeze(
+    base_expr: &Expr,
+    dim_arg: Option<&Expr>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    let base_shape = infer_expr_shape(
+        base_expr,
+        vars,
+        func_map,
+        imports,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+    )?;
+    let dim = dim_arg.and_then(expr_to_dim_token)?;
+    let dim_i: i64 = dim.parse().ok()?;
+    let idx = normalize_dim_index_unsqueeze(dim_i, base_shape.dims.len())?;
+    let mut dims = base_shape.dims.clone();
+    dims.insert(idx, "1".to_string());
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims,
+    })
+}
+
+fn infer_squeeze(
+    base_expr: &Expr,
+    dim_arg: Option<&Expr>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    let base_shape = infer_expr_shape(
+        base_expr,
+        vars,
+        func_map,
+        imports,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+    )
+    .or_else(|| {
+        infer_shallow_shape(
+            base_expr,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+        )
+    })?;
+    let mut dims = base_shape.dims.clone();
+    if let Some(dim_expr) = dim_arg {
+        let dim = expr_to_dim_token(dim_expr)?;
+        let dim_i: i64 = dim.parse().ok()?;
+        let idx = normalize_dim_index_squeeze(dim_i, dims.len())
+            .unwrap_or_else(|| dims.len().saturating_sub(1));
+        if idx < dims.len() {
+            dims.remove(idx);
+        } else if !dims.is_empty() {
+            dims.pop();
+        }
+    } else {
+        dims.retain(|d| d != "1");
+    }
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims,
+    })
 }
 fn lookup_shape(
     expr: &Expr,
@@ -916,4 +1169,43 @@ fn range_span(range: &Range, _pos: &Position) -> u32 {
         1000
     };
     line_span * 1000 + char_span
+}
+
+fn infer_shallow_shape(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+) -> Option<Shape> {
+    match expr {
+        Expr::BinOp(ExprBinOp {
+            left,
+            op,
+            right,
+            range,
+        }) => {
+            if matches!(op, Operator::MatMult) {
+                return infer_matmul_shapes(
+                    left,
+                    right,
+                    vars,
+                    func_map,
+                    imports,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    *range,
+                );
+            }
+            None
+        }
+        _ => lookup_shape(expr, vars, hover_entries, record_hovers, source),
+    }
 }
