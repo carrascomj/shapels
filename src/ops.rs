@@ -1,4 +1,12 @@
-use crate::Shape;
+//! Specialized inference of `Shape`s for the various implemented operations.
+
+use crate::{HoverInfo, Imports, Shape, VarState, expr_text_range};
+use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
+use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt};
+use rustpython_parser::text_size::TextRange;
+use std::collections::HashMap;
+
+use crate::{infer_expr_shape, infer_matmul_shapes, lookup_shape, text_range_to_lsp};
 
 /// Matrix multiplication shape inference shared by `@` and `torch.mm`.
 /// Keeps all leading dims of left except the last, then appends all trailing dims of right except the first.
@@ -20,4 +28,410 @@ pub fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
         dtype: left.dtype.clone().or(right.dtype.clone()),
         dims,
     })
+}
+
+/// Shared logic for squeeze (enforce_one = true) and sum (enforce_one = false).
+pub fn infer_squeeze(
+    base_expr: &Expr,
+    dim_arg: Option<&Expr>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+    enforce_one: bool,
+) -> Option<Shape> {
+    let diag_before = diagnostics.len();
+    let base_shape = infer_expr_shape(
+        base_expr,
+        vars,
+        func_map,
+        imports,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+    )
+    .or_else(|| {
+        infer_shallow_shape(
+            base_expr,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+        )
+    })?;
+
+    // No dim specified: squeeze removes ones, sum collapses all dims.
+    if dim_arg.is_none() {
+        let mut dims = base_shape.dims.clone();
+        if enforce_one {
+            dims.retain(|d| d != "1");
+        } else {
+            dims.clear();
+        }
+        return Some(Shape {
+            dtype: base_shape.dtype.clone(),
+            dims,
+        });
+    }
+
+    let dims_to_remove =
+        match parse_dims(dim_arg.unwrap(), base_shape.dims.len(), diagnostics, source) {
+            Ok(v) => v,
+            Err(_) => return None,
+        };
+
+    let mut dims = base_shape.dims.clone();
+    for idx in dims_to_remove.into_iter().rev() {
+        if idx >= dims.len() {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: "Invalid dim".into(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            continue;
+        }
+        if enforce_one && dims.get(idx).map(|d| d != "1").unwrap_or(false) {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: "Cannot squeeze dimension not equal to 1".into(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            continue;
+        }
+        dims.remove(idx);
+    }
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims,
+    })
+    .or_else(|| {
+        if diagnostics.len() == diag_before {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: "Invalid dim".into(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+        None
+    })
+}
+
+fn infer_shallow_shape(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+) -> Option<Shape> {
+    match expr {
+        Expr::BinOp(ExprBinOp {
+            left,
+            op,
+            right,
+            range,
+        }) => {
+            if matches!(op, Operator::MatMult) {
+                return infer_matmul_shapes(
+                    left,
+                    right,
+                    vars,
+                    func_map,
+                    imports,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    *range,
+                );
+            }
+            None
+        }
+        _ => lookup_shape(expr, vars, hover_entries, record_hovers, source),
+    }
+}
+
+fn expr_to_dim_token(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::Int(i) => {
+                let s = i.to_string();
+                if s == "0" {
+                    Some("O".to_string())
+                } else {
+                    Some(s)
+                }
+            }
+            _ => None,
+        },
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::BinOp(bin) => {
+            if matches!(bin.op, Operator::Mult) {
+                let l = expr_to_dim_token(&bin.left)?;
+                let r = expr_to_dim_token(&bin.right)?;
+                Some(format!("{l}*{r}"))
+            } else {
+                None
+            }
+        }
+        Expr::UnaryOp(u) => {
+            if matches!(u.op, ast::UnaryOp::USub) {
+                if let Expr::Constant(c) = u.operand.as_ref() {
+                    if let ast::Constant::Int(i) = &c.value {
+                        let s = i.to_string();
+                        return Some(format!("-{s}"));
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn normalize_dim_index_squeeze(idx: i64, len: usize) -> Option<usize> {
+    let size = len;
+    let adj = if idx >= 0 { idx } else { size as i64 + idx };
+    if adj >= 0 && (adj as usize) < size {
+        Some(adj as usize)
+    } else {
+        None
+    }
+}
+
+fn parse_dims(
+    dim_expr: &Expr,
+    len: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Result<Vec<usize>, ()> {
+    let to_i64 = |e: &Expr| expr_to_dim_token(e).and_then(|s| s.parse::<i64>().ok());
+    let dims_i: Vec<i64> = match dim_expr {
+        Expr::Tuple(t) => t.elts.iter().filter_map(to_i64).collect(),
+        other => to_i64(other).into_iter().collect(),
+    };
+
+    if dims_i.is_empty() {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(dim_expr), source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: "Invalid dim".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return Err(());
+    }
+    let mut out = Vec::new();
+    let mut has_err = false;
+    for d in dims_i {
+        if let Some(idx) = normalize_dim_index_squeeze(d, len) {
+            out.push(idx);
+        } else {
+            has_err = true;
+            // defer diagnostic emission until after loop to ensure only one per call
+        }
+    }
+    if has_err {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(dim_expr), source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: "Invalid dim".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return Err(());
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+pub fn infer_unsqueeze(
+    base_expr: &Expr,
+    dim_arg: Option<&Expr>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+) -> Option<Shape> {
+    let base_shape = infer_expr_shape(
+        base_expr,
+        vars,
+        func_map,
+        imports,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+    )?;
+    let dim = dim_arg.and_then(expr_to_dim_token)?;
+    let dim_i: i64 = dim.parse().ok()?;
+    let idx = normalize_dim_index_unsqueeze(dim_i, base_shape.dims.len())?;
+    let mut dims = base_shape.dims.clone();
+    dims.insert(idx, "1".to_string());
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims,
+    })
+}
+
+fn normalize_dim_index_unsqueeze(idx: i64, len: usize) -> Option<usize> {
+    let size = len + 1;
+    let adj = if idx >= 0 { idx } else { size as i64 + idx };
+    if adj >= 0 && (adj as usize) < size {
+        Some(adj as usize)
+    } else {
+        None
+    }
+}
+
+pub fn infer_view_like(
+    base_expr: &Expr,
+    args: &[&Expr],
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    let base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source);
+    let target_tokens = args
+        .iter()
+        .filter_map(|e| expr_to_dim_token(e))
+        .collect::<Vec<_>>();
+    if target_tokens.is_empty() {
+        return None;
+    }
+    let res = infer_reshape_dims(base_shape.as_ref(), &target_tokens);
+    match res {
+        Ok(shape) => Some(shape),
+        Err(msg) => {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: msg,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            None
+        }
+    }
+}
+
+fn infer_reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String> {
+    let mut tokens = target.to_vec();
+    let mut minus_one_idx = None;
+    for (i, t) in tokens.iter().enumerate() {
+        if t == "-1" {
+            if minus_one_idx.is_some() {
+                return Err("Only one -1 is allowed in view/reshape".into());
+            }
+            minus_one_idx = Some(i);
+        }
+    }
+
+    if let Some(base_shape) = base {
+        let mut remaining = flatten_dims(&base_shape.dims);
+        if let Some(idx) = minus_one_idx {
+            let mut target_factors = Vec::new();
+            for t in &tokens {
+                if t == "-1" {
+                    continue;
+                }
+                let facs = split_dim(t);
+                target_factors.extend(facs);
+            }
+            for f in &target_factors {
+                if let Some(pos) = remaining.iter().position(|x| x == f) {
+                    remaining.remove(pos);
+                }
+            }
+            let inferred = if remaining.is_empty() {
+                "1".to_string()
+            } else {
+                remaining.join("*")
+            };
+            tokens[idx] = inferred;
+        }
+        return Ok(Shape {
+            dtype: base_shape.dtype.clone(),
+            dims: tokens,
+        });
+    }
+
+    // No base shape: still return with -1 replaced by "Infer"
+    if let Some(idx) = minus_one_idx {
+        tokens[idx] = "Infer".to_string();
+    }
+    Ok(Shape {
+        dtype: None,
+        dims: tokens,
+    })
+}
+
+fn flatten_dims(dims: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for d in dims {
+        out.extend(split_dim(d));
+    }
+    out
+}
+
+fn split_dim(dim: &str) -> Vec<String> {
+    dim.split('*').map(|s| s.to_string()).collect()
+}
+
+pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
+    flatten_dims(&a.dims) == flatten_dims(&b.dims)
 }

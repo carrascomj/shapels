@@ -4,7 +4,7 @@ use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Opera
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
 mod ops;
-use ops::infer_matmul;
+use ops::{infer_matmul, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -33,7 +33,6 @@ pub struct Analysis {
 struct VarState {
     annotated: Option<Shape>,
     inferred: Option<Shape>,
-    range: Range,
 }
 
 #[derive(Default)]
@@ -187,7 +186,6 @@ fn simulate_function(
                             VarState {
                                 annotated: ann_shape.clone(),
                                 inferred,
-                                range,
                             },
                         );
                         if record_hovers {
@@ -200,6 +198,7 @@ fn simulate_function(
                 if assign.targets.len() == 1 {
                     if let Some(name) = name_from_expr(&assign.targets[0]) {
                         let range = text_range_to_lsp(expr_text_range(&assign.targets[0]), source);
+                        let diag_before = diagnostics.len();
                         let mut shape = infer_expr_shape(
                             &assign.value,
                             &vars,
@@ -212,24 +211,46 @@ fn simulate_function(
                             source,
                         );
                         // fallback for squeeze/unsqueeze when inference failed
-                        if shape.is_none() {
+                        if shape.is_none() && diagnostics.len() == diag_before {
                             if let Expr::Call(call) = &*assign.value {
                                 if let Expr::Attribute(attr) = call.func.as_ref() {
                                     let attr_name: &str = attr.attr.as_ref();
                                     if attr_name == "squeeze" {
-                                        shape = infer_squeeze(
-                                            &attr.value,
-                                            call.args.get(0),
-                                            &vars,
-                                            func_map,
-                                            imports,
-                                            call_stack,
-                                            &mut diagnostics,
-                                            &mut hover_entries,
-                                            record_hovers,
-                                            source,
-                                            call.range,
-                                        );
+                                        let (base, dim_arg) = if is_torch_base(&attr.value, imports)
+                                        {
+                                            let base = call.args.get(0);
+                                            let dim_kw = call
+                                                .keywords
+                                                .iter()
+                                                .find(|kw| kw.arg.as_deref() == Some("dim"))
+                                                .map(|kw| &kw.value);
+                                            let dim_pos = call.args.get(1);
+                                            (base, dim_kw.or(dim_pos))
+                                        } else {
+                                            let dim_kw = call
+                                                .keywords
+                                                .iter()
+                                                .find(|kw| kw.arg.as_deref() == Some("dim"))
+                                                .map(|kw| &kw.value);
+                                            let dim_pos = call.args.get(0);
+                                            (Some(attr.value.as_ref()), dim_kw.or(dim_pos))
+                                        };
+                                        if let Some(base_expr) = base {
+                                            shape = infer_squeeze(
+                                                base_expr,
+                                                dim_arg,
+                                                &vars,
+                                                func_map,
+                                                imports,
+                                                call_stack,
+                                                &mut diagnostics,
+                                                &mut hover_entries,
+                                                record_hovers,
+                                                source,
+                                                call.range,
+                                                true,
+                                            );
+                                        }
                                     } else if attr_name == "unsqueeze" {
                                         shape = infer_unsqueeze(
                                             &attr.value,
@@ -242,7 +263,6 @@ fn simulate_function(
                                             &mut hover_entries,
                                             record_hovers,
                                             source,
-                                            call.range,
                                         );
                                     }
                                 }
@@ -254,7 +274,6 @@ fn simulate_function(
                                 VarState {
                                     annotated: None,
                                     inferred: Some(shape.clone()),
-                                    range,
                                 },
                             );
                             if record_hovers {
@@ -377,7 +396,6 @@ fn infer_expr_shape(
                             hover_entries,
                             record_hovers,
                             source,
-                            call.range,
                         );
                     }
                 }
@@ -395,6 +413,31 @@ fn infer_expr_shape(
                             record_hovers,
                             source,
                             call.range,
+                            true,
+                        );
+                    }
+                }
+                if is_alias_of("sum", &func_name.id, imports) {
+                    if let Some(arg0) = call.args.get(0) {
+                        let dim_arg = call
+                            .keywords
+                            .iter()
+                            .find(|kw| kw.arg.as_deref() == Some("dim"))
+                            .and_then(|kw| Some(&kw.value))
+                            .or_else(|| call.args.get(1));
+                        return infer_squeeze(
+                            arg0,
+                            dim_arg,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                            false,
                         );
                     }
                 }
@@ -423,7 +466,6 @@ fn infer_expr_shape(
                                     VarState {
                                         annotated: None,
                                         inferred: Some(shape),
-                                        range: text_range_to_lsp(param.def.range, source),
                                     },
                                 );
                             }
@@ -497,12 +539,32 @@ fn infer_expr_shape(
                         hover_entries,
                         record_hovers,
                         source,
-                        call.range,
                     );
                 } else if attr_name == "squeeze" {
+                    // tensor.squeeze(...) vs torch.squeeze(tensor, ...)
+                    let (base, dim_arg) = if is_torch_base(&attr.value, imports) {
+                        // first positional is the tensor, dim is 2nd positional or keyword
+                        let base = call.args.get(0)?;
+                        let dim_kw = call
+                            .keywords
+                            .iter()
+                            .find(|kw| kw.arg.as_deref() == Some("dim"))
+                            .map(|kw| &kw.value);
+                        let dim_pos = call.args.get(1);
+                        (base, dim_kw.or(dim_pos))
+                    } else {
+                        let base = attr.value.as_ref();
+                        let dim_kw = call
+                            .keywords
+                            .iter()
+                            .find(|kw| kw.arg.as_deref() == Some("dim"))
+                            .map(|kw| &kw.value);
+                        let dim_pos = call.args.get(0);
+                        (base, dim_kw.or(dim_pos))
+                    };
                     return infer_squeeze(
-                        &attr.value,
-                        call.args.get(0),
+                        base,
+                        dim_arg,
                         vars,
                         func_map,
                         imports,
@@ -512,6 +574,42 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        true,
+                    );
+                } else if attr_name == "sum" {
+                    // tensor.sum(...) vs torch.sum(tensor, ...)
+                    let (base, dim_source) = if is_torch_base(&attr.value, imports) {
+                        let base = call.args.get(0)?;
+                        let dim_kw = call
+                            .keywords
+                            .iter()
+                            .find(|kw| kw.arg.as_deref() == Some("dim"))
+                            .map(|kw| &kw.value);
+                        let dim_pos = call.args.get(1);
+                        (base, dim_kw.or(dim_pos))
+                    } else {
+                        let base = attr.value.as_ref();
+                        let dim_kw = call
+                            .keywords
+                            .iter()
+                            .find(|kw| kw.arg.as_deref() == Some("dim"))
+                            .map(|kw| &kw.value);
+                        let dim_pos = call.args.get(0);
+                        (base, dim_kw.or(dim_pos))
+                    };
+                    return infer_squeeze(
+                        base,
+                        dim_source,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                        false,
                     );
                 }
             }
@@ -595,260 +693,6 @@ fn infer_matmul_shapes(
     }
 }
 
-fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
-    flatten_dims(&a.dims) == flatten_dims(&b.dims)
-}
-
-fn infer_view_like(
-    base_expr: &Expr,
-    args: &[&Expr],
-    vars: &HashMap<Identifier, VarState>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-    whole_range: TextRange,
-) -> Option<Shape> {
-    let base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source);
-    let target_tokens = args
-        .iter()
-        .filter_map(|e| expr_to_dim_token(e))
-        .collect::<Vec<_>>();
-    if target_tokens.is_empty() {
-        return None;
-    }
-    let res = infer_reshape_dims(base_shape.as_ref(), &target_tokens);
-    match res {
-        Ok(shape) => Some(shape),
-        Err(msg) => {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: msg,
-                related_information: None,
-                tags: None,
-                data: None,
-            });
-            None
-        }
-    }
-}
-
-fn infer_reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String> {
-    let mut tokens = target.to_vec();
-    let mut minus_one_idx = None;
-    for (i, t) in tokens.iter().enumerate() {
-        if t == "-1" {
-            if minus_one_idx.is_some() {
-                return Err("Only one -1 is allowed in view/reshape".into());
-            }
-            minus_one_idx = Some(i);
-        }
-    }
-
-    if let Some(base_shape) = base {
-        let mut remaining = flatten_dims(&base_shape.dims);
-        if let Some(idx) = minus_one_idx {
-            let mut target_factors = Vec::new();
-            for t in &tokens {
-                if t == "-1" {
-                    continue;
-                }
-                let facs = split_dim(t);
-                target_factors.extend(facs);
-            }
-            for f in &target_factors {
-                if let Some(pos) = remaining.iter().position(|x| x == f) {
-                    remaining.remove(pos);
-                }
-            }
-            let inferred = if remaining.is_empty() {
-                "1".to_string()
-            } else {
-                remaining.join("*")
-            };
-            tokens[idx] = inferred;
-        }
-        return Ok(Shape {
-            dtype: base_shape.dtype.clone(),
-            dims: tokens,
-        });
-    }
-
-    // No base shape: still return with -1 replaced by "Infer"
-    if let Some(idx) = minus_one_idx {
-        tokens[idx] = "Infer".to_string();
-    }
-    Ok(Shape {
-        dtype: None,
-        dims: tokens,
-    })
-}
-
-fn expr_to_dim_token(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Constant(c) => match &c.value {
-            ast::Constant::Int(i) => {
-                let s = i.to_string();
-                if s == "0" {
-                    Some("O".to_string())
-                } else {
-                    Some(s)
-                }
-            }
-            _ => None,
-        },
-        Expr::Name(n) => Some(n.id.to_string()),
-        Expr::BinOp(bin) => {
-            if matches!(bin.op, Operator::Mult) {
-                let l = expr_to_dim_token(&bin.left)?;
-                let r = expr_to_dim_token(&bin.right)?;
-                Some(format!("{l}*{r}"))
-            } else {
-                None
-            }
-        }
-        Expr::UnaryOp(u) => {
-            if matches!(u.op, ast::UnaryOp::USub) {
-                if let Expr::Constant(c) = u.operand.as_ref() {
-                    if let ast::Constant::Int(i) = &c.value {
-                        let s = i.to_string();
-                        return Some(format!("-{s}"));
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn flatten_dims(dims: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for d in dims {
-        out.extend(split_dim(d));
-    }
-    out
-}
-
-fn split_dim(dim: &str) -> Vec<String> {
-    dim.split('*').map(|s| s.to_string()).collect()
-}
-
-fn normalize_dim_index_unsqueeze(idx: i64, len: usize) -> Option<usize> {
-    let size = len + 1;
-    let adj = if idx >= 0 { idx } else { size as i64 + idx };
-    if adj >= 0 && (adj as usize) < size {
-        Some(adj as usize)
-    } else {
-        None
-    }
-}
-
-fn normalize_dim_index_squeeze(idx: i64, len: usize) -> Option<usize> {
-    let size = len;
-    let adj = if idx >= 0 { idx } else { size as i64 + idx };
-    if adj >= 0 && (adj as usize) < size {
-        Some(adj as usize)
-    } else {
-        None
-    }
-}
-
-fn infer_unsqueeze(
-    base_expr: &Expr,
-    dim_arg: Option<&Expr>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
-    imports: &Imports,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-    whole_range: TextRange,
-) -> Option<Shape> {
-    let base_shape = infer_expr_shape(
-        base_expr,
-        vars,
-        func_map,
-        imports,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-    )?;
-    let dim = dim_arg.and_then(expr_to_dim_token)?;
-    let dim_i: i64 = dim.parse().ok()?;
-    let idx = normalize_dim_index_unsqueeze(dim_i, base_shape.dims.len())?;
-    let mut dims = base_shape.dims.clone();
-    dims.insert(idx, "1".to_string());
-    Some(Shape {
-        dtype: base_shape.dtype.clone(),
-        dims,
-    })
-}
-
-fn infer_squeeze(
-    base_expr: &Expr,
-    dim_arg: Option<&Expr>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
-    imports: &Imports,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-    whole_range: TextRange,
-) -> Option<Shape> {
-    let base_shape = infer_expr_shape(
-        base_expr,
-        vars,
-        func_map,
-        imports,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-    )
-    .or_else(|| {
-        infer_shallow_shape(
-            base_expr,
-            vars,
-            func_map,
-            imports,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            record_hovers,
-            source,
-        )
-    })?;
-    let mut dims = base_shape.dims.clone();
-    if let Some(dim_expr) = dim_arg {
-        let dim = expr_to_dim_token(dim_expr)?;
-        let dim_i: i64 = dim.parse().ok()?;
-        let idx = normalize_dim_index_squeeze(dim_i, dims.len())
-            .unwrap_or_else(|| dims.len().saturating_sub(1));
-        if idx < dims.len() {
-            dims.remove(idx);
-        } else if !dims.is_empty() {
-            dims.pop();
-        }
-    } else {
-        dims.retain(|d| d != "1");
-    }
-    Some(Shape {
-        dtype: base_shape.dtype.clone(),
-        dims,
-    })
-}
 fn lookup_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
@@ -891,7 +735,7 @@ fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
 fn collect_imports(module: &[Stmt]) -> Imports {
     let mut imports = Imports::default();
     // seed known function names
-    for fname in ["mm", "view", "reshape"] {
+    for fname in ["mm", "view", "reshape", "sum"] {
         imports
             .func_aliases
             .entry(fname.to_string())
@@ -1051,7 +895,6 @@ fn seed_args_from_annotations(
         let state = VarState {
             annotated: ann_shape.clone(),
             inferred: provided_state.take().and_then(|s| s.inferred).or(None),
-            range,
         };
 
         if state.annotated.is_some() || state.inferred.is_some() {
@@ -1169,43 +1012,4 @@ fn range_span(range: &Range, _pos: &Position) -> u32 {
         1000
     };
     line_span * 1000 + char_span
-}
-
-fn infer_shallow_shape(
-    expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
-    imports: &Imports,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-) -> Option<Shape> {
-    match expr {
-        Expr::BinOp(ExprBinOp {
-            left,
-            op,
-            right,
-            range,
-        }) => {
-            if matches!(op, Operator::MatMult) {
-                return infer_matmul_shapes(
-                    left,
-                    right,
-                    vars,
-                    func_map,
-                    imports,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    *range,
-                );
-            }
-            None
-        }
-        _ => lookup_shape(expr, vars, hover_entries, record_hovers, source),
-    }
 }

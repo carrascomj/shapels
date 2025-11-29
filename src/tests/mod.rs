@@ -1,3 +1,8 @@
+//! Each of the submodules in the tests module points to a python
+//! file that is parsed and analysed for testing that the expected
+//! hovers and diagnostics are produced.
+
+mod test_aggr;
 mod test_multiply;
 mod test_view;
 

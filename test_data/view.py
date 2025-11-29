@@ -45,3 +45,23 @@ def squeeze_unsqueeze_after_multiply_works():
     z = (x @ y.unsqueeze(1)).squeeze(-1)
     return z
 
+# test 5
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def squeeze_nonexisting_dims_produces_diagnostics():
+    B, X, R = 4, 2, 32
+    x: F[T, "B X R"] = torch.Tensor(B, X, R)
+    z = x.squeeze(1)
+    z = x.squeeze(dim=(2, 4))
+    z = torch.squeeze(x, dim=1)
+    z = torch.squeeze(x, dim=5)
+
+# test 6
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def squeeze_all_is_correct():
+    x: F[T, "B 1 R 1"] = torch.Tensor(B, 1, R, 1)
+    z = x.squeeze()
+
