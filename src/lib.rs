@@ -35,11 +35,40 @@ struct VarState {
     inferred: Option<Shape>,
 }
 
+/// Operations that accept an argument dim (integer or sequence),
+/// return a single tensor and the provided dims have been reduced
+/// from the output tensor.
+pub const AGGR_ALIASES: [&'static str; 21] = [
+    "sum",
+    "mean",
+    "prod",
+    "amax",
+    "amin",
+    "std",
+    "var",
+    "nanmean",
+    "nansum",
+    "nanprod",
+    "nanstd",
+    "nanvar",
+    // FIXME: quantile and nanquantile only apply iff
+    // the q argument is a scalar
+    "quantile",
+    "nanquantile",
+    "argmax",
+    "argmin",
+    "all",
+    "any",
+    "count_nonzero",
+    "logsumexp",
+    "norm",
+];
+
 #[derive(Default)]
 struct Imports {
     torch_aliases: HashSet<Identifier>,
     /// Maps simple function name (e.g., "mm") to all aliases in scope.
-    func_aliases: HashMap<String, HashSet<Identifier>>,
+    func_aliases: HashMap<&'static str, HashSet<Identifier>>,
 }
 
 pub fn analyze_source(source: &str) -> Analysis {
@@ -573,7 +602,7 @@ fn infer_expr_shape(
                         call.range,
                         true,
                     );
-                } else if attr_name == "sum" {
+                } else if AGGR_ALIASES.contains(&attr_name) {
                     // tensor.sum(...) vs torch.sum(tensor, ...)
                     let (base, dim_source) = if is_torch_base(&attr.value, imports) {
                         let base = call.args.first()?;
@@ -726,13 +755,23 @@ fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
         .unwrap_or(false)
 }
 
+/// Map all known operations to their importing aliases, for instance:
+///
+/// ```python
+/// import torch as t
+/// from torch import sum as torch_sum
+/// ```
+///
+/// In that example, shapels has to keep track that `torch_sum` is
+/// an alias to `torch.sum` and `t` of `torch` to identify this
+/// functions in the scope and perform shape inference.
 fn collect_imports(module: &[Stmt]) -> Imports {
     let mut imports = Imports::default();
     // seed known function names
     for fname in ["mm", "view", "reshape", "sum"] {
         imports
             .func_aliases
-            .entry(fname.to_string())
+            .entry(fname)
             .or_insert_with(HashSet::new);
     }
     imports
@@ -743,16 +782,18 @@ fn collect_imports(module: &[Stmt]) -> Imports {
         match stmt {
             Stmt::Import(import) => {
                 for alias in &import.names {
-                    let name = alias.name.to_string();
+                    let name = alias.name.as_str();
                     let as_id = alias
                         .asname
                         .clone()
-                        .unwrap_or_else(|| Identifier::from(name.clone()));
+                        .unwrap_or_else(|| Identifier::from(name));
                     if name == "torch" {
                         imports.torch_aliases.insert(as_id.clone());
                     }
-                    if imports.func_aliases.contains_key(&name) {
-                        imports.func_aliases.entry(name).or_default().insert(as_id);
+                    if let Some(val) = imports.func_aliases.get_mut(name) {
+                        val.insert(as_id);
+                    } else if AGGR_ALIASES.contains(&name) {
+                        imports.func_aliases.entry("sum").or_default().insert(as_id);
                     }
                 }
             }
@@ -761,13 +802,19 @@ fn collect_imports(module: &[Stmt]) -> Imports {
                     && module == "torch"
                 {
                     for alias in &f.names {
-                        let name = alias.name.to_string();
-                        if imports.func_aliases.contains_key(&name) {
+                        let name = alias.name.as_str();
+                        if let Some(val) = imports.func_aliases.get_mut(name) {
                             let id = alias
                                 .asname
                                 .clone()
-                                .unwrap_or_else(|| Identifier::from(name.clone()));
-                            imports.func_aliases.entry(name).or_default().insert(id);
+                                .unwrap_or_else(|| Identifier::from(name));
+                            val.insert(id);
+                        } else if AGGR_ALIASES.contains(&name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports.func_aliases.entry("sum").or_default().insert(id);
                         }
                     }
                 }
