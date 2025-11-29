@@ -31,6 +31,7 @@ pub fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
 }
 
 /// Shared logic for squeeze (enforce_one = true) and sum (enforce_one = false).
+#[allow(clippy::too_many_arguments)]
 pub fn infer_squeeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
@@ -145,6 +146,7 @@ pub fn infer_squeeze(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn infer_shallow_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
@@ -207,17 +209,17 @@ fn expr_to_dim_token(expr: &Expr) -> Option<String> {
                 None
             }
         }
-        Expr::UnaryOp(u) => {
-            if matches!(u.op, ast::UnaryOp::USub) {
-                if let Expr::Constant(c) = u.operand.as_ref() {
-                    if let ast::Constant::Int(i) = &c.value {
-                        let s = i.to_string();
-                        return Some(format!("-{s}"));
-                    }
+        Expr::UnaryOp(u) => match (u.op, u.operand.as_ref()) {
+            (ast::UnaryOp::USub, Expr::Constant(c)) => {
+                if let ast::Constant::Int(i) = &c.value {
+                    let s = i.to_string();
+                    Some(format!("-{s}"))
+                } else {
+                    None
                 }
             }
-            None
-        }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -287,6 +289,7 @@ fn parse_dims(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn infer_unsqueeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
@@ -331,6 +334,7 @@ fn normalize_dim_index_unsqueeze(idx: i64, len: usize) -> Option<usize> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn infer_view_like(
     base_expr: &Expr,
     args: &[&Expr],

@@ -8,7 +8,6 @@ use lsp_types::{
     notification::PublishDiagnostics,
     request::{DocumentDiagnosticRequest, HoverRequest},
 };
-use serde_json;
 use shapels::analyze_source;
 use std::collections::HashMap;
 
@@ -59,13 +58,12 @@ fn main() {
                         if let Ok(params) = serde_json::from_value::<
                             lsp_types::DidChangeTextDocumentParams,
                         >(notif.params.clone())
+                            && let Some(first) = params.content_changes.first()
                         {
-                            if let Some(first) = params.content_changes.first() {
-                                let uri = params.text_document.uri.clone();
-                                // assuming full sync kind
-                                documents.insert(uri.clone(), first.text.clone());
-                                publish_diagnostics(&connection, &documents, &uri);
-                            }
+                            let uri = params.text_document.uri.clone();
+                            // assuming full sync kind
+                            documents.insert(uri.clone(), first.text.clone());
+                            publish_diagnostics(&connection, &documents, &uri);
                         }
                     }
                     _ => {}
