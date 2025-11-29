@@ -4,6 +4,7 @@
 
 mod test_aggr;
 mod test_multiply;
+mod test_permute;
 mod test_view;
 
 pub fn extract_test_case(py_data: &'static str, n: usize) -> String {

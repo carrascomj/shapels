@@ -4,7 +4,11 @@ use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Opera
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
 mod ops;
-use ops::{infer_matmul, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal};
+use ops::{
+    infer_matmul, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
+};
+
+use crate::ops::Transpose;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -410,6 +414,85 @@ fn infer_expr_shape(
                         call.range,
                     );
                 }
+                if is_alias_of("permute", &func_name.id, imports)
+                    && let Some(base) = call.args.first()
+                {
+                    let order_args: Vec<&Expr> = if call.args.len() >= 2 {
+                        if let Some(Expr::Tuple(t)) = call.args.get(1) {
+                            t.elts.iter().collect()
+                        } else {
+                            call.args.iter().skip(1).collect()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    return infer_permute(
+                        base,
+                        &order_args,
+                        Transpose::Permute,
+                        None,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
+                }
+                if is_alias_of("transpose", &func_name.id, imports)
+                    && let Some(base) = call.args.first()
+                {
+                    let order_args: Vec<&Expr> = if call.args.len() >= 3 {
+                        call.args.iter().skip(1).take(2).collect()
+                    } else if call.args.len() == 2 {
+                        if let Some(Expr::Tuple(t)) = call.args.get(1) {
+                            t.elts.iter().collect()
+                        } else {
+                            call.args.iter().skip(1).collect()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    return infer_permute(
+                        base,
+                        &order_args,
+                        Transpose::Transpose,
+                        None,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
+                }
+                if is_alias_of("t", &func_name.id, imports)
+                    && let Some(base) = call.args.first()
+                {
+                    let order_args: Vec<&Expr> = if call.args.len() >= 3 {
+                        call.args.iter().skip(1).take(2).collect()
+                    } else if call.args.len() == 2 {
+                        if let Some(Expr::Tuple(t)) = call.args.get(1) {
+                            t.elts.iter().collect()
+                        } else {
+                            call.args.iter().skip(1).collect()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    return infer_permute(
+                        base,
+                        &order_args,
+                        Transpose::T,
+                        None,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
+                }
                 if is_alias_of("unsqueeze", &func_name.id, imports)
                     && let Some(arg0) = call.args.first()
                 {
@@ -517,6 +600,7 @@ fn infer_expr_shape(
                     return ret_shape;
                 }
             }
+            // methods are functions with attributes
             if let Expr::Attribute(attr) = call.func.as_ref() {
                 let attr_name: &str = attr.attr.as_ref();
                 if attr_name == "mm"
@@ -553,6 +637,101 @@ fn infer_expr_shape(
                             call.range,
                         );
                     }
+                } else if attr_name == "permute" {
+                    let (base, order_args): (&Expr, Vec<&Expr>) =
+                        if is_torch_base(&attr.value, imports) {
+                            let base = call.args.first()?;
+                            let rest = if call.args.len() >= 2 {
+                                if let Some(Expr::Tuple(t)) = call.args.get(1) {
+                                    t.elts.iter().collect()
+                                } else {
+                                    call.args.iter().skip(1).collect()
+                                }
+                            } else {
+                                Vec::new()
+                            };
+                            (base, rest)
+                        } else {
+                            let rest = if call.args.len() == 1 {
+                                if let Some(Expr::Tuple(t)) = call.args.first() {
+                                    t.elts.iter().collect()
+                                } else {
+                                    call.args.iter().collect()
+                                }
+                            } else {
+                                call.args.iter().collect()
+                            };
+                            (&attr.value, rest)
+                        };
+                    return infer_permute(
+                        base,
+                        &order_args,
+                        Transpose::Permute,
+                        None,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
+                } else if attr_name == "transpose" || attr_name == "t" {
+                    let (base, order_args): (&Expr, Vec<&Expr>) =
+                        if is_torch_base(&attr.value, imports) {
+                            let base = call.args.first()?;
+                            let rest = if call.args.len() >= 3 {
+                                call.args.iter().skip(1).take(2).collect()
+                            } else if call.args.len() == 2 {
+                                if let Some(Expr::Tuple(t)) = call.args.get(1) {
+                                    t.elts.iter().collect()
+                                } else {
+                                    call.args.iter().skip(1).collect()
+                                }
+                            } else {
+                                Vec::new()
+                            };
+                            (base, rest)
+                        } else {
+                            let rest = if call.args.len() >= 2 {
+                                call.args.iter().take(2).collect()
+                            } else if call.args.len() == 1 {
+                                if let Some(Expr::Tuple(t)) = call.args.first() {
+                                    t.elts.iter().collect()
+                                } else {
+                                    call.args.iter().collect()
+                                }
+                            } else {
+                                Vec::new()
+                            };
+                            (&attr.value, rest)
+                        };
+                    let trans_type = match attr_name {
+                        "transpose" => Transpose::Transpose,
+                        _ => Transpose::T,
+                    };
+                    let base_hint = infer_expr_shape(
+                        base,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                    );
+                    return infer_permute(
+                        base,
+                        &order_args,
+                        trans_type,
+                        base_hint,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
                 } else if attr_name == "unsqueeze" {
                     return infer_unsqueeze(
                         &attr.value,
@@ -638,6 +817,49 @@ fn infer_expr_shape(
                         false,
                     );
                 }
+            }
+            None
+        }
+        // attributes of a tensor, not a method!
+        Expr::Attribute(attr) => {
+            let attr_name: &str = attr.attr.as_ref();
+            if attr_name == "T" {
+                let base_hint =
+                    lookup_shape(&attr.value, vars, hover_entries, record_hovers, source).or_else(
+                        || {
+                            infer_expr_shape(
+                                &attr.value,
+                                vars,
+                                func_map,
+                                imports,
+                                call_stack,
+                                diagnostics,
+                                hover_entries,
+                                false,
+                                source,
+                            )
+                        },
+                    );
+                let order_args: Vec<&Expr> = Vec::new();
+                let res = infer_permute(
+                    &attr.value,
+                    &order_args,
+                    Transpose::T,
+                    base_hint,
+                    vars,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    attr.range,
+                );
+                if record_hovers {
+                    if let Some(s) = res.clone() {
+                        let range = text_range_to_lsp(attr.range, source);
+                        hover_entries.push((range, HoverInfo { shape: Some(s) }));
+                    }
+                }
+                return res;
             }
             None
         }
@@ -768,7 +990,7 @@ fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
 fn collect_imports(module: &[Stmt]) -> Imports {
     let mut imports = Imports::default();
     // seed known function names
-    for fname in ["mm", "view", "reshape", "sum"] {
+    for fname in ["mm", "view", "reshape", "sum", "permute", "transpose", "t"] {
         imports
             .func_aliases
             .entry(fname)

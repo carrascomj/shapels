@@ -439,3 +439,159 @@ fn split_dim(dim: &str) -> Vec<String> {
 pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
     flatten_dims(&a.dims) == flatten_dims(&b.dims)
 }
+
+/// Variants for an operation that transposes dimensions.
+pub enum Transpose {
+    Transpose,
+    T,
+    Permute,
+}
+
+/// Permute dimensions of a tensor based on provided order.
+#[allow(clippy::too_many_arguments)]
+pub fn infer_permute(
+    base_expr: &Expr,
+    order_args: &[&Expr],
+    transpose: Transpose,
+    base_hint: Option<Shape>,
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    let base_shape = base_hint
+        .or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source))?;
+    let mut order = Vec::new();
+    match transpose {
+        Transpose::Transpose => {
+            if order_args.len() != 2 {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "transpose expects exactly two dimensions".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return None;
+            }
+            let mut dims = Vec::with_capacity(2);
+            for expr in order_args {
+                if let Expr::Constant(c) = expr {
+                    if let ast::Constant::Int(i) = &c.value {
+                        if let Ok(val) = i.to_string().parse::<isize>() {
+                            if val >= 0 {
+                                dims.push(val as usize);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(expr), source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Invalid transpose index".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return None;
+            }
+            if dims.iter().any(|&d| d >= base_shape.dims.len()) || dims[0] == dims[1] {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Invalid transpose dimensions".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return None;
+            }
+            order = (0..base_shape.dims.len()).collect();
+            order.swap(dims[0], dims[1]);
+        }
+        Transpose::T => {
+            order = (0..base_shape.dims.len()).collect();
+            let order_len = order.len();
+            if order_len > 1 {
+                order.swap(order_len - 2, order_len - 1);
+            }
+        }
+        Transpose::Permute => {
+            order.reserve(order_args.len());
+            for expr in order_args {
+                if let Expr::Constant(c) = expr {
+                    if let ast::Constant::Int(i) = &c.value {
+                        if let Ok(val) = i.to_string().parse::<isize>() {
+                            if val >= 0 {
+                                order.push(val as usize);
+                                continue;
+                            }
+                        }
+                    }
+                }
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(expr), source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Invalid permute index".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return None;
+            }
+        }
+    }
+
+    if order.len() != base_shape.dims.len()
+        || order.iter().any(|&i| i >= base_shape.dims.len())
+        || {
+            let mut uniq = order.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            uniq.len() != order.len()
+        }
+    {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(whole_range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: if !matches!(transpose, Transpose::Permute) {
+                "Invalid transpose dimensions".into()
+            } else {
+                "Invalid permute dimensions".into()
+            },
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+
+    let dims = order
+        .iter()
+        .map(|&idx| base_shape.dims[idx].clone())
+        .collect::<Vec<_>>();
+
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims,
+    })
+}
