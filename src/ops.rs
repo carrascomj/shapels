@@ -455,6 +455,54 @@ pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
     flatten_dims(&a.dims) == flatten_dims(&b.dims)
 }
 
+/// Element-wise (Hadamard) multiplication with torch-style broadcasting.
+/// If only one of the shapes is known, returns that shape (scalar or unknown rhs/lhs).
+pub fn infer_hadarmard(left: Option<Shape>, right: Option<Shape>) -> Result<Option<Shape>, String> {
+    match (left, right) {
+        (None, None) => Ok(None),
+        (Some(s), None) | (None, Some(s)) => Ok(Some(s)),
+        (Some(l), Some(r)) => {
+            if l.dims.is_empty() || r.dims.is_empty() {
+                return Err("Broadcasting requires operands with at least one dimension".into());
+            }
+            let dims = broadcast_dims(&l.dims, &r.dims)
+                .map_err(|msg| format!("Broadcasting incompatible shapes: {msg}"))?;
+            Ok(Some(Shape {
+                dtype: l.dtype.clone().or(r.dtype.clone()),
+                dims,
+            }))
+        }
+    }
+}
+
+fn broadcast_dims(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
+    if a.is_empty() || b.is_empty() {
+        return Err("tensor has zero dimensions".into());
+    }
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+    let max_len = a.len().max(b.len());
+    while idx < max_len {
+        let a_dim = a.get(a.len().wrapping_sub(1 + idx)).map(String::as_str);
+        let b_dim = b.get(b.len().wrapping_sub(1 + idx)).map(String::as_str);
+        let res = match (a_dim, b_dim) {
+            (Some(ad), Some(bd)) if ad == bd => ad.to_string(),
+            (Some(ad), Some(bd)) if ad == "1" => bd.to_string(),
+            (Some(ad), Some(bd)) if bd == "1" => ad.to_string(),
+            (Some(ad), None) => ad.to_string(),
+            (None, Some(bd)) => bd.to_string(),
+            (Some(_), Some(_)) => {
+                return Err("dimension mismatch".into());
+            }
+            (None, None) => unreachable!(),
+        };
+        out.push(res);
+        idx += 1;
+    }
+    out.reverse();
+    Ok(out)
+}
+
 /// Variants for an operation that transposes dimensions.
 pub enum Transpose {
     Transpose,

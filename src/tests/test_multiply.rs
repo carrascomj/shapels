@@ -172,3 +172,63 @@ fn test_hover_inferred_shape_from_caller_to_callee_mm() {
         assert_eq!(shape.render(), "B X O");
     }
 }
+
+#[test]
+fn test_hover_hadamard() {
+    let mult_source = extract_test_case(PY_DATA, 8);
+    for pat in ["*", "+", "-", "/"] {
+        let src = mult_source.replace("*", pat);
+        let analysis = analyze_source(&src);
+        // one diagnostic for non-compatible shapes `output_wrong`
+        assert_eq!(analysis.diagnostics.len(), 1);
+        let mut line_idx = 0u32;
+        let mut col_idx = 0u32;
+        let var = "output_right =";
+        let expected = "B X R";
+        for (idx, line) in src.lines().enumerate() {
+            if let Some(pos) = line.find(var) {
+                line_idx = idx as u32;
+                col_idx = pos as u32;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.render(), expected);
+    }
+}
+
+#[test]
+fn test_hover_hadamard_with_broadcasting_not_broadcastable() {
+    // this is the example from the torch docs but with * instead of +
+    let mult_source = extract_test_case(PY_DATA, 9);
+    for pat in ["*", "+", "-", "/"] {
+        let src = mult_source.replace("*", pat);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 2);
+        let mut line_idx = 0u32;
+        let mut col_idx = 0u32;
+        let var = "z =";
+        let expected = "A B C 1";
+        for (idx, line) in src.lines().enumerate() {
+            if let Some(pos) = line.find(var) {
+                line_idx = idx as u32;
+                col_idx = pos as u32;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect("hover info");
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.render(), expected);
+    }
+}

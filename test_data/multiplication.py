@@ -93,3 +93,42 @@ def hovering_with_inference_on_arg_with_mm():
 def multiply_child_unnanotated_torch_mm_aliased(x, y):
     mat_mul_result = whatever(x, y)
     return mat_mul_result
+
+
+# test 8
+def hovering_with_inference_on_arg_with_mm():
+    B, X, R, U, O = 4, 2, 16, 5, 8
+    x: F[T, "B X R"] = torch.Tensor(B, X, R)
+    y: F[T, "U R O"] = torch.Tensor(U, R, O)
+    z: F[T, "B X R"] = torch.Tensor(B, X, R)
+    output_wrong = x * y
+    output_right = x * z
+    return z
+
+
+# test 9
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def not_broadcastable_tensors_should_produce_diagnostics():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    # same shapes are always broadcastable (i.e. the above rules always hold)
+    x: F[T, ""]=torch.empty((0,))
+    y: F[T, "A A"]=torch.empty(2,2)
+    # x and y are not broadcastable, because x does not have at least 1 dimension
+    bad = x * y  # diagnostic
+    # can line up trailing dimensions
+    x: F[T, "A B C 1"]=torch.empty(5,3,4,1)
+    y: F[T, "B 1 1"]=torch.empty(  3,1,1)
+    # x and y are broadcastable.
+    # 1st trailing dimension: both have size 1
+    # 2nd trailing dimension: y has size 1
+    # 3rd trailing dimension: x size == y size
+    # 4th trailing dimension: y dimension doesn't exist
+    z = x * y # good
+
+    # but this does not work
+    x: F[T, "A B C 1"]=torch.empty(5,2,4,1)
+    y: F[T, "Y 1 1"]=torch.empty(  3,1,1)
+    # since 2 is not 3
+    bad2 = x * y  # diagnostic

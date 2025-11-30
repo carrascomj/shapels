@@ -7,7 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 mod ops;
 use ops::{
-    infer_matmul, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_hadarmard, infer_matmul, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like,
+    shape_dims_equal,
 };
 
 use crate::ops::Transpose;
@@ -128,8 +129,7 @@ impl ModuleCache {
             func_map,
             imports,
         };
-        self.modules
-            .insert(module_name.to_string(), cached.clone());
+        self.modules.insert(module_name.to_string(), cached.clone());
         Some(cached)
     }
 }
@@ -227,7 +227,11 @@ fn resolve_module_path(
         // Heuristic: if root already points at the top-level package (e.g., root ends with parts[0]),
         // try resolving without repeating the first component to avoid example_python/example_python duplication.
         if let Some(root_name) = root.file_name()
-            && root_name == parts.first().map(|s| std::ffi::OsStr::new(s)).unwrap_or_else(|| std::ffi::OsStr::new(""))
+            && root_name
+                == parts
+                    .first()
+                    .map(|s| std::ffi::OsStr::new(s))
+                    .unwrap_or_else(|| std::ffi::OsStr::new(""))
             && parts.len() > 1
         {
             let mut base = root.clone();
@@ -292,7 +296,11 @@ fn analyze_source_internal<'a>(
         .unwrap_or_else(|| "<memory>".to_string());
     match Suite::parse(source, &parse_name) {
         Ok(module) => {
-            let imports = collect_imports(&module, current_path, module_cache.as_deref().and_then(|c| c.project_root()));
+            let imports = collect_imports(
+                &module,
+                current_path,
+                module_cache.as_deref().and_then(|c| c.project_root()),
+            );
             // collect function definitions first
             let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
             for stmt in &module {
@@ -503,33 +511,33 @@ fn simulate_function(
                                     &vars,
                                     func_map,
                                     imports,
+                                    call_stack,
+                                    &mut diagnostics,
+                                    &mut hover_entries,
+                                    record_hovers,
+                                    source,
+                                    call.range,
+                                    module_cache.as_deref_mut(),
+                                    module_path,
+                                    true,
+                                );
+                            }
+                        } else if attr_name == "unsqueeze" {
+                            shape = infer_unsqueeze(
+                                &attr.value,
+                                call.args.first(),
+                                &vars,
+                                func_map,
+                                imports,
                                 call_stack,
                                 &mut diagnostics,
                                 &mut hover_entries,
                                 record_hovers,
                                 source,
-                                call.range,
                                 module_cache.as_deref_mut(),
                                 module_path,
-                                true,
                             );
                         }
-                    } else if attr_name == "unsqueeze" {
-                        shape = infer_unsqueeze(
-                            &attr.value,
-                            call.args.first(),
-                            &vars,
-                            func_map,
-                            imports,
-                            call_stack,
-                            &mut diagnostics,
-                            &mut hover_entries,
-                            record_hovers,
-                            source,
-                            module_cache.as_deref_mut(),
-                            module_path,
-                        );
-                    }
                     }
                     if let Some(shape) = shape {
                         vars.insert(
@@ -594,8 +602,25 @@ fn infer_expr_shape(
             op,
             right,
             range: expr_range,
-        }) => {
-            if matches!(op, Operator::MatMult) {
+        }) => match op {
+            Operator::Mult | Operator::Add | Operator::Sub | Operator::Div => {
+                return infer_hadamard_shapes(
+                    left,
+                    right,
+                    vars,
+                    func_map,
+                    imports,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    *expr_range,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                );
+            }
+            Operator::MatMult => {
                 return infer_matmul_shapes(
                     left,
                     right,
@@ -612,8 +637,8 @@ fn infer_expr_shape(
                     module_path,
                 );
             }
-            None
-        }
+            _ => return None,
+        },
         Expr::Call(call) => {
             if let Expr::Name(func_name) = call.func.as_ref() {
                 if is_alias_of("mm", &func_name.id, imports)
@@ -1367,7 +1392,11 @@ fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
 /// In that example, shapels has to keep track that `torch_sum` is
 /// an alias to `torch.sum` and `t` of `torch` to identify this
 /// functions in the scope and perform shape inference.
-fn collect_imports(module: &[Stmt], module_path: Option<&Path>, project_root: Option<&Path>) -> Imports {
+fn collect_imports(
+    module: &[Stmt],
+    module_path: Option<&Path>,
+    project_root: Option<&Path>,
+) -> Imports {
     let mut imports = Imports::default();
     // seed known function names
     for fname in ["mm", "view", "reshape", "sum", "permute", "transpose", "t"] {
@@ -1471,7 +1500,11 @@ fn module_name_from_path(path: &Path, project_root: Option<&Path>) -> Option<Str
     }
 }
 
-fn resolve_from_module(f: &ast::StmtImportFrom, module_path: Option<&Path>, project_root: Option<&Path>) -> Option<String> {
+fn resolve_from_module(
+    f: &ast::StmtImportFrom,
+    module_path: Option<&Path>,
+    project_root: Option<&Path>,
+) -> Option<String> {
     // Absolute import
     let level_val = f.level.map(|i| i.to_usize()).unwrap_or(0);
     if level_val == 0 {
@@ -1731,4 +1764,70 @@ fn range_span(range: &Range, _pos: &Position) -> u32 {
         1000
     };
     line_span * 1000 + char_span
+}
+#[allow(clippy::too_many_arguments)]
+fn infer_hadamard_shapes(
+    left: &Expr,
+    right: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
+        infer_expr_shape(
+            left,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            false,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        )
+    });
+    let right_shape =
+        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
+            infer_expr_shape(
+                right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        });
+
+    match infer_hadarmard(left_shape, right_shape) {
+        Ok(shape_opt) => shape_opt,
+        Err(msg) => {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: msg,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            None
+        }
+    }
 }
