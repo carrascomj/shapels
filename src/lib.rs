@@ -311,7 +311,10 @@ fn analyze_source_internal<'a>(
 
             // analyze top-level statements (outside functions)
             let empty_args = Arguments {
-                range: ast::OptionalRange::from(TextRange::new(TextSize::from(0), TextSize::from(0))),
+                range: ast::OptionalRange::from(TextRange::new(
+                    TextSize::from(0),
+                    TextSize::from(0),
+                )),
                 posonlyargs: Vec::new(),
                 args: Vec::new(),
                 vararg: None,
