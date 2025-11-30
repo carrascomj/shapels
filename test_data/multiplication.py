@@ -132,3 +132,21 @@ def not_broadcastable_tensors_should_produce_diagnostics():
     y: F[T, "Y 1 1"]=torch.empty(  3,1,1)
     # since 2 is not 3
     bad2 = x * y  # diagnostic
+
+
+# test 10
+import torch
+from jaxtyping import Float
+from torch import Tensor
+
+
+def transpose_and_multiply(x, y):
+    mat_mul_result = x @ y.T
+    return mat_mul_result
+
+
+B, X, R, O = 5, 8, 16, 32
+x: Float[Tensor, "B X R"] = torch.Tensor(B, X, R)
+y: Float[Tensor, "O R"] = torch.Tensor(O, R)
+bad = x @ y
+z = transpose_and_multiply(x, y)

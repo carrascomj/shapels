@@ -309,7 +309,31 @@ fn analyze_source_internal<'a>(
                 }
             }
 
-            for stmt in module {
+            // analyze top-level statements (outside functions)
+            let empty_args = Arguments {
+                range: ast::OptionalRange::from(TextRange::new(TextSize::from(0), TextSize::from(0))),
+                posonlyargs: Vec::new(),
+                args: Vec::new(),
+                vararg: None,
+                kwonlyargs: Vec::new(),
+                kwarg: None,
+            };
+            let (mut top_diags, mut top_hovers, _) = simulate_function(
+                &empty_args,
+                &module,
+                source,
+                &func_map,
+                &imports,
+                &mut Vec::new(),
+                HashMap::new(),
+                true,
+                module_cache.as_deref_mut(),
+                current_path,
+            );
+            analysis.diagnostics.append(&mut top_diags);
+            analysis.hover_entries.append(&mut top_hovers);
+
+            for stmt in &module {
                 if let Stmt::FunctionDef(func) = stmt {
                     let mut func_analysis = analyze_function(
                         &func.args,

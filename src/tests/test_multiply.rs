@@ -75,6 +75,30 @@ fn test_hover_inferred_shape_from_caller_to_callee() {
 }
 
 #[test]
+fn test_matmul_top_level_caller_to_callee() {
+    let src = extract_test_case(PY_DATA, 10);
+    let analysis = analyze_source(&src);
+    // one diagnostic for x @ y
+    assert_eq!(analysis.diagnostics.len(), 1);
+    let mut line_idx = 0u32;
+    let mut col_idx = 0u32;
+    for (idx, line) in src.lines().enumerate() {
+        if let Some(pos) = line.find("z =") {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect("hover info");
+    let shape = hover.shape.as_ref().unwrap();
+    assert_eq!(shape.render(), "B X O");
+}
+
+#[test]
 fn test_hover_infer_shape_on_return() {
     let src = extract_test_case(PY_DATA, 1);
     let analysis = analyze_source(&src);
