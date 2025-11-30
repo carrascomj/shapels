@@ -21,7 +21,14 @@ but before running any code, in your editor of choice.
 
 ## Installation
 
-For now, only compiling from source is supported.
+If you are not using VSCode, go to [the latest release
+page](https://github.com/carrascomj/shapels/releases/latest), download the
+binary for your platform, unzip it and put it in your path.
+
+**shapels**'s VScode extension comes with the binaries prebundled so this
+step is not needed.
+
+### Installing from source
 
 The first step is to [install Rust](https://www.rust-lang.org/tools/install):
 
@@ -38,12 +45,29 @@ cd shapels
 cargo install --path .
 ```
 
+## Editor support
 
-## FAQ
+* [VSCode](https://code.visualstudio.com/download)
 
-* **Can I run shapels in [helix](https://helix-editor.com/)?**
+Just install it from the extensions marketplace, it comes with the `shapels` binary
+prebundled for your platform.
 
-Of course! Just add it to your `languages.toml`:
+But why don't you try neovim?
+
+* [neovim](https://neovim.io/)
+
+Add it to your config (you must have **shapels** in you path):
+
+```lua
+vim.lsp.config('shapels', {cmd={'shapels'}, root_markers={'pyproject.toml', 'setup.py', 'setup.cfg'}, filetypes={'python'}})
+vim.lsp.enable('shapels')
+```
+
+But why don't you try helix?
+
+* [helix](https://helix-editor.com/)
+
+Add it to your `languages.toml` (you must have **shapels** in you path):
 
 ```toml
 [language-server]
@@ -61,6 +85,13 @@ comment-token = "#"
 language-servers = ["shapels"]
 indent = { tab-width = 4, unit = "    " }  
 ```
+
+But why don't you try Emacs?
+
+* [Emacs](https://www.gnu.org/software/emacs/)
+
+It's a language server: it takes input from stdin and sends output to stdout; you probably
+know how to handle that.
 
 ## License
 
