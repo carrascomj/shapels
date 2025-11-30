@@ -1,10 +1,11 @@
 //! Specialized inference of `Shape`s for the various implemented operations.
 
-use crate::{HoverInfo, Imports, Shape, VarState, expr_text_range};
+use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt};
 use rustpython_parser::text_size::TextRange;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::{infer_expr_shape, infer_matmul_shapes, lookup_shape, text_range_to_lsp};
 
@@ -44,6 +45,8 @@ pub fn infer_squeeze(
     record_hovers: bool,
     source: &str,
     whole_range: TextRange,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
     enforce_one: bool,
 ) -> Option<Shape> {
     let diag_before = diagnostics.len();
@@ -57,6 +60,8 @@ pub fn infer_squeeze(
         hover_entries,
         record_hovers,
         source,
+        module_cache.as_deref_mut(),
+        module_path,
     )
     .or_else(|| {
         infer_shallow_shape(
@@ -69,6 +74,8 @@ pub fn infer_squeeze(
             hover_entries,
             record_hovers,
             source,
+            module_cache,
+            module_path,
         )
     })?;
 
@@ -157,6 +164,8 @@ fn infer_shallow_shape(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
 ) -> Option<Shape> {
     match expr {
         Expr::BinOp(ExprBinOp {
@@ -178,6 +187,8 @@ fn infer_shallow_shape(
                     record_hovers,
                     source,
                     *range,
+                    module_cache,
+                    module_path,
                 );
             }
             None
@@ -301,6 +312,8 @@ pub fn infer_unsqueeze(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
 ) -> Option<Shape> {
     let base_shape = infer_expr_shape(
         base_expr,
@@ -312,6 +325,8 @@ pub fn infer_unsqueeze(
         hover_entries,
         record_hovers,
         source,
+        module_cache,
+        module_path,
     )?;
     let dim = dim_arg.and_then(expr_to_dim_token)?;
     let dim_i: i64 = dim.parse().ok()?;

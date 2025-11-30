@@ -8,7 +8,7 @@ use lsp_types::{
     notification::PublishDiagnostics,
     request::{DocumentDiagnosticRequest, HoverRequest},
 };
-use shapels::analyze_source;
+use shapels::{analyze_source, analyze_source_at_path};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -84,7 +84,11 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
             let uri = params.text_document_position_params.text_document.uri;
             let pos = params.text_document_position_params.position;
             let result = documents.get(&uri).and_then(|text| {
-                let analysis = analyze_source(text);
+                let analysis = uri
+                    .to_file_path()
+                    .ok()
+                    .map(|p| analyze_source_at_path(text, &p))
+                    .unwrap_or_else(|| analyze_source(text));
                 analysis.hover(pos).and_then(|info| {
                     info.shape.as_ref().map(|shape| Hover {
                         contents: HoverContents::Markup(MarkupContent {
@@ -109,7 +113,12 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
             let uri = params.text_document.uri;
             let diagnostics = documents
                 .get(&uri)
-                .map(|text| analyze_source(text).diagnostics)
+                .map(|text| {
+                    uri.to_file_path()
+                        .ok()
+                        .map(|p| analyze_source_at_path(text, &p).diagnostics)
+                        .unwrap_or_else(|| analyze_source(text).diagnostics)
+                })
                 .unwrap_or_default();
             let full = FullDocumentDiagnosticReport {
                 result_id: None,

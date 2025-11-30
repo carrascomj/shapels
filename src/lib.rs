@@ -3,6 +3,8 @@ use rustpython_parser::Parse;
 use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt, Suite};
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 mod ops;
 use ops::{
     infer_matmul, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
@@ -68,18 +70,229 @@ pub const AGGR_ALIASES: [&'static str; 21] = [
     "norm",
 ];
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Imports {
     torch_aliases: HashSet<Identifier>,
     /// Maps simple function name (e.g., "mm") to all aliases in scope.
     func_aliases: HashMap<&'static str, HashSet<Identifier>>,
+    /// Module alias mapping for `import foo as bar` style.
+    module_aliases: HashMap<Identifier, String>,
+    /// Symbol imports mapping alias -> (module, original name).
+    from_imports: HashMap<Identifier, (String, Identifier)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedModule {
+    path: PathBuf,
+    source: String,
+    func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: Imports,
+}
+
+pub(crate) struct ModuleCache {
+    modules: HashMap<String, CachedModule>,
+    project_root: Option<PathBuf>,
+}
+
+impl ModuleCache {
+    fn new(current_file: &Path) -> Self {
+        let project_root = find_project_root(current_file);
+        Self {
+            modules: HashMap::new(),
+            project_root,
+        }
+    }
+
+    fn project_root(&self) -> Option<&Path> {
+        self.project_root.as_deref()
+    }
+
+    /// Return a cloned module entry, loading and parsing it if necessary.
+    fn get_module(&mut self, module_name: &str, current_file: &Path) -> Option<CachedModule> {
+        if let Some(cached) = self.modules.get(module_name) {
+            return Some(cached.clone());
+        }
+        let path = resolve_module_path(module_name, current_file, self.project_root.as_deref())?;
+        let source = fs::read_to_string(&path).ok()?;
+        let module = Suite::parse(&source, module_name).ok()?;
+        let imports = collect_imports(&module, Some(&path), self.project_root());
+        let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
+        for stmt in &module {
+            if let Stmt::FunctionDef(func) = stmt {
+                func_map.insert(func.name.clone(), (func.args.clone(), func.body.clone()));
+            }
+        }
+        let cached = CachedModule {
+            path,
+            source,
+            func_map,
+            imports,
+        };
+        self.modules
+            .insert(module_name.to_string(), cached.clone());
+        Some(cached)
+    }
+}
+
+fn find_project_root(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.parent();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    while let Some(current) = dir {
+        if current.join(".git").exists()
+            || current.join("pyproject.toml").exists()
+            || current.join("setup.py").exists()
+            || current.join("setup.cfg").exists()
+        {
+            return Some(current.to_path_buf());
+        }
+        if Some(current.to_path_buf()) == home {
+            break;
+        }
+        dir = current.parent();
+    }
+    None
+}
+
+fn resolve_module_path(
+    module: &str,
+    current_file: &Path,
+    project_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let mut search_roots: Vec<PathBuf> = Vec::new();
+
+    if let Some(parent) = current_file.parent() {
+        search_roots.push(parent.to_path_buf());
+    }
+    if let Some(prj) = project_root {
+        search_roots.push(prj.to_path_buf());
+        let src_dir = prj.join("src");
+        if src_dir.exists() {
+            search_roots.push(src_dir);
+        }
+    }
+
+    // Search for virtual environment markers in PATH.
+    if let Ok(path_var) = std::env::var("PATH") {
+        for entry in path_var.split(':') {
+            if !entry.contains(".venv") {
+                continue;
+            }
+            let mut p = PathBuf::from(entry);
+            while let Some(parent) = p.parent() {
+                if let Some(name) = parent.file_name()
+                    && name.to_string_lossy().contains(".venv")
+                {
+                    let venv_dir = parent.to_path_buf();
+                    // parent of .venv might be the project root
+                    if let Some(parent_parent) = venv_dir.parent() {
+                        search_roots.push(parent_parent.to_path_buf());
+                    }
+                    // site-packages paths
+                    let lib_dir = venv_dir.join("lib");
+                    if lib_dir.exists() {
+                        if let Ok(entries) = fs::read_dir(&lib_dir) {
+                            for entry in entries.flatten() {
+                                let fname = entry.file_name();
+                                if fname.to_string_lossy().starts_with("python") {
+                                    let sp = entry.path().join("site-packages");
+                                    if sp.exists() {
+                                        search_roots.push(sp);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+                p = parent.to_path_buf();
+            }
+        }
+    }
+
+    // Convert module name to path components.
+    let parts: Vec<&str> = module.split('.').collect();
+    for root in search_roots {
+        let mut base = root.clone();
+        for part in &parts {
+            base.push(part);
+        }
+        let file_candidate = base.with_extension("py");
+        if file_candidate.exists() {
+            return Some(file_candidate);
+        }
+        let init_candidate = base.join("__init__.py");
+        if init_candidate.exists() {
+            return Some(init_candidate);
+        }
+        // Heuristic: if root already points at the top-level package (e.g., root ends with parts[0]),
+        // try resolving without repeating the first component to avoid example_python/example_python duplication.
+        if let Some(root_name) = root.file_name()
+            && root_name == parts.first().map(|s| std::ffi::OsStr::new(s)).unwrap_or_else(|| std::ffi::OsStr::new(""))
+            && parts.len() > 1
+        {
+            let mut base = root.clone();
+            for part in parts.iter().skip(1) {
+                base.push(part);
+            }
+            let file_candidate = base.with_extension("py");
+            if file_candidate.exists() {
+                return Some(file_candidate);
+            }
+            let init_candidate = base.join("__init__.py");
+            if init_candidate.exists() {
+                return Some(init_candidate);
+            }
+        }
+    }
+    None
 }
 
 pub fn analyze_source(source: &str) -> Analysis {
+    analyze_source_internal(source, None, None)
+}
+
+/// Analyze in-memory source but anchored at a file path so imports can resolve.
+pub fn analyze_source_at_path(source: &str, path: &Path) -> Analysis {
+    let mut cache = ModuleCache::new(path);
+    analyze_source_internal(source, Some(path), Some(&mut cache))
+}
+
+/// Analyze a python file with module resolution enabled.
+pub fn analyze_file(path: &Path) -> Analysis {
+    match fs::read_to_string(path) {
+        Ok(src) => {
+            let mut cache = ModuleCache::new(path);
+            analyze_source_internal(&src, Some(path), Some(&mut cache))
+        }
+        Err(err) => Analysis {
+            diagnostics: vec![Diagnostic {
+                range: default_range(),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: format!("Failed to read file: {err}"),
+                related_information: None,
+                tags: None,
+                data: None,
+            }],
+            hover_entries: Vec::new(),
+        },
+    }
+}
+
+fn analyze_source_internal<'a>(
+    source: &'a str,
+    current_path: Option<&'a Path>,
+    mut module_cache: Option<&mut ModuleCache>,
+) -> Analysis {
     let mut analysis = Analysis::default();
-    match Suite::parse(source, "<memory>") {
+    let parse_name = current_path
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "<memory>".to_string());
+    match Suite::parse(source, &parse_name) {
         Ok(module) => {
-            let imports = collect_imports(&module);
+            let imports = collect_imports(&module, current_path, module_cache.as_deref().and_then(|c| c.project_root()));
             // collect function definitions first
             let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
             for stmt in &module {
@@ -97,6 +310,8 @@ pub fn analyze_source(source: &str) -> Analysis {
                         &func_map,
                         &imports,
                         &mut Vec::new(),
+                        module_cache.as_deref_mut(),
+                        current_path,
                     );
                     analysis.diagnostics.append(&mut func_analysis.diagnostics);
                     analysis
@@ -129,6 +344,8 @@ fn analyze_function(
     func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
 ) -> Analysis {
     let (diagnostics, hover_entries, _) = simulate_function(
         args,
@@ -139,6 +356,8 @@ fn analyze_function(
         call_stack,
         HashMap::new(),
         true,
+        module_cache,
+        module_path,
     );
 
     Analysis {
@@ -157,6 +376,8 @@ fn simulate_function(
     call_stack: &mut Vec<Identifier>,
     mut initial_vars: HashMap<Identifier, VarState>,
     record_hovers: bool,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
 ) -> (Vec<Diagnostic>, Vec<(Range, HoverInfo)>, Option<Shape>) {
     let mut diagnostics = Vec::new();
     let mut hover_entries = Vec::new();
@@ -192,6 +413,8 @@ fn simulate_function(
                             &mut hover_entries,
                             record_hovers,
                             source,
+                            module_cache.as_deref_mut(),
+                            module_path,
                         );
                     }
                     if let (Some(ann), Some(inf)) = (ann_shape.clone(), inferred.clone())
@@ -244,6 +467,8 @@ fn simulate_function(
                         &mut hover_entries,
                         record_hovers,
                         source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                     // fallback for squeeze/unsqueeze when inference failed
                     if shape.is_none()
@@ -278,29 +503,33 @@ fn simulate_function(
                                     &vars,
                                     func_map,
                                     imports,
-                                    call_stack,
-                                    &mut diagnostics,
-                                    &mut hover_entries,
-                                    record_hovers,
-                                    source,
-                                    call.range,
-                                    true,
-                                );
-                            }
-                        } else if attr_name == "unsqueeze" {
-                            shape = infer_unsqueeze(
-                                &attr.value,
-                                call.args.first(),
-                                &vars,
-                                func_map,
-                                imports,
                                 call_stack,
                                 &mut diagnostics,
                                 &mut hover_entries,
                                 record_hovers,
                                 source,
+                                call.range,
+                                module_cache.as_deref_mut(),
+                                module_path,
+                                true,
                             );
                         }
+                    } else if attr_name == "unsqueeze" {
+                        shape = infer_unsqueeze(
+                            &attr.value,
+                            call.args.first(),
+                            &vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            &mut diagnostics,
+                            &mut hover_entries,
+                            record_hovers,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                    }
                     }
                     if let Some(shape) = shape {
                         vars.insert(
@@ -328,6 +557,8 @@ fn simulate_function(
                         &mut hover_entries,
                         record_hovers,
                         source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     )
                     .or(return_shape);
                     if record_hovers && let Some(shape) = return_shape.clone() {
@@ -354,6 +585,8 @@ fn infer_expr_shape(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
 ) -> Option<Shape> {
     match expr {
         Expr::BinOp(ExprBinOp {
@@ -375,6 +608,8 @@ fn infer_expr_shape(
                     record_hovers,
                     source,
                     *expr_range,
+                    module_cache.as_deref_mut(),
+                    module_path,
                 );
             }
             None
@@ -396,7 +631,67 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
+                }
+                if let Some((module_name, original)) = imports.from_imports.get(&func_name.id) {
+                    if let (Some(cache), Some(cur_path)) =
+                        (module_cache.as_deref_mut(), module_path)
+                        && let Some(module) = cache.get_module(module_name, cur_path)
+                    {
+                        if let Some((callee_args, callee_body)) = module.func_map.get(original) {
+                            // avoid infinite recursion
+                            if call_stack.iter().any(|id| id == &func_name.id) {
+                                return None;
+                            }
+                            let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
+                            for (idx, param) in callee_args.args.iter().enumerate() {
+                                if let Some(arg_expr) = call.args.get(idx)
+                                    && let Some(shape) = infer_expr_shape(
+                                        arg_expr,
+                                        vars,
+                                        func_map,
+                                        imports,
+                                        call_stack,
+                                        diagnostics,
+                                        hover_entries,
+                                        record_hovers,
+                                        source,
+                                        module_cache.as_deref_mut(),
+                                        module_path,
+                                    )
+                                {
+                                    arg_shapes.insert(
+                                        param.def.arg.clone(),
+                                        VarState {
+                                            annotated: None,
+                                            inferred: Some(shape),
+                                        },
+                                    );
+                                }
+                            }
+                            call_stack.push(func_name.id.clone());
+                            let (mut diag, mut hovers, ret_shape) = simulate_function(
+                                callee_args.as_ref(),
+                                callee_body,
+                                &module.source,
+                                &module.func_map,
+                                &module.imports,
+                                call_stack,
+                                arg_shapes,
+                                false,
+                                module_cache.as_deref_mut(),
+                                Some(module.path.as_path()),
+                            );
+                            diagnostics.append(&mut diag);
+                            if record_hovers {
+                                hover_entries.append(&mut hovers);
+                            }
+                            call_stack.pop();
+                            return ret_shape;
+                        }
+                    }
                 }
                 if (is_alias_of("view", &func_name.id, imports)
                     || is_alias_of("reshape", &func_name.id, imports))
@@ -507,6 +802,8 @@ fn infer_expr_shape(
                         hover_entries,
                         record_hovers,
                         source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 }
                 if is_alias_of("squeeze", &func_name.id, imports)
@@ -524,6 +821,8 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
                         true,
                     );
                 }
@@ -548,6 +847,8 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
                         false,
                     );
                 }
@@ -570,6 +871,8 @@ fn infer_expr_shape(
                                 hover_entries,
                                 record_hovers,
                                 source,
+                                module_cache.as_deref_mut(),
+                                module_path,
                             )
                         {
                             arg_shapes.insert(
@@ -591,6 +894,8 @@ fn infer_expr_shape(
                         call_stack,
                         arg_shapes,
                         false,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                     diagnostics.append(&mut diag);
                     if record_hovers {
@@ -603,6 +908,63 @@ fn infer_expr_shape(
             // methods are functions with attributes
             if let Expr::Attribute(attr) = call.func.as_ref() {
                 let attr_name: &str = attr.attr.as_ref();
+                if let Expr::Name(module_ident) = attr.value.as_ref()
+                    && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
+                    && module_name != "torch"
+                    && let (Some(cache), Some(cur_path)) =
+                        (module_cache.as_deref_mut(), module_path)
+                    && let Some(module) = cache.get_module(module_name, cur_path)
+                    && let Some((callee_args, callee_body)) = module.func_map.get(&attr.attr)
+                {
+                    if call_stack.iter().any(|id| id == &attr.attr) {
+                        return None;
+                    }
+                    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
+                    for (idx, param) in callee_args.args.iter().enumerate() {
+                        if let Some(arg_expr) = call.args.get(idx)
+                            && let Some(shape) = infer_expr_shape(
+                                arg_expr,
+                                vars,
+                                func_map,
+                                imports,
+                                call_stack,
+                                diagnostics,
+                                hover_entries,
+                                record_hovers,
+                                source,
+                                module_cache.as_deref_mut(),
+                                module_path,
+                            )
+                        {
+                            arg_shapes.insert(
+                                param.def.arg.clone(),
+                                VarState {
+                                    annotated: None,
+                                    inferred: Some(shape),
+                                },
+                            );
+                        }
+                    }
+                    call_stack.push(attr.attr.clone());
+                    let (mut diag, mut hovers, ret_shape) = simulate_function(
+                        callee_args.as_ref(),
+                        callee_body,
+                        &module.source,
+                        &module.func_map,
+                        &module.imports,
+                        call_stack,
+                        arg_shapes,
+                        false,
+                        module_cache.as_deref_mut(),
+                        Some(module.path.as_path()),
+                    );
+                    diagnostics.append(&mut diag);
+                    if record_hovers {
+                        hover_entries.append(&mut hovers);
+                    }
+                    call_stack.pop();
+                    return ret_shape;
+                }
                 if attr_name == "mm"
                     && is_torch_base(&attr.value, imports)
                     && let (Some(arg0), Some(arg1)) = (call.args.first(), call.args.get(1))
@@ -619,6 +981,8 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 }
                 if attr_name == "view" || attr_name == "reshape" {
@@ -719,6 +1083,8 @@ fn infer_expr_shape(
                         hover_entries,
                         false,
                         source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                     return infer_permute(
                         base,
@@ -744,6 +1110,8 @@ fn infer_expr_shape(
                         hover_entries,
                         record_hovers,
                         source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 } else if attr_name == "squeeze" {
                     // tensor.squeeze(...) vs torch.squeeze(tensor, ...)
@@ -779,6 +1147,8 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
                         true,
                     );
                 } else if AGGR_ALIASES.contains(&attr_name) {
@@ -814,6 +1184,8 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
                         false,
                     );
                 }
@@ -837,6 +1209,8 @@ fn infer_expr_shape(
                                 hover_entries,
                                 false,
                                 source,
+                                module_cache.as_deref_mut(),
+                                module_path,
                             )
                         },
                     );
@@ -890,6 +1264,8 @@ fn infer_matmul_shapes(
     record_hovers: bool,
     source: &str,
     whole_range: TextRange,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
 ) -> Option<Shape> {
     let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
         infer_expr_shape(
@@ -902,6 +1278,8 @@ fn infer_matmul_shapes(
             hover_entries,
             false,
             source,
+            module_cache.as_deref_mut(),
+            module_path,
         )
     });
     let right_shape =
@@ -916,6 +1294,8 @@ fn infer_matmul_shapes(
                 hover_entries,
                 false,
                 source,
+                module_cache.as_deref_mut(),
+                module_path,
             )
         });
     match (left_shape, right_shape) {
@@ -987,7 +1367,7 @@ fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
 /// In that example, shapels has to keep track that `torch_sum` is
 /// an alias to `torch.sum` and `t` of `torch` to identify this
 /// functions in the scope and perform shape inference.
-fn collect_imports(module: &[Stmt]) -> Imports {
+fn collect_imports(module: &[Stmt], module_path: Option<&Path>, project_root: Option<&Path>) -> Imports {
     let mut imports = Imports::default();
     // seed known function names
     for fname in ["mm", "view", "reshape", "sum", "permute", "transpose", "t"] {
@@ -1009,6 +1389,9 @@ fn collect_imports(module: &[Stmt]) -> Imports {
                         .asname
                         .clone()
                         .unwrap_or_else(|| Identifier::from(name));
+                    imports
+                        .module_aliases
+                        .insert(as_id.clone(), name.to_string());
                     if name == "torch" {
                         imports.torch_aliases.insert(as_id.clone());
                     }
@@ -1020,7 +1403,8 @@ fn collect_imports(module: &[Stmt]) -> Imports {
                 }
             }
             Stmt::ImportFrom(f) => {
-                if let Some(module) = &f.module
+                let resolved_module = resolve_from_module(f, module_path, project_root);
+                if let Some(module) = &resolved_module
                     && module == "torch"
                 {
                     for alias in &f.names {
@@ -1039,12 +1423,85 @@ fn collect_imports(module: &[Stmt]) -> Imports {
                             imports.func_aliases.entry("sum").or_default().insert(id);
                         }
                     }
+                } else if let Some(module) = &resolved_module {
+                    for alias in &f.names {
+                        let id = alias
+                            .asname
+                            .clone()
+                            .unwrap_or_else(|| Identifier::from(alias.name.as_str()));
+                        imports
+                            .from_imports
+                            .insert(id, (module.to_string(), alias.name.clone()));
+                    }
                 }
             }
             _ => {}
         }
     }
     imports
+}
+
+fn module_name_from_path(path: &Path, project_root: Option<&Path>) -> Option<String> {
+    let mut dir = path.parent()?;
+    let mut parts = Vec::new();
+    loop {
+        if dir.join("__init__.py").exists() {
+            if let Some(name) = dir.file_name().and_then(|s| s.to_str()) {
+                parts.push(name.to_string());
+            }
+        } else {
+            break;
+        }
+        if let Some(root) = project_root {
+            if dir == root {
+                break;
+            }
+        }
+        if let Some(parent) = dir.parent() {
+            dir = parent;
+        } else {
+            break;
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        parts.reverse();
+        Some(parts.join("."))
+    }
+}
+
+fn resolve_from_module(f: &ast::StmtImportFrom, module_path: Option<&Path>, project_root: Option<&Path>) -> Option<String> {
+    // Absolute import
+    let level_val = f.level.map(|i| i.to_usize()).unwrap_or(0);
+    if level_val == 0 {
+        return f.module.as_ref().map(|m| m.to_string());
+    }
+    let base_pkg = module_path
+        .and_then(|p| module_name_from_path(p, project_root))
+        .unwrap_or_default();
+    if base_pkg.is_empty() {
+        return f.module.as_ref().map(|m| m.to_string());
+    }
+    let mut parts: Vec<String> = base_pkg.split('.').map(|s| s.to_string()).collect();
+    if level_val > 0 {
+        let pops = level_val.saturating_sub(1);
+        for _ in 0..pops {
+            if parts.pop().is_none() {
+                break;
+            }
+        }
+    }
+    if let Some(mod_name) = &f.module {
+        for p in mod_name.as_str().split('.') {
+            parts.push(p.to_string());
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("."))
+    }
 }
 
 fn parse_shape_annotation(expr: &Expr) -> Option<Shape> {
