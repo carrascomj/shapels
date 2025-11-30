@@ -2,13 +2,24 @@
 
 jaxtyping + LSP.
 
-**shapels** provides _shape inference_ in your editor for torch tensors.
+**shapels** provides _shape inference_ for torch tensors inside your editor.
 
 ![showcase of shapels inside helix](./assets/readme_showcase.png)
 
+_But what does that mean?_ In the example above, **shapels** tracks the tensor dimensions
+and is able to report the wrong matrix multiplication that would have caused a runtime error.
+
+Not only that: when hovering over a tensor, it reports the shape of that tensor
+through static analysis, even if no annotation was provided. It's effectively
+replacing
+
+```python
+print(f"x -> {x.shape}")
+```
+
+but before running any code, in your editor of choice.
 
 ## Installation
-
 
 For now, only compiling from source is supported.
 
@@ -30,7 +41,7 @@ cargo install --path .
 
 ## FAQ
 
-* **Can I run **shapels** in [helix](https://helix-editor.com/)?**
+* **Can I run shapels in [helix](https://helix-editor.com/)?**
 
 Of course! Just add it to your `languages.toml`:
 
