@@ -182,3 +182,55 @@ fn test_hover_on_squeeze_all() {
     let shape = hover.shape.as_ref().unwrap();
     assert_eq!(shape.render(), "B R");
 }
+
+#[test]
+fn test_unsqueeze_hover_dim0_pos() {
+    let src = extract_test_case(VIEW_PY_DATA, 7);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    let mut line_idx = 0u32;
+    let mut col_idx = 0u32;
+    let (pat, expected) = ("z_pos", "1 B R");
+    for (idx, line) in src.lines().enumerate() {
+        // this is the first x, inside the parent function (early break)
+        if let Some(pos) = line.find(pat) {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+            break;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect(format!("No hover found for {pat}").as_str());
+    let shape = hover.shape.as_ref().unwrap();
+    assert_eq!(shape.render(), expected);
+}
+
+#[test]
+fn test_unsqueeze_hover_dim0_arg() {
+    let src = extract_test_case(VIEW_PY_DATA, 7);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    let mut line_idx = 0u32;
+    let mut col_idx = 0u32;
+    let (pat, expected) = ("z_arg", "1 R");
+    for (idx, line) in src.lines().enumerate() {
+        // this is the first x, inside the parent function (early break)
+        if let Some(pos) = line.find(pat) {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+            break;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect(format!("No hover found for {pat}").as_str());
+    let shape = hover.shape.as_ref().unwrap();
+    assert_eq!(shape.render(), expected);
+}

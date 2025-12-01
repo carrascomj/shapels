@@ -150,3 +150,12 @@ x: Float[Tensor, "B X R"] = torch.Tensor(B, X, R)
 y: Float[Tensor, "O R"] = torch.Tensor(O, R)
 bad = x @ y
 z = transpose_and_multiply(x, y)
+
+
+# test 11
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def proper_multiply_mm_as_method(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B X S"]:
+    z: F[T, "B X S"] = x.mm(y)
+    return z

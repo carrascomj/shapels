@@ -5,7 +5,7 @@ from torch import Tensor as T
 def view_returns_right_dimensions():
     B, X, R, O = 4, 2, 16, 8
     x: F[T, "B X R"] = torch.Tensor(B, X, R)
-    x = x.view(B*X, R, 0)
+    x = x.view(B*X, R, O)
     y = x.view(B*X, -1)
 
 
@@ -64,4 +64,14 @@ from torch import Tensor as T
 def squeeze_all_is_correct():
     x: F[T, "B 1 R 1"] = torch.Tensor(B, 1, R, 1)
     z = x.squeeze()
+
+# test 7
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def unsqueeze_first_is_correct():
+    x: F[T, "B R"] = torch.Tensor(B, R)
+    y: F[T, "R"] = torch.Tensor(R, )
+    z_pos = torch.unsqueeze(x, 0)
+    z_arg = y.unsqueeze(dim=0)
 

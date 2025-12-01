@@ -1,6 +1,8 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustpython_parser::Parse;
-use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt, Suite};
+use rustpython_parser::ast::{
+    self, Arguments, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt, Suite,
+};
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -538,8 +540,7 @@ fn simulate_function(
                     && let Some(name) = name_from_expr(&assign.targets[0])
                 {
                     let range = text_range_to_lsp(expr_text_range(&assign.targets[0]), source);
-                    let diag_before = diagnostics.len();
-                    let mut shape = infer_expr_shape(
+                    let shape = infer_expr_shape(
                         &assign.value,
                         &vars,
                         func_map,
@@ -552,67 +553,6 @@ fn simulate_function(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                    // fallback for squeeze/unsqueeze when inference failed
-                    if shape.is_none()
-                        && diagnostics.len() == diag_before
-                        && let Expr::Call(call) = &*assign.value
-                        && let Expr::Attribute(attr) = call.func.as_ref()
-                    {
-                        let attr_name: &str = attr.attr.as_ref();
-                        if attr_name == "squeeze" {
-                            let (base, dim_arg) = if is_torch_base(&attr.value, imports) {
-                                let base = call.args.first();
-                                let dim_kw = call
-                                    .keywords
-                                    .iter()
-                                    .find(|kw| kw.arg.as_deref() == Some("dim"))
-                                    .map(|kw| &kw.value);
-                                let dim_pos = call.args.get(1);
-                                (base, dim_kw.or(dim_pos))
-                            } else {
-                                let dim_kw = call
-                                    .keywords
-                                    .iter()
-                                    .find(|kw| kw.arg.as_deref() == Some("dim"))
-                                    .map(|kw| &kw.value);
-                                let dim_pos = call.args.first();
-                                (Some(attr.value.as_ref()), dim_kw.or(dim_pos))
-                            };
-                            if let Some(base_expr) = base {
-                                shape = infer_squeeze(
-                                    base_expr,
-                                    dim_arg,
-                                    &vars,
-                                    func_map,
-                                    imports,
-                                    call_stack,
-                                    &mut diagnostics,
-                                    &mut hover_entries,
-                                    record_hovers,
-                                    source,
-                                    call.range,
-                                    module_cache.as_deref_mut(),
-                                    module_path,
-                                    true,
-                                );
-                            }
-                        } else if attr_name == "unsqueeze" {
-                            shape = infer_unsqueeze(
-                                &attr.value,
-                                call.args.first(),
-                                &vars,
-                                func_map,
-                                imports,
-                                call_stack,
-                                &mut diagnostics,
-                                &mut hover_entries,
-                                record_hovers,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            );
-                        }
-                    }
                     if let Some(shape) = shape {
                         vars.insert(
                             name.clone(),
@@ -807,8 +747,7 @@ fn infer_expr_shape(
                         source,
                         call.range,
                     );
-                }
-                if is_alias_of("permute", &func_name.id, imports)
+                } else if is_alias_of("permute", &func_name.id, imports)
                     && let Some(base) = call.args.first()
                 {
                     let order_args: Vec<&Expr> = if call.args.len() >= 2 {
@@ -832,8 +771,7 @@ fn infer_expr_shape(
                         source,
                         call.range,
                     );
-                }
-                if is_alias_of("transpose", &func_name.id, imports)
+                } else if is_alias_of("transpose", &func_name.id, imports)
                     && let Some(base) = call.args.first()
                 {
                     let order_args: Vec<&Expr> = if call.args.len() >= 3 {
@@ -859,8 +797,7 @@ fn infer_expr_shape(
                         source,
                         call.range,
                     );
-                }
-                if is_alias_of("t", &func_name.id, imports)
+                } else if is_alias_of("t", &func_name.id, imports)
                     && let Some(base) = call.args.first()
                 {
                     let order_args: Vec<&Expr> = if call.args.len() >= 3 {
@@ -886,13 +823,12 @@ fn infer_expr_shape(
                         source,
                         call.range,
                     );
-                }
-                if is_alias_of("unsqueeze", &func_name.id, imports)
+                } else if is_alias_of("unsqueeze", &func_name.id, imports)
                     && let Some(arg0) = call.args.first()
                 {
                     return infer_unsqueeze(
                         arg0,
-                        call.args.get(1),
+                        get_arg(call, "dim", 1),
                         vars,
                         func_map,
                         imports,
@@ -904,13 +840,12 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                }
-                if is_alias_of("squeeze", &func_name.id, imports)
+                } else if is_alias_of("squeeze", &func_name.id, imports)
                     && let Some(arg0) = call.args.first()
                 {
                     return infer_squeeze(
                         arg0,
-                        call.args.get(1),
+                        get_arg(call, "dim", 1),
                         vars,
                         func_map,
                         imports,
@@ -924,8 +859,7 @@ fn infer_expr_shape(
                         module_path,
                         true,
                     );
-                }
-                if is_alias_of("sum", &func_name.id, imports)
+                } else if is_alias_of("sum", &func_name.id, imports)
                     && let Some(arg0) = call.args.first()
                 {
                     let dim_arg = call
@@ -1064,25 +998,32 @@ fn infer_expr_shape(
                     call_stack.pop();
                     return ret_shape;
                 }
-                if attr_name == "mm"
-                    && is_torch_base(&attr.value, imports)
-                    && let (Some(arg0), Some(arg1)) = (call.args.first(), call.args.get(1))
-                {
-                    return infer_matmul_shapes(
-                        arg0,
-                        arg1,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
+                // two cases: torch.ATTR_NAME(torch.Tensor, ...) or torch.Tensor.ATTR_NAME(...)
+                let in_torch = is_torch_base(&attr.value, imports);
+                let offset = if in_torch { 1 } else { 0 };
+                if attr_name == "mm" {
+                    let args = match (in_torch, call.args.get(0), call.args.get(1)) {
+                        (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
+                        (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
+                        _ => None,
+                    };
+                    if let Some((arg0, arg1)) = args {
+                        return infer_matmul_shapes(
+                            arg0,
+                            arg1,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                    }
                 }
                 if attr_name == "view" || attr_name == "reshape" {
                     if lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
@@ -1198,9 +1139,16 @@ fn infer_expr_shape(
                         call.range,
                     );
                 } else if attr_name == "unsqueeze" {
+                    let (base, offset) = if in_torch {
+                        // torch.unsqueeze(torch.Tensor, ...)
+                        (call.args.first()?, 1)
+                    } else {
+                        (attr.value.as_ref(), 0)
+                    };
+                    let dim_arg = get_arg(&call, "dim", offset);
                     return infer_unsqueeze(
-                        &attr.value,
-                        call.args.first(),
+                        base,
+                        dim_arg,
                         vars,
                         func_map,
                         imports,
@@ -1214,29 +1162,15 @@ fn infer_expr_shape(
                     );
                 } else if attr_name == "squeeze" {
                     // tensor.squeeze(...) vs torch.squeeze(tensor, ...)
-                    let (base, dim_arg) = if is_torch_base(&attr.value, imports) {
-                        // first positional is the tensor, dim is 2nd positional or keyword
-                        let base = call.args.first()?;
-                        let dim_kw = call
-                            .keywords
-                            .iter()
-                            .find(|kw| kw.arg.as_deref() == Some("dim"))
-                            .map(|kw| &kw.value);
-                        let dim_pos = call.args.get(1);
-                        (base, dim_kw.or(dim_pos))
+                    let base = if in_torch {
+                        call.args.first()?
                     } else {
-                        let base = attr.value.as_ref();
-                        let dim_kw = call
-                            .keywords
-                            .iter()
-                            .find(|kw| kw.arg.as_deref() == Some("dim"))
-                            .map(|kw| &kw.value);
-                        let dim_pos = call.args.first();
-                        (base, dim_kw.or(dim_pos))
+                        attr.value.as_ref()
                     };
+
                     return infer_squeeze(
                         base,
-                        dim_arg,
+                        get_arg(&call, "dim", offset),
                         vars,
                         func_map,
                         imports,
@@ -1252,28 +1186,14 @@ fn infer_expr_shape(
                     );
                 } else if AGGR_ALIASES.contains(&attr_name) {
                     // tensor.sum(...) vs torch.sum(tensor, ...)
-                    let (base, dim_source) = if is_torch_base(&attr.value, imports) {
-                        let base = call.args.first()?;
-                        let dim_kw = call
-                            .keywords
-                            .iter()
-                            .find(|kw| kw.arg.as_deref() == Some("dim"))
-                            .map(|kw| &kw.value);
-                        let dim_pos = call.args.get(1);
-                        (base, dim_kw.or(dim_pos))
+                    let base = if in_torch {
+                        call.args.first()?
                     } else {
-                        let base = attr.value.as_ref();
-                        let dim_kw = call
-                            .keywords
-                            .iter()
-                            .find(|kw| kw.arg.as_deref() == Some("dim"))
-                            .map(|kw| &kw.value);
-                        let dim_pos = call.args.first();
-                        (base, dim_kw.or(dim_pos))
+                        attr.value.as_ref()
                     };
                     return infer_squeeze(
                         base,
-                        dim_source,
+                        get_arg(&call, "dim", offset),
                         vars,
                         func_map,
                         imports,
@@ -1374,7 +1294,7 @@ fn lookup_shape(
 
 fn is_torch_base(expr: &Expr, imports: &Imports) -> bool {
     match expr {
-        Expr::Name(n) => n.id.to_string() == "torch" || imports.torch_aliases.contains(&n.id),
+        Expr::Name(n) => n.id.as_str() == "torch" || imports.torch_aliases.contains(&n.id),
         _ => false,
     }
 }
@@ -1404,7 +1324,16 @@ fn collect_imports(
 ) -> Imports {
     let mut imports = Imports::default();
     // seed known function names
-    for fname in ["mm", "view", "reshape", "sum", "permute", "transpose", "t"] {
+    for fname in [
+        "mm",
+        "view",
+        "reshape",
+        "sum",
+        "permute",
+        "transpose",
+        "t",
+        "softmax",
+    ] {
         imports
             .func_aliases
             .entry(fname)
@@ -1722,4 +1651,18 @@ fn default_range() -> Range {
             character: 1,
         },
     }
+}
+
+fn get_arg<'a, R>(
+    call: &'a ExprCall<R>,
+    name_arg: &str,
+    as_positional: usize,
+) -> Option<&'a Expr<R>> {
+    // first check for named args
+    let dim_keyword = call
+        .keywords
+        .iter()
+        .find(|kw| kw.arg.as_deref() == Some(name_arg))
+        .map(|kw| &kw.value);
+    dim_keyword.or(call.args.get(as_positional))
 }

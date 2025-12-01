@@ -1,4 +1,11 @@
 //! Specialized inference of `Shape`s for the various implemented operations.
+//!
+//! Word of caution: the `dim` argument in torch methods and functions expects
+//! a int64_t in the ATen implementation
+//! (e.g., [here](https://github.com/pytorch/pytorch/blob/9f7fceb887d0cfa0326a59b887821c63ff11340a/torch/csrc/lazy/core/ops/utils.cpp#L92)).
+//! However, in functions like (un)squeeze or reduce ops, shapels parses dim as i16 because
+//! i64 is excessive for operations that relate to the number of dimensions and
+//! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments)]
 use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
@@ -271,14 +278,7 @@ fn infer_shallow_shape(
 fn expr_to_dim_token(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Constant(c) => match &c.value {
-            ast::Constant::Int(i) => {
-                let s = i.to_string();
-                if s == "0" {
-                    Some("O".to_string())
-                } else {
-                    Some(s)
-                }
-            }
+            ast::Constant::Int(i) => Some(i.to_string()),
             _ => None,
         },
         Expr::Name(n) => Some(n.id.to_string()),
@@ -306,9 +306,9 @@ fn expr_to_dim_token(expr: &Expr) -> Option<String> {
     }
 }
 
-fn normalize_dim_index_squeeze(idx: i64, len: usize) -> Option<usize> {
+fn normalize_dim_index_squeeze(idx: i16, len: usize) -> Option<usize> {
     let size = len;
-    let adj = if idx >= 0 { idx } else { size as i64 + idx };
+    let adj = if idx >= 0 { idx } else { size as i16 + idx };
     if adj >= 0 && (adj as usize) < size {
         Some(adj as usize)
     } else {
@@ -322,10 +322,10 @@ fn parse_dims(
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
 ) -> Result<Vec<usize>, ()> {
-    let to_i64 = |e: &Expr| expr_to_dim_token(e).and_then(|s| s.parse::<i64>().ok());
-    let dims_i: Vec<i64> = match dim_expr {
-        Expr::Tuple(t) => t.elts.iter().filter_map(to_i64).collect(),
-        other => to_i64(other).into_iter().collect(),
+    let to_i16 = |e: &Expr| expr_to_dim_token(e).and_then(|s| s.parse::<i16>().ok());
+    let dims_i: Vec<i16> = match dim_expr {
+        Expr::Tuple(t) => t.elts.iter().filter_map(to_i16).collect(),
+        other => to_i16(other).into_iter().collect(),
     };
 
     if dims_i.is_empty() {
@@ -397,9 +397,10 @@ pub fn infer_unsqueeze(
         source,
         module_cache,
         module_path,
-    )?;
+    );
+    let base_shape = base_shape?;
     let dim = dim_arg.and_then(expr_to_dim_token)?;
-    let dim_i: i64 = dim.parse().ok()?;
+    let dim_i: i16 = dim.parse().ok()?;
     let idx = normalize_dim_index_unsqueeze(dim_i, base_shape.dims.len())?;
     let mut dims = base_shape.dims.clone();
     dims.insert(idx, "1".to_string());
@@ -409,9 +410,9 @@ pub fn infer_unsqueeze(
     })
 }
 
-fn normalize_dim_index_unsqueeze(idx: i64, len: usize) -> Option<usize> {
+fn normalize_dim_index_unsqueeze(idx: i16, len: usize) -> Option<usize> {
     let size = len + 1;
-    let adj = if idx >= 0 { idx } else { size as i64 + idx };
+    let adj = if idx >= 0 { idx } else { size as i16 + idx };
     if adj >= 0 && (adj as usize) < size {
         Some(adj as usize)
     } else {

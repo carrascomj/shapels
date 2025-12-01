@@ -256,3 +256,29 @@ fn test_hover_hadamard_with_broadcasting_not_broadcastable() {
         assert_eq!(shape.render(), expected);
     }
 }
+
+#[test]
+fn test_torch_mm_as_method_works() {
+    let src = extract_test_case(PY_DATA, 11);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    let mut line_idx = 0u32;
+    let mut col_idx = 0u32;
+    let var = "z:";
+    let expected = "B X S";
+    for (idx, line) in src.lines().enumerate() {
+        if let Some(pos) = line.find(var) {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+            break;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect("No hover info on `z:` for x.mm(y)");
+    let shape = hover.shape.as_ref().unwrap();
+    assert_eq!(shape.render(), expected);
+}
