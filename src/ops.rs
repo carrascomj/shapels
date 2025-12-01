@@ -797,3 +797,59 @@ pub fn infer_permute(
         dims,
     })
 }
+
+/// Infer softmax-like: no-op shapewise, but need to report diagnositcs
+pub fn infer_noop(
+    base_expr: Option<Shape>,
+    dim_arg: Option<&Expr>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+    whole_range: TextRange,
+) -> Option<Shape> {
+    base_expr.filter(|shape| {
+        let Some(Ok(dim_i)) = dim_arg
+            .and_then(expr_to_dim_token)
+            .map(|x| x.parse::<i16>())
+        else {
+            // for softmax at least, dim is always necessary since
+            // some torch version, but it's not explicitly indicated
+            // in the python API so a general LSP won't catch this
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: "dim argument is required!".into(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            return false;
+        };
+        let ndim = shape.dims.len() as i16;
+        if (dim_i > 0) && (dim_i > (ndim - 1))  // positive dims must be a valid index
+            || (dim_i < 0 && dim_i.abs() > ndim && ndim > 0)  // negative dims can be at most -ndim
+            // dim 0 or -1 is always valid even for empty tensors
+            || (ndim == 0 && (dim_i < -1 || dim_i > 0))
+        {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: format!(
+                    "dim={dim_i} is out of range for tensor dims {}",
+                    shape.render()
+                ),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            false
+        } else {
+            true
+        }
+    })
+}

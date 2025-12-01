@@ -13,7 +13,7 @@ use ops::{
     infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 
-use crate::ops::Transpose;
+use crate::ops::{Transpose, infer_noop};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -885,6 +885,29 @@ fn infer_expr_shape(
                         false,
                     );
                 }
+                // TODO: rest of similar noops
+                else if is_alias_of("softmax", &func_name.id, imports) {
+                    let base_hint = infer_expr_shape(
+                        call.args.first()?,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    );
+                    return infer_noop(
+                        base_hint,
+                        get_arg(&call, "dim", 1),
+                        diagnostics,
+                        source,
+                        call.range,
+                    );
+                }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
                     // avoid infinite recursion
                     if call_stack.iter().any(|id| id == &func_name.id) {
@@ -1139,11 +1162,11 @@ fn infer_expr_shape(
                         call.range,
                     );
                 } else if attr_name == "unsqueeze" {
-                    let (base, offset) = if in_torch {
+                    let base = if in_torch {
                         // torch.unsqueeze(torch.Tensor, ...)
-                        (call.args.first()?, 1)
+                        call.args.first()?
                     } else {
-                        (attr.value.as_ref(), 0)
+                        attr.value.as_ref()
                     };
                     let dim_arg = get_arg(&call, "dim", offset);
                     return infer_unsqueeze(
@@ -1206,6 +1229,32 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                         false,
+                    );
+                } else if attr_name == "softmax" {
+                    let base = if in_torch {
+                        call.args.first()?
+                    } else {
+                        attr.value.as_ref()
+                    };
+                    let base_hint = infer_expr_shape(
+                        base,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    );
+                    return infer_noop(
+                        base_hint,
+                        get_arg(&call, "dim", offset),
+                        diagnostics,
+                        source,
+                        call.range,
                     );
                 }
             }
