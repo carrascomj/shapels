@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 mod ops;
 use ops::{
-    infer_hadarmard, infer_matmul, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like,
-    shape_dims_equal,
+    infer_broadcastable_poswise, infer_matmul_shapes, infer_permute, infer_squeeze,
+    infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 
 use crate::ops::Transpose;
@@ -36,6 +36,53 @@ pub struct Analysis {
     pub hover_entries: Vec<(Range, HoverInfo)>,
 }
 
+impl Analysis {
+    pub fn hover(&self, position: Position) -> Option<&HoverInfo> {
+        // Prefer exact containment with smallest span.
+        if let Some((_, info)) = self
+            .hover_entries
+            .iter()
+            .filter(|(range, _)| within(range, &position))
+            .min_by_key(|(range, _)| range_span(range, &position))
+        {
+            return Some(info);
+        }
+
+        // Fallback: nearest entry on the same line to the left.
+        if let Some((_, info)) = self
+            .hover_entries
+            .iter()
+            .filter(|(range, _)| range.start.line == position.line)
+            .min_by_key(|(range, _)| {
+                let a = range.start.character as i64;
+                let b = position.character as i64;
+                (a - b).abs()
+            })
+        {
+            return Some(info);
+        }
+        None
+    }
+}
+
+fn within(range: &Range, pos: &Position) -> bool {
+    (pos.line > range.start.line
+        || (pos.line == range.start.line && pos.character >= range.start.character))
+        && (pos.line < range.end.line
+            || (pos.line == range.end.line && pos.character <= range.end.character))
+}
+
+fn range_span(range: &Range, _pos: &Position) -> u32 {
+    // Prioritize entries that wrap the position tightly.
+    let line_span = (range.end.line as i64 - range.start.line as i64).unsigned_abs() as u32;
+    let char_span = if range.start.line == range.end.line {
+        (range.end.character as i64 - range.start.character as i64).unsigned_abs() as u32
+    } else {
+        1000
+    };
+    line_span * 1000 + char_span
+}
+
 #[derive(Debug, Clone, Default)]
 struct VarState {
     annotated: Option<Shape>,
@@ -45,7 +92,7 @@ struct VarState {
 /// Operations that accept an argument dim (integer or sequence),
 /// return a single tensor and the provided dims have been reduced
 /// from the output tensor.
-pub const AGGR_ALIASES: [&'static str; 21] = [
+pub const AGGR_ALIASES: [&str; 21] = [
     "sum",
     "mean",
     "prod",
@@ -631,7 +678,7 @@ fn infer_expr_shape(
             range: expr_range,
         }) => match op {
             Operator::Mult | Operator::Add | Operator::Sub | Operator::Div => {
-                return infer_hadamard_shapes(
+                return infer_broadcastable_poswise(
                     left,
                     right,
                     vars,
@@ -1303,75 +1350,6 @@ fn infer_expr_shape(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn infer_matmul_shapes(
-    left: &Expr,
-    right: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
-    imports: &Imports,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-    whole_range: TextRange,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-) -> Option<Shape> {
-    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
-        infer_expr_shape(
-            left,
-            vars,
-            func_map,
-            imports,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            false,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
-        )
-    });
-    let right_shape =
-        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
-            infer_expr_shape(
-                right,
-                vars,
-                func_map,
-                imports,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        });
-    match (left_shape, right_shape) {
-        (Some(l), Some(r)) => match infer_matmul(&l, &r) {
-            Ok(shape) => Some(shape),
-            Err(msg) => {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(whole_range, source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: msg,
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
-                None
-            }
-        },
-        _ => None,
-    }
-}
-
 fn lookup_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
@@ -1743,118 +1721,5 @@ fn default_range() -> Range {
             line: 0,
             character: 1,
         },
-    }
-}
-
-impl Analysis {
-    pub fn hover(&self, position: Position) -> Option<&HoverInfo> {
-        // Prefer exact containment with smallest span.
-        if let Some((_, info)) = self
-            .hover_entries
-            .iter()
-            .filter(|(range, _)| within(range, &position))
-            .min_by_key(|(range, _)| range_span(range, &position))
-        {
-            return Some(info);
-        }
-
-        // Fallback: nearest entry on the same line to the left.
-        if let Some((_, info)) = self
-            .hover_entries
-            .iter()
-            .filter(|(range, _)| range.start.line == position.line)
-            .min_by_key(|(range, _)| {
-                let a = range.start.character as i64;
-                let b = position.character as i64;
-                (a - b).abs()
-            })
-        {
-            return Some(info);
-        }
-        None
-    }
-}
-
-fn within(range: &Range, pos: &Position) -> bool {
-    (pos.line > range.start.line
-        || (pos.line == range.start.line && pos.character >= range.start.character))
-        && (pos.line < range.end.line
-            || (pos.line == range.end.line && pos.character <= range.end.character))
-}
-
-fn range_span(range: &Range, _pos: &Position) -> u32 {
-    // Prioritize entries that wrap the position tightly.
-    let line_span = (range.end.line as i64 - range.start.line as i64).unsigned_abs() as u32;
-    let char_span = if range.start.line == range.end.line {
-        (range.end.character as i64 - range.start.character as i64).unsigned_abs() as u32
-    } else {
-        1000
-    };
-    line_span * 1000 + char_span
-}
-#[allow(clippy::too_many_arguments)]
-fn infer_hadamard_shapes(
-    left: &Expr,
-    right: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
-    imports: &Imports,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-    whole_range: TextRange,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-) -> Option<Shape> {
-    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
-        infer_expr_shape(
-            left,
-            vars,
-            func_map,
-            imports,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            false,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
-        )
-    });
-    let right_shape =
-        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
-            infer_expr_shape(
-                right,
-                vars,
-                func_map,
-                imports,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        });
-
-    match infer_hadarmard(left_shape, right_shape) {
-        Ok(shape_opt) => shape_opt,
-        Err(msg) => {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: msg,
-                related_information: None,
-                tags: None,
-                data: None,
-            });
-            None
-        }
     }
 }

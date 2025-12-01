@@ -1,5 +1,5 @@
 //! Specialized inference of `Shape`s for the various implemented operations.
-
+#![allow(clippy::too_many_arguments)]
 use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt};
@@ -7,11 +7,81 @@ use rustpython_parser::text_size::TextRange;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::{infer_expr_shape, infer_matmul_shapes, lookup_shape, text_range_to_lsp};
+use crate::{infer_expr_shape, lookup_shape, text_range_to_lsp};
+
+/// Inference and matrix multiplication shape inference shared by `@` and `torch.mm`.
+/// Keeps all leading dims of left except the last, then appends all trailing dims of right except the first.
+pub fn infer_matmul_shapes(
+    left: &Expr,
+    right: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
+        infer_expr_shape(
+            left,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            false,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        )
+    });
+    let right_shape =
+        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
+            infer_expr_shape(
+                right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        });
+    match (left_shape, right_shape) {
+        (Some(l), Some(r)) => match matmul(&l, &r) {
+            Ok(shape) => Some(shape),
+            Err(msg) => {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: msg,
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                None
+            }
+        },
+        _ => None,
+    }
+}
 
 /// Matrix multiplication shape inference shared by `@` and `torch.mm`.
 /// Keeps all leading dims of left except the last, then appends all trailing dims of right except the first.
-pub fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
+fn matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
     if left.dims.is_empty() || right.dims.is_empty() {
         return Err("Matmul requires both operands to have shapes".into());
     }
@@ -31,8 +101,10 @@ pub fn infer_matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
     })
 }
 
-/// Shared logic for squeeze (enforce_one = true) and sum (enforce_one = false).
-#[allow(clippy::too_many_arguments)]
+/// Shared logic for squeeze (enforce_one = true) and aggregation (enforce_one = false).
+///
+/// An aggregation (or reduce) operation such as sum or amin is shape-wise the same
+/// as an squeeze only that squeezes only applies to dim==1 and should diagnose otherwise.
 pub fn infer_squeeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
@@ -153,7 +225,6 @@ pub fn infer_squeeze(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 fn infer_shallow_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
@@ -300,7 +371,6 @@ fn parse_dims(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn infer_unsqueeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
@@ -349,7 +419,6 @@ fn normalize_dim_index_unsqueeze(idx: i64, len: usize) -> Option<usize> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn infer_view_like(
     base_expr: &Expr,
     args: &[&Expr],
@@ -368,7 +437,7 @@ pub fn infer_view_like(
     if target_tokens.is_empty() {
         return None;
     }
-    let res = infer_reshape_dims(base_shape.as_ref(), &target_tokens);
+    let res = reshape_dims(base_shape.as_ref(), &target_tokens);
     match res {
         Ok(shape) => Some(shape),
         Err(msg) => {
@@ -388,7 +457,7 @@ pub fn infer_view_like(
     }
 }
 
-fn infer_reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String> {
+fn reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String> {
     let mut tokens = target.to_vec();
     let mut minus_one_idx = None;
     for (i, t) in tokens.iter().enumerate() {
@@ -455,9 +524,79 @@ pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
     flatten_dims(&a.dims) == flatten_dims(&b.dims)
 }
 
+/// Inference shapes and produce element-wise broadcastable-operations.
+pub fn infer_broadcastable_poswise(
+    left: &Expr,
+    right: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    whole_range: TextRange,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
+        infer_expr_shape(
+            left,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            false,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        )
+    });
+    let right_shape =
+        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
+            infer_expr_shape(
+                right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        });
+
+    match broadcastable_poswise(left_shape, right_shape) {
+        Ok(shape_opt) => shape_opt,
+        Err(msg) => {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, source),
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: msg,
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            None
+        }
+    }
+}
+
 /// Element-wise (Hadamard) multiplication with torch-style broadcasting.
 /// If only one of the shapes is known, returns that shape (scalar or unknown rhs/lhs).
-pub fn infer_hadarmard(left: Option<Shape>, right: Option<Shape>) -> Result<Option<Shape>, String> {
+fn broadcastable_poswise(
+    left: Option<Shape>,
+    right: Option<Shape>,
+) -> Result<Option<Shape>, String> {
     match (left, right) {
         (None, None) => Ok(None),
         (Some(s), None) | (None, Some(s)) => Ok(Some(s)),
@@ -511,7 +650,6 @@ pub enum Transpose {
 }
 
 /// Permute dimensions of a tensor based on provided order.
-#[allow(clippy::too_many_arguments)]
 pub fn infer_permute(
     base_expr: &Expr,
     order_args: &[&Expr],
