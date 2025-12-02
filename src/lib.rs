@@ -454,28 +454,80 @@ fn simulate_function(
     for stmt in body {
         match stmt {
             Stmt::AnnAssign(assign) => {
+                if assignment_shape_checks(
+                    &assign.target,
+                    assign.value.as_deref().unwrap_or(assign.target.as_ref()),
+                    &mut vars,
+                    &mut diagnostics,
+                    &mut hover_entries,
+                    record_hovers,
+                    source,
+                ) {
+                    continue;
+                }
                 if let Some(name) = name_from_expr(&assign.target) {
                     let ann_shape = parse_shape_annotation(&assign.annotation);
                     let range = text_range_to_lsp(expr_text_range(&assign.target), source);
                     let mut inferred = None;
                     if let Some(val) = &assign.value {
-                        inferred = infer_expr_shape(
+                        if assignment_shape_checks(
                             val,
-                            &vars,
-                            func_map,
-                            imports,
-                            call_stack,
+                            val,
+                            &mut vars,
                             &mut diagnostics,
                             &mut hover_entries,
                             record_hovers,
                             source,
-                            module_cache.as_deref_mut(),
-                            module_path,
-                        );
+                        ) {
+                            inferred = vars
+                                .get(&name)
+                                .and_then(|v| v.annotated.clone().or(v.inferred.clone()));
+                        } else {
+                            inferred = infer_expr_shape(
+                                val,
+                                &vars,
+                                func_map,
+                                imports,
+                                call_stack,
+                                &mut diagnostics,
+                                &mut hover_entries,
+                                record_hovers,
+                                source,
+                                module_cache.as_deref_mut(),
+                                module_path,
+                            );
+                        }
                     }
                     if let (Some(ann), Some(inf)) = (ann_shape.clone(), inferred.clone())
                         && !shape_dims_equal(&ann, &inf)
                     {
+                        // If annotation is a shape-unroll, treat it as a rename rather than mismatch.
+                        if let Expr::Subscript(_sub) = &*assign.annotation
+                            && ann.dims.len() == inf.dims.len()
+                            && matches!(
+                                assign.value.as_deref(),
+                                Some(Expr::Name(_)) | Some(Expr::Attribute(_))
+                            )
+                        {
+                            let mut renamed = inf.clone();
+                            renamed.dims = ann.dims.clone();
+                            vars.insert(
+                                name.clone(),
+                                VarState {
+                                    annotated: ann_shape.clone(),
+                                    inferred: Some(renamed.clone()),
+                                },
+                            );
+                            if record_hovers {
+                                hover_entries.push((
+                                    range,
+                                    HoverInfo {
+                                        shape: Some(renamed),
+                                    },
+                                ));
+                            }
+                            continue;
+                        }
                         diagnostics.push(Diagnostic {
                             range,
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -508,6 +560,20 @@ fn simulate_function(
                 }
             }
             Stmt::Assign(assign) => {
+                // handle tuple destructuring of `.shape`
+                if assign.targets.len() == 1
+                    && assignment_shape_checks(
+                        &assign.targets[0],
+                        &assign.value,
+                        &mut vars,
+                        &mut diagnostics,
+                        &mut hover_entries,
+                        record_hovers,
+                        source,
+                    )
+                {
+                    continue;
+                }
                 if assign.targets.len() == 1
                     && let Some(name) = name_from_expr(&assign.targets[0])
                 {
@@ -1518,6 +1584,94 @@ fn module_name_from_path(path: &Path, project_root: Option<&Path>) -> Option<Str
         parts.reverse();
         Some(parts.join("."))
     }
+}
+
+fn assignment_shape_checks(
+    target: &Expr,
+    value: &Expr,
+    vars: &mut HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+) -> bool {
+    let Expr::Tuple(tup) = target else {
+        return false;
+    };
+    let dims: Vec<Identifier> = tup.elts.iter().filter_map(name_from_expr).collect();
+    if dims.len() != tup.elts.len() || dims.is_empty() {
+        return false;
+    }
+    let Expr::Attribute(attr) = value else {
+        return false;
+    };
+    if attr.attr.as_str() != "shape" {
+        return false;
+    }
+    let Some(base_id) = name_from_expr(&attr.value) else {
+        return false;
+    };
+
+    let range = text_range_to_lsp(expr_text_range(value), source);
+    let existing_state = vars.get(&base_id);
+    let existing_shape = existing_state.and_then(|v| v.annotated.clone().or(v.inferred.clone()));
+
+    if let Some(shape) = existing_shape {
+        if shape.dims.len() == dims.len() {
+            let mut new_shape = shape.clone();
+            new_shape.dims = dims.iter().map(|d| d.to_string()).collect();
+            vars.insert(
+                base_id.clone(),
+                VarState {
+                    annotated: None,
+                    inferred: Some(new_shape.clone()),
+                },
+            );
+            if record_hovers {
+                let hrange = text_range_to_lsp(expr_text_range(&attr.value), source);
+                hover_entries.push((
+                    hrange,
+                    HoverInfo {
+                        shape: Some(new_shape),
+                    },
+                ));
+            }
+        } else {
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Some(DiagnosticSeverity::ERROR),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: "Cannot unroll shape with different rank".into(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+    } else {
+        let new_shape = Shape {
+            dtype: None,
+            dims: dims.iter().map(|d| d.to_string()).collect(),
+        };
+        vars.insert(
+            base_id.clone(),
+            VarState {
+                annotated: None,
+                inferred: Some(new_shape.clone()),
+            },
+        );
+        if record_hovers {
+            let hrange = text_range_to_lsp(expr_text_range(&attr.value), source);
+            hover_entries.push((
+                hrange,
+                HoverInfo {
+                    shape: Some(new_shape),
+                },
+            ));
+        }
+    }
+    true
 }
 
 fn resolve_from_module(
