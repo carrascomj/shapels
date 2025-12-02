@@ -47,7 +47,7 @@ fn test_hover_inferred_shape() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X S");
+    assert_eq!(shape.dim_string(), "B X S");
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn test_hover_inferred_shape_from_caller_to_callee() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X O");
+    assert_eq!(shape.dim_string(), "B X O");
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn test_matmul_top_level_caller_to_callee() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X O");
+    assert_eq!(shape.dim_string(), "B X O");
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn test_hover_infer_shape_on_return() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X S");
+    assert_eq!(shape.dim_string(), "B X S");
 }
 
 #[test]
@@ -144,7 +144,7 @@ fn test_hover_infer_shape_same_stack_with_other_variables() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X R");
+    assert_eq!(shape.dim_string(), "B X R");
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn test_hover_inferred_shape_from_caller_to_callee_torchmm() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X O");
+    assert_eq!(shape.dim_string(), "B X O");
 }
 
 #[test]
@@ -193,7 +193,7 @@ fn test_hover_inferred_shape_from_caller_to_callee_mm() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "B X O");
+        assert_eq!(shape.dim_string(), "B X O");
     }
 }
 
@@ -223,7 +223,7 @@ fn test_hover_hadamard() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), expected);
+        assert_eq!(shape.dim_string(), expected);
     }
 }
 
@@ -253,7 +253,7 @@ fn test_hover_hadamard_with_broadcasting_not_broadcastable() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), expected);
+        assert_eq!(shape.dim_string(), expected);
     }
 }
 
@@ -280,5 +280,5 @@ fn test_torch_mm_as_method_works() {
         })
         .expect("No hover info on `z:` for x.mm(y)");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), expected);
+    assert_eq!(shape.dim_string(), expected);
 }

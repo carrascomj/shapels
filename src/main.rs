@@ -94,7 +94,7 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
                         contents: HoverContents::Markup(MarkupContent {
                             kind: MarkupKind::Markdown,
                             value: format!(
-                                "`[{}]`: {}",
+                                "`{}`: {}",
                                 shape.render(),
                                 shape.dtype.as_deref().unwrap_or("")
                             ),

@@ -35,7 +35,7 @@ fn test_sum_after_unsqueeze_multiply() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "B 1");
+        assert_eq!(shape.dim_string(), "B 1");
     }
 }
 
@@ -62,7 +62,7 @@ fn test_sum_multiple_dims() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "B");
+        assert_eq!(shape.dim_string(), "B");
     }
 }
 
@@ -89,6 +89,6 @@ fn sum_all() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), "");
+        assert_eq!(shape.dim_string(), "");
     }
 }

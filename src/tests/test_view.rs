@@ -26,7 +26,7 @@ fn test_proper_view_on_same_variable() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B*X R O");
+    assert_eq!(shape.dim_string(), "B*X R O");
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_proper_view_on_different_variable() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B*X R*O");
+    assert_eq!(shape.dim_string(), "B*X R*O");
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn test_proper_reshape_on_different_variable() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X*Watch");
+    assert_eq!(shape.dim_string(), "B X*Watch");
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn test_exp_then_proper_reshape() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X*Watch");
+    assert_eq!(shape.dim_string(), "B X*Watch");
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn test_squeeze_after_multiply() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X");
+    assert_eq!(shape.dim_string(), "B X");
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn test_squeeze_multiply_oneliner() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X");
+    assert_eq!(shape.dim_string(), "B X");
 }
 
 #[test]
@@ -205,7 +205,7 @@ fn test_hover_on_squeeze_all() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B R");
+    assert_eq!(shape.dim_string(), "B R");
 }
 
 #[test]
@@ -231,7 +231,7 @@ fn test_unsqueeze_hover_dim0_pos() {
         })
         .expect(format!("No hover found for {pat}").as_str());
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), expected);
+    assert_eq!(shape.dim_string(), expected);
 }
 
 #[test]
@@ -257,5 +257,5 @@ fn test_unsqueeze_hover_dim0_arg() {
         })
         .expect(format!("No hover found for {pat}").as_str());
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), expected);
+    assert_eq!(shape.dim_string(), expected);
 }

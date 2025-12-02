@@ -25,7 +25,7 @@ fn permute_hovers_and_diagnostics_are_captured() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), expected);
+        assert_eq!(shape.dim_string(), expected);
     }
 }
 
@@ -51,7 +51,7 @@ fn transpose_hovers_and_diagnostics_are_captured() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.render(), expected);
+        assert_eq!(shape.dim_string(), expected);
     }
 }
 
@@ -77,9 +77,7 @@ fn torch_t_hover() {
             })
             .expect("hover info");
         let shape = hover.shape.as_ref().expect("Shape can be rendered");
-        let shape_render = shape.render();
-        println!(" {shape_render} | {expected}");
-        assert_eq!(shape.render(), expected);
+        assert_eq!(shape.dim_string(), expected);
     }
 }
 
@@ -108,7 +106,5 @@ fn torch_t_hover_oneliner() {
         .expect("hover info");
     println!("{:#?}", hover.shape);
     let shape = hover.shape.as_ref().expect("Shape can be rendered");
-    let shape_render = shape.render();
-    println!(" {shape_render} | {expected}");
-    assert_eq!(shape.render(), expected);
+    assert_eq!(shape.dim_string(), expected);
 }

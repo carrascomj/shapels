@@ -24,6 +24,9 @@ pub struct Shape {
 
 impl Shape {
     pub fn render(&self) -> String {
+        format!("[{}]", self.dims.join(" "))
+    }
+    pub fn dim_string(&self) -> String {
         self.dims.join(" ")
     }
 }

@@ -49,5 +49,5 @@ pub fn assert_hover_expected(src: &str, analysis: &Analysis, pat: &str, expected
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), expected);
+    assert_eq!(shape.dim_string(), expected);
 }

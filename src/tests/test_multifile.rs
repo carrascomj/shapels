@@ -28,7 +28,7 @@ fn multifile_hover_follows_imported_function() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X O");
+    assert_eq!(shape.dim_string(), "B X O");
 }
 
 #[test]
@@ -66,5 +66,5 @@ fn venv_site_packages_module_resolves() {
         })
         .expect("hover info");
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.render(), "B X O");
+    assert_eq!(shape.dim_string(), "B X O");
 }
