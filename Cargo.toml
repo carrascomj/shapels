@@ -2,6 +2,8 @@
 name = "shapels"
 version = "0.2.0"
 edition = "2024"
+description = "Shape inference for torch on your editor"
+license = "Apache-2.0 AND ISC"
 
 [dependencies]
 lsp-types = "0.95"
