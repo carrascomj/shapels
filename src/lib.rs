@@ -7,13 +7,11 @@ use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-mod ops;
-use ops::{
-    infer_broadcastable_poswise, infer_matmul_shapes, infer_permute, infer_squeeze,
-    infer_unsqueeze, infer_view_like, shape_dims_equal,
+mod infer;
+use crate::infer::{
+    Transpose, infer_broadcastable_poswise, infer_matmul_shapes, infer_noop, infer_permute,
+    infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
-
-use crate::ops::{Transpose, infer_noop};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
