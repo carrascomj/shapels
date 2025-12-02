@@ -15,12 +15,13 @@ def sum_dimension():
 # test 2
 from jaxtyping import Float as F
 from torch import Tensor as T
+from torch import gelu
 
 def sum_multiple_dimensions():
     B, X, Watch = 4, 2, 32
     x: F[T, "B X R"] = torch.Tensor(B, X, R)
     y: F[T, " R"] = torch.Tensor(R,)
-    y = y.unsqueeze(1)
+    y = gelu(y.unsqueeze(1))
     matmul_out = x @ y
     z = matmul_out.sum(dim=(1, 2))
     return z

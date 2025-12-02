@@ -8,10 +8,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 mod infer;
+mod op_groups;
 use crate::infer::{
     Transpose, infer_broadcastable_poswise, infer_matmul_shapes, infer_noop, infer_permute,
     infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
+pub use crate::op_groups::AGGR_ALIASES;
+use crate::op_groups::{NOOP_ALIASES, NOOP_DIM_ALIASES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -88,35 +91,6 @@ struct VarState {
     annotated: Option<Shape>,
     inferred: Option<Shape>,
 }
-
-/// Operations that accept an argument dim (integer or sequence),
-/// return a single tensor and the provided dims have been reduced
-/// from the output tensor.
-pub const AGGR_ALIASES: [&str; 21] = [
-    "sum",
-    "mean",
-    "prod",
-    "amax",
-    "amin",
-    "std",
-    "var",
-    "nanmean",
-    "nansum",
-    "nanprod",
-    "nanstd",
-    "nanvar",
-    // FIXME: quantile and nanquantile only apply iff
-    // the q argument is a scalar
-    "quantile",
-    "nanquantile",
-    "argmax",
-    "argmin",
-    "all",
-    "any",
-    "count_nonzero",
-    "logsumexp",
-    "norm",
-];
 
 #[derive(Default, Clone)]
 struct Imports {
@@ -738,6 +712,7 @@ fn infer_expr_shape(
                     return infer_view_like(
                         arg0,
                         &args,
+                        None,
                         vars,
                         diagnostics,
                         hover_entries,
@@ -882,9 +857,7 @@ fn infer_expr_shape(
                         module_path,
                         false,
                     );
-                }
-                // TODO: rest of similar noops
-                else if is_alias_of("softmax", &func_name.id, imports) {
+                } else if is_alias_of("softmax", &func_name.id, imports) {
                     let base_hint = infer_expr_shape(
                         call.args.first()?,
                         vars,
@@ -904,6 +877,22 @@ fn infer_expr_shape(
                         diagnostics,
                         source,
                         call.range,
+                        // TODO(carrascomj): hack: just treat argsort different
+                        func_name.id.contains("soft"),
+                    );
+                } else if is_alias_of("noop", &func_name.id, imports) {
+                    return infer_expr_shape(
+                        call.args.first()?,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
@@ -1047,21 +1036,35 @@ fn infer_expr_shape(
                     }
                 }
                 if attr_name == "view" || attr_name == "reshape" {
-                    if lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
-                        .is_some()
-                    {
-                        let args = call.args.iter().collect::<Vec<_>>();
-                        return infer_view_like(
-                            &attr.value,
-                            &args,
-                            vars,
-                            diagnostics,
-                            hover_entries,
-                            record_hovers,
-                            source,
-                            call.range,
-                        );
-                    }
+                    let base_hint =
+                        lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
+                            .or_else(|| {
+                                infer_expr_shape(
+                                    &attr.value,
+                                    vars,
+                                    func_map,
+                                    imports,
+                                    call_stack,
+                                    diagnostics,
+                                    hover_entries,
+                                    false,
+                                    source,
+                                    module_cache.as_deref_mut(),
+                                    module_path,
+                                )
+                            });
+                    let args = call.args.iter().collect::<Vec<_>>();
+                    return infer_view_like(
+                        &attr.value,
+                        &args,
+                        base_hint,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    );
                 } else if attr_name == "permute" {
                     let (base, order_args): (&Expr, Vec<&Expr>) =
                         if is_torch_base(&attr.value, imports) {
@@ -1228,7 +1231,7 @@ fn infer_expr_shape(
                         module_path,
                         false,
                     );
-                } else if attr_name == "softmax" {
+                } else if NOOP_DIM_ALIASES.contains(&attr_name) {
                     let base = if in_torch {
                         call.args.first()?
                     } else {
@@ -1253,6 +1256,25 @@ fn infer_expr_shape(
                         diagnostics,
                         source,
                         call.range,
+                        attr_name != "argsort", // dim optional for argsort
+                    );
+                } else if NOOP_ALIASES.contains(&attr_name) {
+                    return infer_expr_shape(
+                        if in_torch {
+                            call.args.first()?
+                        } else {
+                            attr.value.as_ref()
+                        },
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 }
             }
@@ -1380,6 +1402,7 @@ fn collect_imports(
         "transpose",
         "t",
         "softmax",
+        "noop",
     ] {
         imports
             .func_aliases
@@ -1431,6 +1454,22 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("sum").or_default().insert(id);
+                        } else if NOOP_DIM_ALIASES.contains(&name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports
+                                .func_aliases
+                                .entry("softmax")
+                                .or_default()
+                                .insert(id);
+                        } else if NOOP_ALIASES.contains(&name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports.func_aliases.entry("noop").or_default().insert(id);
                         }
                     }
                 } else if let Some(module) = &resolved_module {

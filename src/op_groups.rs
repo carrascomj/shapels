@@ -1,0 +1,97 @@
+// TODO(carrascomj): this should all be a const hashset or similar.
+
+/// Operations that accept an argument dim (integer or sequence),
+/// return a single tensor and the provided dims have been reduced
+/// from the output tensor.
+pub const AGGR_ALIASES: [&str; 21] = [
+    "sum",
+    "mean",
+    "prod",
+    "amax",
+    "amin",
+    "std",
+    "var",
+    "nanmean",
+    "nansum",
+    "nanprod",
+    "nanstd",
+    "nanvar",
+    // FIXME: quantile and nanquantile only apply iff
+    // the q argument is a scalar
+    "quantile",
+    "nanquantile",
+    "argmax",
+    "argmin",
+    "all",
+    "any",
+    "count_nonzero",
+    "logsumexp",
+    "norm",
+];
+
+/// Shape-wise NoOp, must have dim dimension
+pub const NOOP_DIM_ALIASES: [&str; 3] = [
+    "softmax",
+    "log_softmax",
+    // dim is optional
+    "argsort",
+];
+// TODO(carrascomj): separate this into torch.ATTR_NAME only functions
+// e.g., relu is both a tensor and and a top-level function but contiguous is not
+/// Shape-wise NoOp
+pub const NOOP_ALIASES: [&str; 54] = [
+    "relu",
+    "contiguous",
+    "xlogy",
+    "relu6",
+    "sigmoid",
+    "tanh",
+    "silu",
+    "swish",
+    "mish",
+    "hardswish",
+    "hardtanh",
+    "elu",
+    "celu",
+    "selu",
+    "softplus",
+    "softsign",
+    "gelu",
+    "leaky_relu",
+    "prelu",
+    "rrelu",
+    "threshold",
+    "clamp",
+    "clip",
+    "hardshrink",
+    "softshrink",
+    "tanhshrink",
+    "round",
+    "floor",
+    "ceil",
+    "trunc",
+    "frac",
+    "reciprocal",
+    "abs",
+    "sqrt",
+    "rsqrt",
+    "square",
+    "sign",
+    "neg",
+    "exp",
+    "log",
+    "log1p",
+    "expm1",
+    "sin",
+    "cos",
+    "tan",
+    "sinh",
+    "cosh",
+    "asin",
+    "acos",
+    "atan",
+    "atanh",
+    "erf",
+    "erfc",
+    "erfinv",
+];

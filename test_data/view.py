@@ -17,7 +17,8 @@ def reshape_returns_right_dimensions():
     B, X, Watch = 4, 2, 32
     x: F[T, "B X Watch"] = torch.Tensor(B, X, Watch)
     y: F[T, "B*X Watch"] = x.reshape(B, X*Watch)
-    z = x.reshape(B, X*Watch)
+    z = torch.exp(x.reshape(B, X*Watch))
+    exp_then_reshape = torch.exp(x).reshape(B, X*Watch)
 
 
 # test 3
@@ -42,7 +43,7 @@ def squeeze_unsqueeze_after_multiply_works():
     B, X, Watch = 4, 2, 32
     x: F[T, "B X R"] = torch.Tensor(B, X, R)
     y: F[T, " R"] = torch.Tensor(R,)
-    z = (x @ y.unsqueeze(1)).squeeze(-1)
+    z = (x.exp() @ y.unsqueeze(1)).squeeze(-1)
     return z
 
 # test 5
@@ -74,4 +75,3 @@ def unsqueeze_first_is_correct():
     y: F[T, "R"] = torch.Tensor(R, )
     z_pos = torch.unsqueeze(x, 0)
     z_arg = y.unsqueeze(dim=0)
-

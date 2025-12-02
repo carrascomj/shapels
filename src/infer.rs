@@ -423,6 +423,7 @@ fn normalize_dim_index_unsqueeze(idx: i16, len: usize) -> Option<usize> {
 pub fn infer_view_like(
     base_expr: &Expr,
     args: &[&Expr],
+    base_hint: Option<Shape>,
     vars: &HashMap<Identifier, VarState>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -430,7 +431,8 @@ pub fn infer_view_like(
     source: &str,
     whole_range: TextRange,
 ) -> Option<Shape> {
-    let base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source);
+    let base_shape =
+        base_hint.or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source));
     let target_tokens = args
         .iter()
         .filter_map(|e| expr_to_dim_token(e))
@@ -805,6 +807,7 @@ pub fn infer_noop(
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
     whole_range: TextRange,
+    enforce_dim: bool,
 ) -> Option<Shape> {
     base_expr.filter(|shape| {
         let Some(Ok(dim_i)) = dim_arg
@@ -814,17 +817,19 @@ pub fn infer_noop(
             // for softmax at least, dim is always necessary since
             // some torch version, but it's not explicitly indicated
             // in the python API so a general LSP won't catch this
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: "dim argument is required!".into(),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
+            if enforce_dim {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "dim argument is required!".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
             return false;
         };
         let ndim = shape.dims.len() as i16;
