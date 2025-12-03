@@ -5,8 +5,7 @@
 //! any supported aggregation.
 
 use crate::analyze_source;
-use crate::tests::extract_test_case;
-use lsp_types::Position;
+use crate::tests::{assert_hover_expected, extract_test_case};
 
 use shapels::AGGR_ALIASES;
 
@@ -18,24 +17,8 @@ fn test_sum_after_unsqueeze_multiply() {
         let src = extract_test_case(VIEW_PY_DATA, 1).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
-        let mut line_idx = 0u32;
-        let mut col_idx = 0u32;
-        for (idx, line) in src.lines().enumerate() {
-            // this is the first x, inside the parent function (early break)
-            if let Some(pos) = line.find("z =") {
-                line_idx = idx as u32;
-                col_idx = pos as u32;
-                break;
-            }
-        }
-        let hover = analysis
-            .hover(Position {
-                line: line_idx,
-                character: col_idx,
-            })
-            .expect("hover info");
-        let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.dim_string(), "B 1");
+        let (pat, expected) = ("z =", "B 1");
+        assert_hover_expected(&src, &analysis, pat, expected);
     }
 }
 
@@ -45,24 +28,7 @@ fn test_sum_multiple_dims() {
         let src = extract_test_case(VIEW_PY_DATA, 2).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
-        let mut line_idx = 0u32;
-        let mut col_idx = 0u32;
-        for (idx, line) in src.lines().enumerate() {
-            // this is the first x, inside the parent function (early break)
-            if let Some(pos) = line.find("z =") {
-                line_idx = idx as u32;
-                col_idx = pos as u32;
-                break;
-            }
-        }
-        let hover = analysis
-            .hover(Position {
-                line: line_idx,
-                character: col_idx,
-            })
-            .expect("hover info");
-        let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.dim_string(), "B");
+        assert_hover_expected(&src, &analysis, "z =", "B");
     }
 }
 
@@ -72,23 +38,6 @@ fn sum_all() {
         let src = extract_test_case(VIEW_PY_DATA, 3).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
-        let mut line_idx = 0u32;
-        let mut col_idx = 0u32;
-        for (idx, line) in src.lines().enumerate() {
-            // this is the first x, inside the parent function (early break)
-            if let Some(pos) = line.find("aggr =") {
-                line_idx = idx as u32;
-                col_idx = pos as u32;
-                break;
-            }
-        }
-        let hover = analysis
-            .hover(Position {
-                line: line_idx,
-                character: col_idx,
-            })
-            .expect("hover info");
-        let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.dim_string(), "");
+        assert_hover_expected(&src, &analysis, "aggr =", "");
     }
 }

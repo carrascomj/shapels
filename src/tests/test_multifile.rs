@@ -1,6 +1,9 @@
-use lsp_types::Position;
+//! Tests multifile support using .venv files and relative paths at test_data/multi*.py
+
 use shapels::analyze_file;
 use std::path::Path;
+
+use crate::tests::assert_hover_expected;
 
 #[test]
 fn multifile_hover_follows_imported_function() {
@@ -12,23 +15,7 @@ fn multifile_hover_follows_imported_function() {
 
     // find "z =" and ensure hover shows inferred shape B X O
     let src = std::fs::read_to_string(path).expect("read caller");
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X O");
+    assert_hover_expected(&src, &analysis, "z =", "B X O");
 }
 
 #[test]
@@ -50,21 +37,5 @@ fn venv_site_packages_module_resolves() {
     assert_eq!(analysis.diagnostics.len(), 0);
 
     let src = std::fs::read_to_string(path).expect("read caller");
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X O");
+    assert_hover_expected(&src, &analysis, "z =", "B X O");
 }

@@ -1,5 +1,5 @@
 use crate::analyze_source;
-use crate::tests::extract_test_case;
+use crate::tests::{assert_hover_expected, extract_test_case};
 use lsp_types::Position;
 
 const PY_DATA: &str = include_str!("../../test_data/multiplication.py");
@@ -30,24 +30,8 @@ fn test_hover_inferred_shape() {
     let src = extract_test_case(PY_DATA, 4);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    eprintln!("hover count {}", analysis.hover_entries.len());
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X S");
+    let (pat, expected) = ("z =", "B X S");
+    assert_hover_expected(&src, &analysis, pat, expected);
 }
 
 #[test]
@@ -55,23 +39,8 @@ fn test_hover_inferred_shape_from_caller_to_callee() {
     let src = extract_test_case(PY_DATA, 5);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X O");
+    let (pat, expected) = ("z =", "B X O");
+    assert_hover_expected(&src, &analysis, pat, expected);
 }
 
 #[test]
@@ -80,22 +49,8 @@ fn test_matmul_top_level_caller_to_callee() {
     let analysis = analyze_source(&src);
     // one diagnostic for x @ y
     assert_eq!(analysis.diagnostics.len(), 1);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X O");
+    let (pat, expected) = ("z =", "B X O");
+    assert_hover_expected(&src, &analysis, pat, expected);
 }
 
 #[test]
@@ -152,23 +107,8 @@ fn test_hover_inferred_shape_from_caller_to_callee_torchmm() {
     let src = extract_test_case(PY_DATA, 6);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X O");
+    let (pat, expected) = ("z =", "B X O");
+    assert_hover_expected(&src, &analysis, pat, expected);
 }
 
 #[test]
@@ -200,30 +140,13 @@ fn test_hover_inferred_shape_from_caller_to_callee_mm() {
 #[test]
 fn test_hover_hadamard() {
     let mult_source = extract_test_case(PY_DATA, 8);
-    for pat in ["*", "+", "-", "/"] {
-        let src = mult_source.replace("*", pat);
+    let expected = "B X R";
+    for symbol in ["*", "+", "-", "/"] {
+        let src = mult_source.replace("*", symbol);
         let analysis = analyze_source(&src);
         // one diagnostic for non-compatible shapes `output_wrong`
         assert_eq!(analysis.diagnostics.len(), 1);
-        let mut line_idx = 0u32;
-        let mut col_idx = 0u32;
-        let var = "output_right =";
-        let expected = "B X R";
-        for (idx, line) in src.lines().enumerate() {
-            if let Some(pos) = line.find(var) {
-                line_idx = idx as u32;
-                col_idx = pos as u32;
-                break;
-            }
-        }
-        let hover = analysis
-            .hover(Position {
-                line: line_idx,
-                character: col_idx,
-            })
-            .expect("hover info");
-        let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.dim_string(), expected);
+        assert_hover_expected(&src, &analysis, "output_right =", expected);
     }
 }
 
@@ -231,29 +154,11 @@ fn test_hover_hadamard() {
 fn test_hover_hadamard_with_broadcasting_not_broadcastable() {
     // this is the example from the torch docs but with * instead of +
     let mult_source = extract_test_case(PY_DATA, 9);
-    for pat in ["*", "+", "-", "/"] {
-        let src = mult_source.replace("*", pat);
+    for symbol in ["*", "+", "-", "/"] {
+        let src = mult_source.replace("*", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 2);
-        let mut line_idx = 0u32;
-        let mut col_idx = 0u32;
-        let var = "z =";
-        let expected = "A B C 1";
-        for (idx, line) in src.lines().enumerate() {
-            if let Some(pos) = line.find(var) {
-                line_idx = idx as u32;
-                col_idx = pos as u32;
-                break;
-            }
-        }
-        let hover = analysis
-            .hover(Position {
-                line: line_idx,
-                character: col_idx,
-            })
-            .expect("hover info");
-        let shape = hover.shape.as_ref().unwrap();
-        assert_eq!(shape.dim_string(), expected);
+        assert_hover_expected(&src, &analysis, "z =", "A B C 1");
     }
 }
 
@@ -262,23 +167,7 @@ fn test_torch_mm_as_method_works() {
     let src = extract_test_case(PY_DATA, 11);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    let var = "z:";
+    let pat = "z:";
     let expected = "B X S";
-    for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find(var) {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("No hover info on `z:` for x.mm(y)");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), expected);
+    assert_hover_expected(&src, &analysis, pat, expected);
 }

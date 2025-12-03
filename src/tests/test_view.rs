@@ -1,5 +1,5 @@
-use crate::analyze_source;
 use crate::tests::extract_test_case;
+use crate::{analyze_source, tests::assert_hover_expected};
 use lsp_types::{Position, Range};
 
 const VIEW_PY_DATA: &str = include_str!("../../test_data/view.py");
@@ -9,24 +9,7 @@ fn test_proper_view_on_same_variable() {
     let src = extract_test_case(VIEW_PY_DATA, 1);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("x =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B*X R O");
+    assert_hover_expected(&src, &analysis, "x =", "B*X R O");
 }
 
 #[test]
@@ -34,24 +17,7 @@ fn test_proper_view_on_different_variable() {
     let src = extract_test_case(VIEW_PY_DATA, 1);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("y =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B*X R*O");
+    assert_hover_expected(&src, &analysis, "y =", "B*X R*O");
 }
 
 #[test]
@@ -59,74 +25,23 @@ fn test_proper_reshape_on_different_variable() {
     let src = extract_test_case(VIEW_PY_DATA, 2);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X*Watch");
+    assert_hover_expected(&src, &analysis, "z =", "B X*Watch");
 }
 
 #[test]
 fn test_exp_then_proper_reshape() {
     let src = extract_test_case(VIEW_PY_DATA, 2);
     let analysis = analyze_source(&src);
-    assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("exp_then_reshape =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X*Watch");
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "exp_then_reshape =", "B X*Watch");
 }
 
 #[test]
 fn test_squeeze_after_multiply() {
     let src = extract_test_case(VIEW_PY_DATA, 3);
     let analysis = analyze_source(&src);
-    assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X");
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "z =", "B X");
 }
 
 #[test]
@@ -134,24 +49,7 @@ fn test_squeeze_multiply_oneliner() {
     let src = extract_test_case(VIEW_PY_DATA, 4);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B X");
+    assert_hover_expected(&src, &analysis, "z =", "B X");
 }
 
 #[test]
@@ -187,25 +85,8 @@ fn squeeze_nonexisting_dims_produces_diagnostics() {
 fn test_hover_on_squeeze_all() {
     let src = extract_test_case(VIEW_PY_DATA, 6);
     let analysis = analyze_source(&src);
-    assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find("z =") {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect("hover info");
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), "B R");
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "z =", "B R");
 }
 
 #[test]
@@ -213,25 +94,8 @@ fn test_unsqueeze_hover_dim0_pos() {
     let src = extract_test_case(VIEW_PY_DATA, 7);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
     let (pat, expected) = ("z_pos", "1 B R");
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find(pat) {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect(format!("No hover found for {pat}").as_str());
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), expected);
+    assert_hover_expected(&src, &analysis, pat, expected);
 }
 
 #[test]
@@ -239,23 +103,6 @@ fn test_unsqueeze_hover_dim0_arg() {
     let src = extract_test_case(VIEW_PY_DATA, 7);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    let mut line_idx = 0u32;
-    let mut col_idx = 0u32;
     let (pat, expected) = ("z_arg", "1 R");
-    for (idx, line) in src.lines().enumerate() {
-        // this is the first x, inside the parent function (early break)
-        if let Some(pos) = line.find(pat) {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
-        }
-    }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect(format!("No hover found for {pat}").as_str());
-    let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), expected);
+    assert_hover_expected(&src, &analysis, pat, expected);
 }
