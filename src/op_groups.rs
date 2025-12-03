@@ -39,7 +39,7 @@ pub const NOOP_DIM_ALIASES: [&str; 3] = [
 // TODO(carrascomj): separate this into torch.ATTR_NAME only functions
 // e.g., relu is both a tensor and and a top-level function but contiguous is not
 /// Shape-wise NoOp
-pub const NOOP_ALIASES: [&str; 54] = [
+pub const NOOP_ALIASES: [&str; 56] = [
     "relu",
     "contiguous",
     "xlogy",
@@ -94,4 +94,7 @@ pub const NOOP_ALIASES: [&str; 54] = [
     "erf",
     "erfc",
     "erfinv",
+    // torch.Tensor only
+    "cpu",
+    "gpu",
 ];
