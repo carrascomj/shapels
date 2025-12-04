@@ -171,3 +171,16 @@ fn test_torch_mm_as_method_works() {
     let expected = "B X S";
     assert_hover_expected(&src, &analysis, pat, expected);
 }
+
+#[test]
+fn test_reassignment_is_properly_treated() {
+    let src = extract_test_case(PY_DATA, 12);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    let pat = "x =";
+    let expected = "B X S";
+    assert_hover_expected(&src, &analysis, pat, expected);
+    let pat = "x @";
+    let expected = "B X R";
+    assert_hover_expected(&src, &analysis, pat, expected);
+}

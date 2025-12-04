@@ -159,3 +159,13 @@ from torch import Tensor as T
 def proper_multiply_mm_as_method(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B X S"]:
     z: F[T, "B X S"] = x.mm(y)
     return z
+
+
+# test 12
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def single_line_reassignment(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B X S"]:
+    x = x @ y
+    z = x @ y.T
+    return x
