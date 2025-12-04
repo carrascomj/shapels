@@ -1,9 +1,10 @@
-// TODO(carrascomj): this should all be a const hashset or similar.
+use phf::Set;
+use phf_macros::phf_set;
 
 /// Operations that accept an argument dim (integer or sequence),
 /// return a single tensor and the provided dims have been reduced
 /// from the output tensor.
-pub const AGGR_ALIASES: [&str; 21] = [
+pub static AGGR_ALIASES: Set<&'static str> = phf_set![
     "sum",
     "mean",
     "prod",
@@ -30,7 +31,7 @@ pub const AGGR_ALIASES: [&str; 21] = [
 ];
 
 /// Shape-wise NoOp, must have dim dimension
-pub const NOOP_DIM_ALIASES: [&str; 3] = [
+pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
     "softmax",
     "log_softmax",
     // dim is optional
@@ -39,7 +40,7 @@ pub const NOOP_DIM_ALIASES: [&str; 3] = [
 // TODO(carrascomj): separate this into torch.ATTR_NAME only functions
 // e.g., relu is both a tensor and and a top-level function but contiguous is not
 /// Shape-wise NoOp
-pub const NOOP_ALIASES: [&str; 56] = [
+pub static NOOP_ALIASES: Set<&'static str> = phf_set![
     "relu",
     "contiguous",
     "xlogy",

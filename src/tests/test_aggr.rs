@@ -13,7 +13,7 @@ const VIEW_PY_DATA: &str = include_str!("../../test_data/aggr.py");
 
 #[test]
 fn test_sum_after_unsqueeze_multiply() {
-    for agg_fn in AGGR_ALIASES {
+    for agg_fn in &AGGR_ALIASES {
         let src = extract_test_case(VIEW_PY_DATA, 1).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
@@ -24,7 +24,7 @@ fn test_sum_after_unsqueeze_multiply() {
 
 #[test]
 fn test_sum_multiple_dims() {
-    for agg_fn in AGGR_ALIASES {
+    for agg_fn in &AGGR_ALIASES {
         let src = extract_test_case(VIEW_PY_DATA, 2).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
@@ -34,7 +34,7 @@ fn test_sum_multiple_dims() {
 
 #[test]
 fn sum_all() {
-    for agg_fn in AGGR_ALIASES {
+    for agg_fn in &AGGR_ALIASES {
         let src = extract_test_case(VIEW_PY_DATA, 3).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
