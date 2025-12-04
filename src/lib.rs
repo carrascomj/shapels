@@ -1901,11 +1901,10 @@ fn get_arg<'a, R>(
     name_arg: &str,
     as_positional: usize,
 ) -> Option<&'a Expr<R>> {
-    // first check for named args
-    let dim_keyword = call
+    // first check for positional argument, then named argument
+    (call.args.get(as_positional)).or(call
         .keywords
         .iter()
         .find(|kw| kw.arg.as_deref() == Some(name_arg))
-        .map(|kw| &kw.value);
-    dim_keyword.or(call.args.get(as_positional))
+        .map(|kw| &kw.value))
 }
