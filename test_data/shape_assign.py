@@ -44,4 +44,19 @@ def ann_assignment_missalignment_diagnoses(x: torch.Tensor, y: Float[torch.Tenso
     after_renamed = b
 
 
+# test 6
+from torch import ones
+
+def ann_creation_size_list_is_the_right_shape():
+    Batch, Channels, Height, Width = 32, 3, 224, 224
+    x = ones([Batch, Channels, Height, Width], dtype="bool")
+
+# # test 6
+# import torch
+
+# def ann_creation_size_is_the_right_shape():
+#     Batch, Channels, Height, Width = 32, 3, 224, 224
+#     x = torch.zeros(Batch, Channels, Height, Width, dtype="bool")
+
+
 

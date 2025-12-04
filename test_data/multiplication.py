@@ -113,7 +113,7 @@ from torch import Tensor as T
 def not_broadcastable_tensors_should_produce_diagnostics():
     """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
     # same shapes are always broadcastable (i.e. the above rules always hold)
-    x: F[T, ""]=torch.empty((0,))
+    x: F[T, "0"]=torch.empty((0,))
     y: F[T, "A A"]=torch.empty(2,2)
     # x and y are not broadcastable, because x does not have at least 1 dimension
     bad = x * y.relu()  # diagnostic

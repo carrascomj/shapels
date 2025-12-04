@@ -1,3 +1,4 @@
+use lsp_types::Position;
 use shapels::analyze_source;
 
 use crate::tests::{assert_hover_expected, extract_test_case};
@@ -52,4 +53,30 @@ fn test_ann_assign_missalignment_emits_diagnostics() {
     let src = extract_test_case(PY_DATA, 5);
     let analysis = analyze_source(&src);
     assert!(!analysis.diagnostics.is_empty());
+}
+
+#[test]
+fn test_zeros_creation_size() {
+    let src = extract_test_case(PY_DATA, 6);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    let (pat, expected) = ("x =", "Batch Channels Height Width");
+    let mut line_idx = 0;
+    let mut col_idx = 0;
+    for (idx, line) in src.lines().enumerate() {
+        if let Some(pos) = line.find(pat) {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+            break;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect(format!("Hover info failed for pat {pat} with expected shape {expected}").as_str());
+    let shape = hover.shape.as_ref().unwrap();
+    assert_eq!(shape.dim_string(), expected);
+    assert_eq!(shape.dtype, Some(String::from("bool")));
 }

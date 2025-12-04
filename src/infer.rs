@@ -7,10 +7,17 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments)]
-use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range};
+use crate::{
+    HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, is_torch_base,
+};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use rustpython_parser::ast::{self, Arguments, Expr, ExprBinOp, Identifier, Operator, Stmt};
+use phf::Set;
+use phf_macros::phf_set;
+use rustpython_parser::ast::{
+    self, Arguments, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt,
+};
 use rustpython_parser::text_size::TextRange;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -524,7 +531,13 @@ fn split_dim(dim: &str) -> Vec<String> {
 }
 
 pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
-    flatten_dims(&a.dims) == flatten_dims(&b.dims)
+    a.dims.iter().zip(b.dims.iter()).all(|(left, right)| {
+        match (left.parse::<i32>().is_ok(), right.parse::<i32>().is_ok()) {
+            (true, true) => left == right,
+            (false, false) => left == right,
+            _ => true,
+        }
+    })
 }
 
 /// Inference shapes and produce element-wise broadcastable-operations.
@@ -857,4 +870,136 @@ pub fn infer_noop(
             true
         }
     })
+}
+
+/// Arguments by position establish a shape by a multiple arguments or by a sequence on the first argument.
+///
+/// An optional dtype might be used for the dtype. Otherwise, use Float.
+pub fn infer_creation_size(
+    call: &ExprCall<TextRange>,
+    diagnostics: &mut Vec<Diagnostic>,
+    imports: &Imports,
+    source: &str,
+    not_tensor: bool,
+) -> Option<Shape> {
+    let list = match call.args.as_slice() {
+        [Expr::List(list)] if not_tensor => list.elts.as_slice(),
+        [Expr::Tuple(seq)] if not_tensor => seq.elts.as_slice(),
+        rest => rest,
+    };
+
+    let vec_dims: Vec<Option<Cow<_>>> = list
+        .iter()
+        .map(|x| match x {
+            Expr::Name(name) => Some(Cow::Borrowed(name.id.as_str())),
+            Expr::Constant(constant) => match &constant.value {
+                Constant::Str(s) => Some(Cow::Borrowed(s.as_str())),
+                Constant::Int(int) => Some(Cow::Owned(int.to_string())),
+                _ => {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(constant.range, source),
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: "Shape could not be initialized from this dim".into(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    None
+                }
+            },
+            _ => {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(call.range, source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Shape could not be initialized from this expression".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                None
+            }
+        })
+        .collect();
+
+    let maybe_dims: Option<Vec<String>> = vec_dims
+        .into_iter()
+        .map(|o| o.map(|c| c.into_owned()))
+        .collect();
+    maybe_dims.map_or_else(
+        || {
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(call.range, source),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: format!("Shape could not be initialized from expression",),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+            None
+        },
+        |dims| {
+            let dtype = get_dtype(call, imports).map(|x| x.to_string());
+            Some(Shape {
+                dtype,
+                dims: dims.into_iter().map(|x| x.to_string()).collect(),
+            })
+        },
+    )
+}
+
+pub static TORCH_DTYPES: Set<&'static str> = phf_set![
+    "float32",
+    "float64",
+    "float16",
+    "bfloat16",
+    "complex32",
+    "complex64",
+    "complex128",
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+    "float4_e2m1fn_x2",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "bool",
+];
+
+fn get_dtype<'expr, R>(call: &'expr ExprCall<R>, imports: &Imports) -> Option<&'expr str> {
+    if let Some(dtype_value) = get_arg(call, "dtype", 3) {
+        match dtype_value {
+            Expr::Constant(constant) => match &constant.value {
+                Constant::Str(string_dtype) if TORCH_DTYPES.contains(&string_dtype.as_str()) => {
+                    Some(string_dtype.as_str())
+                }
+                _ => return Some("Float"),
+            },
+            Expr::Name(name) => Some(name.id.as_str()),
+            Expr::Attribute(attr)
+                if is_torch_base(attr.value.as_ref(), imports)
+                    && TORCH_DTYPES.contains(&attr.attr.as_str()) =>
+            {
+                Some(attr.attr.as_str())
+            }
+            _ => Some("Float"),
+        }
+    } else {
+        None
+    }
 }

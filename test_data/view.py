@@ -16,7 +16,7 @@ from torch import Tensor as T
 def reshape_returns_right_dimensions():
     B, X, Watch = 4, 2, 32
     x: F[T, "B X Watch"] = torch.Tensor(B, X, Watch)
-    y: F[T, "B*X Watch"] = x.reshape(B, X*Watch)
+    y: F[T, "B X*Watch"] = x.reshape(B, X*Watch)
     z = torch.exp(x.reshape(B, X*Watch))
     exp_then_reshape = torch.exp(x).reshape(B, X*Watch)
 

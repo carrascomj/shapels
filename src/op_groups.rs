@@ -37,10 +37,24 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
     // dim is optional
     "argsort",
 ];
+
+// TODO: Tensor should be separated from the rest
+/// Subset of creation ops that accept args in the form
+///
+/// ```python
+/// def zeros(*size, *, out=None, dtype=None):
+///     pass
+///
+/// size can be simply arguments like `zeros(1,2,3,4,5)`
+/// or a single argument with a sequence: `zeros([1,2,3,4])`
+/// ```
+pub static CREATION_SIZE_ALIASES: Set<&'static str> =
+    phf_set!["Tensor", "zeros", "ones", "empty", "full"];
+
 // TODO(carrascomj): separate this into torch.ATTR_NAME only functions
 // e.g., relu is both a tensor and and a top-level function but contiguous is not
 /// Shape-wise NoOp
-pub static NOOP_ALIASES: Set<&'static str> = phf_set![
+pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     "relu",
     "contiguous",
     "xlogy",
@@ -98,4 +112,4 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set![
     // torch.Tensor only
     "cpu",
     "gpu",
-];
+};

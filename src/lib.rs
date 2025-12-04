@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 mod infer;
 mod op_groups;
 use crate::infer::{
-    Transpose, infer_broadcastable_poswise, infer_matmul_shapes, infer_noop, infer_permute,
-    infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    Transpose, infer_broadcastable_poswise, infer_creation_size, infer_matmul_shapes, infer_noop,
+    infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
-use crate::op_groups::{NOOP_ALIASES, NOOP_DIM_ALIASES};
+use crate::op_groups::{CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -963,6 +963,8 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
+                } else if is_alias_of("Tensor", &func_name.id, imports) {
+                    return infer_creation_size(call, diagnostics, imports, source, true);
                 }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
                     // avoid infinite recursion
@@ -1345,6 +1347,8 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
+                } else if CREATION_SIZE_ALIASES.contains(&attr_name) & in_torch {
+                    return infer_creation_size(call, diagnostics, imports, source, true);
                 }
             }
             None
@@ -1430,7 +1434,7 @@ fn lookup_shape(
     }
 }
 
-fn is_torch_base(expr: &Expr, imports: &Imports) -> bool {
+fn is_torch_base<R>(expr: &Expr<R>, imports: &Imports) -> bool {
     match expr {
         Expr::Name(n) => n.id.as_str() == "torch" || imports.torch_aliases.contains(&n.id),
         _ => false,
@@ -1472,6 +1476,7 @@ fn collect_imports(
         "t",
         "softmax",
         "noop",
+        "Tensor",
     ] {
         imports
             .func_aliases
@@ -1539,6 +1544,12 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("noop").or_default().insert(id);
+                        } else if CREATION_SIZE_ALIASES.contains(&name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports.func_aliases.entry("Tensor").or_default().insert(id);
                         }
                     }
                 } else if let Some(module) = &resolved_module {
