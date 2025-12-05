@@ -540,9 +540,14 @@ pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
     })
 }
 
+pub enum ShapeOrExpr<'a> {
+    Shape(Option<&'a Shape>),
+    Expr(&'a Expr),
+}
+
 /// Inference shapes and produce element-wise broadcastable-operations.
 pub fn infer_broadcastable_poswise(
-    left: &Expr,
+    left: &ShapeOrExpr,
     right: &Expr,
     vars: &HashMap<Identifier, VarState>,
     func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
@@ -556,21 +561,30 @@ pub fn infer_broadcastable_poswise(
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<Shape> {
-    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
-        infer_expr_shape(
-            left,
-            vars,
-            func_map,
-            imports,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            false,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
-        )
-    });
+    let inferred_left: Option<Shape>;
+    let left_shape = match left {
+        ShapeOrExpr::Shape(left_shape) => *left_shape,
+        ShapeOrExpr::Expr(left_expr) => {
+            inferred_left = lookup_shape(&left_expr, vars, hover_entries, record_hovers, source)
+                .or_else(|| {
+                    infer_expr_shape(
+                        &left_expr,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    )
+                });
+            inferred_left.as_ref()
+        }
+    };
+
     let right_shape =
         lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
             infer_expr_shape(
@@ -610,12 +624,13 @@ pub fn infer_broadcastable_poswise(
 /// Element-wise (Hadamard) multiplication with torch-style broadcasting.
 /// If only one of the shapes is known, returns that shape (scalar or unknown rhs/lhs).
 fn broadcastable_poswise(
-    left: Option<Shape>,
+    left: Option<&Shape>,
     right: Option<Shape>,
 ) -> Result<Option<Shape>, String> {
     match (left, right) {
         (None, None) => Ok(None),
-        (Some(s), None) | (None, Some(s)) => Ok(Some(s)),
+        (Some(s), None) => Ok(Some((*s).clone())),
+        (None, Some(s)) => Ok(Some(s)),
         (Some(l), Some(r)) => {
             if l.dims.is_empty() || r.dims.is_empty() {
                 return Err("Broadcasting requires operands with at least one dimension".into());
@@ -910,9 +925,9 @@ pub fn infer_creation_size(
                     None
                 }
             },
-            _ => {
+            expr => {
                 diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(call.range, source),
+                    range: text_range_to_lsp(expr_text_range(expr), source),
                     severity: Some(DiagnosticSeverity::INFORMATION),
                     code: None,
                     code_description: None,

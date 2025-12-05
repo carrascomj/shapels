@@ -1,7 +1,7 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{
-    self, Arguments, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt, Suite,
+    self, Arguments, Expr, ExprBinOp, ExprCall, ExprCompare, Identifier, Operator, Stmt, Suite,
 };
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 mod infer;
 mod op_groups;
 use crate::infer::{
-    Transpose, infer_broadcastable_poswise, infer_creation_size, infer_matmul_shapes, infer_noop,
-    infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_matmul_shapes,
+    infer_noop, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES};
@@ -660,7 +660,7 @@ fn infer_expr_shape(
         }) => match op {
             Operator::Mult | Operator::Add | Operator::Sub | Operator::Div => {
                 return infer_broadcastable_poswise(
-                    left,
+                    &ShapeOrExpr::Expr(left),
                     right,
                     vars,
                     func_map,
@@ -694,6 +694,54 @@ fn infer_expr_shape(
             }
             _ => return None,
         },
+        Expr::Compare(ExprCompare {
+            left: init_left,
+            // can be chained, so we need to compute the pairs left to right
+            comparators,
+            range: expr_range,
+            ..
+        }) => {
+            // first, infer with two Expr
+            let mut iter = comparators.iter();
+            let first_right = match iter.next() {
+                Some(x) => x,
+                None => return None, // or whatever makes sense for you
+            };
+            let init = infer_broadcastable_poswise(
+                &ShapeOrExpr::Expr(&*init_left),
+                first_right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                *expr_range,
+                module_cache.as_deref_mut(),
+                module_path,
+            );
+
+            // second, fold with Shape and Expr
+            iter.fold(init, |left, right| {
+                infer_broadcastable_poswise(
+                    &ShapeOrExpr::Shape(left.as_ref()),
+                    right,
+                    vars,
+                    func_map,
+                    imports,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    *expr_range,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                )
+            })
+        }
         Expr::Call(call) => {
             if let Expr::Name(func_name) = call.func.as_ref() {
                 if is_alias_of("mm", &func_name.id, imports)

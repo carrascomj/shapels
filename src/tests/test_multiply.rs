@@ -141,7 +141,7 @@ fn test_hover_inferred_shape_from_caller_to_callee_mm() {
 fn test_hover_hadamard() {
     let mult_source = extract_test_case(PY_DATA, 8);
     let expected = "B X R";
-    for symbol in ["*", "+", "-", "/"] {
+    for symbol in ["*", "+", "-", "/", ">", "<=", "=="] {
         let src = mult_source.replace("*", symbol);
         let analysis = analyze_source(&src);
         // one diagnostic for non-compatible shapes `output_wrong`
@@ -154,7 +154,7 @@ fn test_hover_hadamard() {
 fn test_hover_hadamard_with_broadcasting_not_broadcastable() {
     // this is the example from the torch docs but with * instead of +
     let mult_source = extract_test_case(PY_DATA, 9);
-    for symbol in ["*", "+", "-", "/"] {
+    for symbol in ["*", "+", "-", "/", ">", "<=", "=="] {
         let src = mult_source.replace("*", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 2);
