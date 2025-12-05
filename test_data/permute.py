@@ -31,7 +31,7 @@ from torch import Tensor
 def torch_t():
     B, X, R = 4, 2, 32
     x: F[Tensor, "B X R"] = torch.Tensor(B, X, R)
-    y = torch.t(x)
+    y = torch.t(x).to(torch.bfloat16)
     # torch.t for 0-dim and 1-dim returns the tensors as is
     z = x.T
     w = x.t()

@@ -1,7 +1,8 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{
-    self, Arguments, Expr, ExprBinOp, ExprCall, ExprCompare, Identifier, Operator, Stmt, Suite,
+    self, Arguments, Constant, Expr, ExprBinOp, ExprCall, ExprCompare, Identifier, Operator, Stmt,
+    Suite,
 };
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
@@ -11,10 +12,11 @@ mod infer;
 mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_matmul_shapes,
-    infer_noop, infer_permute, infer_squeeze, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_noop, infer_permute, infer_squeeze, infer_to, infer_unsqueeze, infer_view_like,
+    shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
-use crate::op_groups::{CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES};
+use crate::op_groups::{CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -1397,6 +1399,30 @@ fn infer_expr_shape(
                     );
                 } else if CREATION_SIZE_ALIASES.contains(&attr_name) & in_torch {
                     return infer_creation_size(call, diagnostics, imports, source, true);
+                } else if (attr_name == "to" || TO_NOARG_ALIASES.contains(attr_name)) && !in_torch {
+                    let base_expr = infer_expr_shape(
+                        attr.value.as_ref(),
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    );
+                    let dtype_expr = if TO_NOARG_ALIASES.contains(attr_name) {
+                        Some(&Expr::Constant(ast::ExprConstant {
+                            range: attr.range,
+                            value: Constant::Str(attr_name.to_string()),
+                            kind: None,
+                        }))
+                    } else {
+                        get_arg(call, "dtype", 0)
+                    };
+                    return infer_to(base_expr, dtype_expr, diagnostics, source, imports);
                 }
             }
             None

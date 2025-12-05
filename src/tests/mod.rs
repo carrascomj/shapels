@@ -6,6 +6,7 @@ use lsp_types::Position;
 use shapels::Analysis;
 
 mod test_aggr;
+mod test_dtype;
 mod test_multifile;
 mod test_multiply;
 mod test_noop;

@@ -7,12 +7,11 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments)]
+use crate::op_groups::TORCH_DTYPES;
 use crate::{
     HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, is_torch_base,
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use phf::Set;
-use phf_macros::phf_set;
 use rustpython_parser::ast::{
     self, Arguments, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt,
 };
@@ -962,7 +961,9 @@ pub fn infer_creation_size(
             None
         },
         |dims| {
-            let dtype = get_dtype(call, imports).map(|x| x.to_string());
+            let dtype = get_arg(call, "dtype", 3)
+                .and_then(|expr| get_dtype(expr, imports))
+                .map(|x| x.to_string());
             Some(Shape {
                 dtype,
                 dims: dims.into_iter().map(|x| x.to_string()).collect(),
@@ -971,50 +972,62 @@ pub fn infer_creation_size(
     )
 }
 
-pub static TORCH_DTYPES: Set<&'static str> = phf_set![
-    "float32",
-    "float64",
-    "float16",
-    "bfloat16",
-    "complex32",
-    "complex64",
-    "complex128",
-    "float8_e4m3fn",
-    "float8_e5m2",
-    "float8_e4m3fnuz",
-    "float8_e5m2fnuz",
-    "float8_e8m0fnu",
-    "float4_e2m1fn_x2",
-    "uint8",
-    "int8",
-    "uint16",
-    "int16",
-    "uint32",
-    "int32",
-    "uint64",
-    "int64",
-    "bool",
-];
-
-fn get_dtype<'expr, R>(call: &'expr ExprCall<R>, imports: &Imports) -> Option<&'expr str> {
-    if let Some(dtype_value) = get_arg(call, "dtype", 3) {
-        match dtype_value {
-            Expr::Constant(constant) => match &constant.value {
-                Constant::Str(string_dtype) if TORCH_DTYPES.contains(&string_dtype.as_str()) => {
-                    Some(string_dtype.as_str())
-                }
-                _ => return Some("Float"),
-            },
-            Expr::Name(name) => Some(name.id.as_str()),
-            Expr::Attribute(attr)
-                if is_torch_base(attr.value.as_ref(), imports)
-                    && TORCH_DTYPES.contains(&attr.attr.as_str()) =>
-            {
-                Some(attr.attr.as_str())
+fn get_dtype<'expr, R>(dtype_expr: &'expr Expr<R>, imports: &Imports) -> Option<&'expr str> {
+    match dtype_expr {
+        Expr::Constant(constant) => match &constant.value {
+            Constant::Str(string_dtype) if TORCH_DTYPES.contains(&string_dtype.as_str()) => {
+                Some(string_dtype.as_str())
             }
-            _ => Some("Float"),
+            _ => return Some("Float"),
+        },
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(attr)
+            if is_torch_base(attr.value.as_ref(), imports)
+                && TORCH_DTYPES.contains(&attr.attr.as_str()) =>
+        {
+            Some(attr.attr.as_str())
+        }
+        _ => Some("Float"),
+    }
+}
+
+/// `torch.Tensor.to` changes the dtype.
+///
+/// It returns `Some` if `base_expr` is Some(Shape), since the argument
+/// is not required.
+pub fn infer_to(
+    base_expr: Option<Shape>,
+    dtype_arg: Option<&Expr>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+    imports: &Imports,
+) -> Option<Shape> {
+    if let Some(dtype_expr) = dtype_arg {
+        match get_dtype(dtype_expr, imports) {
+            Some(dtype) => base_expr.map(|x| Shape {
+                dtype: Some(dtype.to_string()),
+                dims: x.dims,
+            }),
+            None => {
+                // dtype provided but not understood
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(dtype_expr), source),
+                    // NOTE: this might be turned into a WARNING or ERROR if deemed
+                    // reliable enough
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "dtype not understood".to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                base_expr
+            }
         }
     } else {
-        None
+        // no dtype arg provided, return base_expr as is
+        base_expr
     }
 }

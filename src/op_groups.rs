@@ -113,3 +113,39 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     "cpu",
     "gpu",
 };
+
+/// Shape-wise NoOp, changes dtype, do not accept arguments.
+pub static TO_NOARG_ALIASES: Set<&'static str> = phf_set! {
+    "float",
+    "long",
+    "int",
+    "byte",
+    "bfloat16",
+    "cfloat",
+    "bool",
+};
+
+pub static TORCH_DTYPES: Set<&'static str> = phf_set![
+    "float32",
+    "float64",
+    "float16",
+    "bfloat16",
+    "complex32",
+    "complex64",
+    "complex128",
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+    "float8_e8m0fnu",
+    "float4_e2m1fn_x2",
+    "uint8",
+    "int8",
+    "uint16",
+    "int16",
+    "uint32",
+    "int32",
+    "uint64",
+    "int64",
+    "bool",
+];

@@ -64,7 +64,7 @@ from torch import Tensor as T
 
 def squeeze_all_is_correct():
     x: F[T, "B 1 R 1"] = torch.Tensor(B, 1, R, 1)
-    z = x.squeeze()
+    z = x.squeeze().bool()
 
 # test 7
 from jaxtyping import Float as F
@@ -73,5 +73,6 @@ from torch import Tensor as T
 def unsqueeze_first_is_correct():
     x: F[T, "B R"] = torch.Tensor(B, R)
     y: F[T, "R"] = torch.Tensor(R, )
-    z_pos = torch.unsqueeze(x, 0)
+    z_pos = torch.unsqueeze(x.to("int32"), 0)
     z_arg = y.unsqueeze(dim=0)
+    z_as_x = x
