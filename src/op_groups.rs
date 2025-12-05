@@ -49,7 +49,7 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
 /// or a single argument with a sequence: `zeros([1,2,3,4])`
 /// ```
 pub static CREATION_SIZE_ALIASES: Set<&'static str> =
-    phf_set!["Tensor", "zeros", "ones", "empty", "full"];
+    phf_set!["Tensor", "zeros", "ones", "empty", "full", "rand", "randn"];
 
 // TODO(carrascomj): separate this into torch.ATTR_NAME only functions
 // e.g., relu is both a tensor and and a top-level function but contiguous is not
@@ -112,6 +112,7 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     // torch.Tensor only
     "cpu",
     "cuda",
+    "detach",
 };
 
 /// Shape-wise NoOp, changes dtype, do not accept arguments.
