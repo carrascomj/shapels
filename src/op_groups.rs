@@ -111,7 +111,7 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     "erfinv",
     // torch.Tensor only
     "cpu",
-    "gpu",
+    "cuda",
 };
 
 /// Shape-wise NoOp, changes dtype, do not accept arguments.
