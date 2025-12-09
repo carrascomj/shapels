@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 mod infer;
 mod op_groups;
 use crate::infer::{
-    ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_matmul_shapes,
-    infer_noop, infer_permute, infer_squeeze, infer_to, infer_unsqueeze, infer_view_like,
-    shape_dims_equal,
+    ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_index,
+    infer_matmul_shapes, infer_noop, infer_permute, infer_squeeze, infer_to, infer_unsqueeze,
+    infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES};
@@ -1426,6 +1426,22 @@ fn infer_expr_shape(
                 }
             }
             None
+        }
+        Expr::Subscript(sub) => {
+            return infer_index(
+                &sub.value,
+                &sub.slice,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            );
         }
         // attributes of a tensor, not a method!
         Expr::Attribute(attr) => {

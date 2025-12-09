@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2024"
 description = "Shape inference for torch on your editor"
 license = "Apache-2.0 AND ISC"
+readme = "README.md"
+repository = "https://github.com/carrascomj/shapels"
 
 [dependencies]
 lsp-types = "0.95"
@@ -13,3 +15,11 @@ lsp-server = "0.7"
 serde_json = "1.0"
 phf = { version = "0.13.1"}
 phf_macros = "0.13.1"
+
+[lib]
+name = "shapels"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shapels"
+path = "src/main.rs"

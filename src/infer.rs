@@ -21,6 +21,306 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{infer_expr_shape, lookup_shape, text_range_to_lsp};
+#[derive(Debug, Clone, Copy)]
+enum IndexKind<'a> {
+    NewAxis,
+    Ellipsis,
+    Keep, // inserted from an expanded ellipsis
+    Int,
+    Slice(Option<i64>),
+    Bool(bool),
+    Tensor(&'a Expr),
+}
+
+pub fn infer_index(
+    base_expr: &Expr,
+    slice: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let base_shape =
+        lookup_shape(base_expr, vars, hover_entries, record_hovers, source).or_else(|| {
+            infer_expr_shape(
+                base_expr,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        })?;
+
+    let mut indices: Vec<IndexKind<'_>> = match slice {
+        Expr::Tuple(t) => t.elts.iter().map(parse_index_kind).collect(),
+        other => vec![parse_index_kind(other)],
+    };
+
+    let consuming_without_ellipsis = indices
+        .iter()
+        .filter(|k| !matches!(k, IndexKind::Ellipsis))
+        .filter(|k| consumes_axis(k))
+        .count();
+    let mut expanded = Vec::new();
+    let mut ellipsis_done = false;
+    for kind in indices.drain(..) {
+        if matches!(kind, IndexKind::Ellipsis) && !ellipsis_done {
+            ellipsis_done = true;
+            let keep = base_shape
+                .dims
+                .len()
+                .saturating_sub(consuming_without_ellipsis);
+            for _ in 0..keep {
+                expanded.push(IndexKind::Keep);
+            }
+        } else if !matches!(kind, IndexKind::Ellipsis) {
+            expanded.push(kind);
+        }
+    }
+
+    let mut output_dims = Vec::new();
+    let mut base_idx = 0usize;
+    let mut prefix_len = None;
+    let mut advanced_shapes = Vec::new();
+    let advanced_positions: Vec<usize> = expanded
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, k)| if is_advanced(k) { Some(idx) } else { None })
+        .collect();
+    let advanced_front =
+        advanced_positions.len() > 1 && !advanced_positions.windows(2).all(|w| w[1] == w[0] + 1);
+
+    for kind in expanded.iter() {
+        if is_advanced(kind) {
+            if prefix_len.is_none() {
+                prefix_len = Some(output_dims.len());
+            }
+            if let Some(shape) = advanced_shape(
+                kind,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) {
+                advanced_shapes.push(shape);
+            }
+            if consumes_axis(kind) {
+                base_idx += 1;
+            }
+            continue;
+        }
+        match kind {
+            IndexKind::NewAxis => output_dims.push("1".to_string()),
+            IndexKind::Keep | IndexKind::Slice(_) => {
+                if let Some(dim) = base_shape.dims.get(base_idx) {
+                    let step = match kind {
+                        IndexKind::Slice(step) => *step,
+                        _ => None,
+                    };
+                    output_dims.push(apply_slice(dim, step));
+                    base_idx += 1;
+                }
+            }
+            IndexKind::Int => {
+                base_idx += 1;
+            }
+            IndexKind::Ellipsis | IndexKind::Bool(_) | IndexKind::Tensor(_) => {}
+        }
+    }
+
+    while base_idx < base_shape.dims.len() {
+        output_dims.push(base_shape.dims[base_idx].clone());
+        base_idx += 1;
+    }
+
+    if advanced_shapes.is_empty() {
+        return Some(Shape {
+            dtype: base_shape.dtype.clone(),
+            dims: output_dims,
+        });
+    }
+
+    let adv_shape = broadcast_shapes(&advanced_shapes)?;
+    let insert_pos = if advanced_front {
+        0
+    } else {
+        prefix_len.unwrap_or(0)
+    };
+    output_dims.splice(insert_pos..insert_pos, adv_shape);
+
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims: output_dims,
+    })
+}
+
+fn is_advanced(kind: &IndexKind<'_>) -> bool {
+    matches!(kind, IndexKind::Bool(_) | IndexKind::Tensor(_))
+}
+
+fn consumes_axis(kind: &IndexKind<'_>) -> bool {
+    matches!(
+        kind,
+        IndexKind::Int | IndexKind::Slice(_) | IndexKind::Keep | IndexKind::Tensor(_)
+    )
+}
+
+fn parse_index_kind(expr: &Expr) -> IndexKind<'_> {
+    match expr {
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::None => IndexKind::NewAxis,
+            ast::Constant::Ellipsis => IndexKind::Ellipsis,
+            ast::Constant::Bool(b) => IndexKind::Bool(*b),
+            ast::Constant::Int(_) => IndexKind::Int,
+            _ => IndexKind::Tensor(expr),
+        },
+        Expr::Name(n) if n.id.as_str() == "Ellipsis" => IndexKind::Ellipsis,
+        Expr::Slice(s) => IndexKind::Slice(s.step.as_deref().and_then(expr_to_int)),
+        Expr::Tuple(t) => {
+            if t.elts.is_empty() {
+                IndexKind::Tensor(expr)
+            } else {
+                IndexKind::Tensor(expr)
+            }
+        }
+        _ => IndexKind::Tensor(expr),
+    }
+}
+
+fn expr_to_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::Int(i) => i.to_string().parse::<i64>().ok(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn apply_slice(dim: &str, step: Option<i64>) -> String {
+    match step {
+        Some(s) if s > 1 => format!("{dim}/{s}"),
+        Some(s) if s < -1 => format!("{dim}/{}", s.abs()),
+        _ => dim.to_string(),
+    }
+}
+
+fn advanced_shape<'a>(
+    kind: &IndexKind<'a>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Vec<String>> {
+    match kind {
+        IndexKind::Bool(b) => Some(vec![(if *b { "1" } else { "0" }).to_string()]),
+        IndexKind::Tensor(expr) => {
+            if let Some(shape) = infer_expr_shape(
+                expr,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) {
+                return Some(shape.dims);
+            }
+            literal_shape(expr)
+        }
+        _ => None,
+    }
+}
+
+fn literal_shape(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::List(l) => Some(list_shape(&l.elts)),
+        Expr::Tuple(t) => Some(list_shape(&t.elts)),
+        Expr::Call(call) => {
+            if let Expr::Attribute(attr) = call.func.as_ref()
+                && attr.attr.as_str() == "tensor"
+                && let Some(arg0) = call.args.first()
+            {
+                return literal_shape(arg0);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn list_shape(elts: &[Expr]) -> Vec<String> {
+    let len = elts.len();
+    if let Some(first) = elts.first()
+        && matches!(first, Expr::List(_) | Expr::Tuple(_))
+    {
+        let mut dims = vec![len.to_string()];
+        dims.extend(literal_shape(first).unwrap_or_default());
+        dims
+    } else {
+        vec![len.to_string()]
+    }
+}
+
+fn broadcast_shapes(shapes: &[Vec<String>]) -> Option<Vec<String>> {
+    let max_len = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+    if max_len == 0 {
+        return None;
+    }
+    let mut result = Vec::with_capacity(max_len);
+    for idx in 0..max_len {
+        let mut current: Option<String> = None;
+        for shape in shapes {
+            let offset = max_len.saturating_sub(shape.len());
+            let dim = if idx < offset {
+                "1".to_string()
+            } else {
+                shape
+                    .get(idx - offset)
+                    .cloned()
+                    .unwrap_or_else(|| "1".to_string())
+            };
+            current = Some(match current {
+                None => dim,
+                Some(cur) if cur == dim => cur,
+                Some(cur) if cur == "1" => dim,
+                Some(cur) if dim == "1" => cur,
+                Some(cur) if cur == "0" || dim == "0" => "0".to_string(),
+                Some(cur) => cur,
+            });
+        }
+        result.push(current.unwrap_or_else(|| "1".to_string()));
+    }
+    Some(result)
+}
 
 /// Inference and matrix multiplication shape inference shared by `@` and `torch.mm`.
 /// Keeps all leading dims of left except the last, then appends all trailing dims of right except the first.
