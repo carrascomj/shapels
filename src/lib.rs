@@ -1,3 +1,5 @@
+#![allow(clippy::needless_option_as_deref, clippy::too_many_arguments)]
+
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{
@@ -217,15 +219,15 @@ fn resolve_module_path(
                     }
                     // site-packages paths
                     let lib_dir = venv_dir.join("lib");
-                    if lib_dir.exists() {
-                        if let Ok(entries) = fs::read_dir(&lib_dir) {
-                            for entry in entries.flatten() {
-                                let fname = entry.file_name();
-                                if fname.to_string_lossy().starts_with("python") {
-                                    let sp = entry.path().join("site-packages");
-                                    if sp.exists() {
-                                        search_roots.push(sp);
-                                    }
+                    if lib_dir.exists()
+                        && let Ok(entries) = fs::read_dir(&lib_dir)
+                    {
+                        for entry in entries.flatten() {
+                            let fname = entry.file_name();
+                            if fname.to_string_lossy().starts_with("python") {
+                                let sp = entry.path().join("site-packages");
+                                if sp.exists() {
+                                    search_roots.push(sp);
                                 }
                             }
                         }
@@ -258,7 +260,7 @@ fn resolve_module_path(
             && root_name
                 == parts
                     .first()
-                    .map(|s| std::ffi::OsStr::new(s))
+                    .map(std::ffi::OsStr::new)
                     .unwrap_or_else(|| std::ffi::OsStr::new(""))
             && parts.len() > 1
         {
@@ -663,7 +665,7 @@ fn infer_expr_shape(
             range: expr_range,
         }) => match op {
             Operator::Mult | Operator::Add | Operator::Sub | Operator::Div => {
-                return infer_broadcastable_poswise(
+                infer_broadcastable_poswise(
                     &ShapeOrExpr::Expr(left),
                     right,
                     vars,
@@ -677,10 +679,10 @@ fn infer_expr_shape(
                     *expr_range,
                     module_cache.as_deref_mut(),
                     module_path,
-                );
+                )
             }
             Operator::MatMult => {
-                return infer_matmul_shapes(
+                infer_matmul_shapes(
                     left,
                     right,
                     vars,
@@ -694,9 +696,9 @@ fn infer_expr_shape(
                     *expr_range,
                     module_cache.as_deref_mut(),
                     module_path,
-                );
+                )
             }
-            _ => return None,
+            _ => None,
         },
         Expr::Compare(ExprCompare {
             left: init_left,
@@ -707,12 +709,9 @@ fn infer_expr_shape(
         }) => {
             // first, infer with two Expr
             let mut iter = comparators.iter();
-            let first_right = match iter.next() {
-                Some(x) => x,
-                None => return None, // or whatever makes sense for you
-            };
+            let first_right = iter.next()?;
             let init = infer_broadcastable_poswise(
-                &ShapeOrExpr::Expr(&*init_left),
+                &ShapeOrExpr::Expr(init_left.as_ref()),
                 first_right,
                 vars,
                 func_map,
@@ -767,63 +766,61 @@ fn infer_expr_shape(
                         module_path,
                     );
                 }
-                if let Some((module_name, original)) = imports.from_imports.get(&func_name.id) {
-                    if let (Some(cache), Some(cur_path)) =
+                if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
+                    && let (Some(cache), Some(cur_path)) =
                         (module_cache.as_deref_mut(), module_path)
-                        && let Some(module) = cache.get_module(module_name, cur_path)
-                    {
-                        if let Some((callee_args, callee_body)) = module.func_map.get(original) {
-                            // avoid infinite recursion
-                            if call_stack.iter().any(|id| id == &func_name.id) {
-                                return None;
-                            }
-                            let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                            for (idx, param) in callee_args.args.iter().enumerate() {
-                                if let Some(arg_expr) = call.args.get(idx)
-                                    && let Some(shape) = infer_expr_shape(
-                                        arg_expr,
-                                        vars,
-                                        func_map,
-                                        imports,
-                                        call_stack,
-                                        diagnostics,
-                                        hover_entries,
-                                        record_hovers,
-                                        source,
-                                        module_cache.as_deref_mut(),
-                                        module_path,
-                                    )
-                                {
-                                    arg_shapes.insert(
-                                        param.def.arg.clone(),
-                                        VarState {
-                                            annotated: None,
-                                            inferred: Some(shape),
-                                        },
-                                    );
-                                }
-                            }
-                            call_stack.push(func_name.id.clone());
-                            let (mut diag, mut hovers, ret_shape) = simulate_function(
-                                callee_args.as_ref(),
-                                callee_body,
-                                &module.source,
-                                &module.func_map,
-                                &module.imports,
+                    && let Some(module) = cache.get_module(module_name, cur_path)
+                    && let Some((callee_args, callee_body)) = module.func_map.get(original)
+                {
+                    // avoid infinite recursion
+                    if call_stack.iter().any(|id| id == &func_name.id) {
+                        return None;
+                    }
+                    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
+                    for (idx, param) in callee_args.args.iter().enumerate() {
+                        if let Some(arg_expr) = call.args.get(idx)
+                            && let Some(shape) = infer_expr_shape(
+                                arg_expr,
+                                vars,
+                                func_map,
+                                imports,
                                 call_stack,
-                                arg_shapes,
-                                false,
+                                diagnostics,
+                                hover_entries,
+                                record_hovers,
+                                source,
                                 module_cache.as_deref_mut(),
-                                Some(module.path.as_path()),
+                                module_path,
+                            )
+                        {
+                            arg_shapes.insert(
+                                param.def.arg.clone(),
+                                VarState {
+                                    annotated: None,
+                                    inferred: Some(shape),
+                                },
                             );
-                            diagnostics.append(&mut diag);
-                            if record_hovers {
-                                hover_entries.append(&mut hovers);
-                            }
-                            call_stack.pop();
-                            return ret_shape;
                         }
                     }
+                    call_stack.push(func_name.id.clone());
+                    let (mut diag, mut hovers, ret_shape) = simulate_function(
+                        callee_args.as_ref(),
+                        callee_body,
+                        &module.source,
+                        &module.func_map,
+                        &module.imports,
+                        call_stack,
+                        arg_shapes,
+                        false,
+                        module_cache.as_deref_mut(),
+                        Some(module.path.as_path()),
+                    );
+                    diagnostics.append(&mut diag);
+                    if record_hovers {
+                        hover_entries.append(&mut hovers);
+                    }
+                    call_stack.pop();
+                    return ret_shape;
                 }
                 if (is_alias_of("view", &func_name.id, imports)
                     || is_alias_of("reshape", &func_name.id, imports))
@@ -882,7 +879,7 @@ fn infer_expr_shape(
                     return infer_permute(
                         base,
                         &order_args,
-                        Transpose::Transpose,
+                        Transpose::Explicit,
                         None,
                         vars,
                         diagnostics,
@@ -994,7 +991,7 @@ fn infer_expr_shape(
                     );
                     return infer_noop(
                         base_hint,
-                        get_arg(&call, "dim", 1),
+                        get_arg(call, "dim", 1),
                         diagnostics,
                         source,
                         call.range,
@@ -1017,9 +1014,9 @@ fn infer_expr_shape(
                     );
                 } else if is_alias_of("Tensor", &func_name.id, imports) {
                     // a torch.Tensor.shape might be the first argument
-                    let shape_assign = if let Some(Expr::Attribute(_)) = call.args.get(0) {
+                    let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
                         infer_expr_shape(
-                            &call.args[0],
+                            arg0,
                             vars,
                             func_map,
                             imports,
@@ -1181,7 +1178,7 @@ fn infer_expr_shape(
                 let in_torch = is_torch_base(&attr.value, imports);
                 let offset = if in_torch { 1 } else { 0 };
                 if attr_name == "mm" {
-                    let args = match (in_torch, call.args.get(0), call.args.get(1)) {
+                    let args = match (in_torch, call.args.first(), call.args.get(1)) {
                         (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
                         (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
                         _ => None,
@@ -1303,7 +1300,7 @@ fn infer_expr_shape(
                             (&attr.value, rest)
                         };
                     let trans_type = match attr_name {
-                        "transpose" => Transpose::Transpose,
+                        "transpose" => Transpose::Explicit,
                         _ => Transpose::T,
                     };
                     let base_hint = infer_expr_shape(
@@ -1338,7 +1335,7 @@ fn infer_expr_shape(
                     } else {
                         attr.value.as_ref()
                     };
-                    let dim_arg = get_arg(&call, "dim", offset);
+                    let dim_arg = get_arg(call, "dim", offset);
                     return infer_unsqueeze(
                         base,
                         dim_arg,
@@ -1363,7 +1360,7 @@ fn infer_expr_shape(
 
                     return infer_squeeze(
                         base,
-                        get_arg(&call, "dim", offset),
+                        get_arg(call, "dim", offset),
                         vars,
                         func_map,
                         imports,
@@ -1377,7 +1374,7 @@ fn infer_expr_shape(
                         module_path,
                         true,
                     );
-                } else if AGGR_ALIASES.contains(&attr_name) {
+                } else if AGGR_ALIASES.contains(attr_name) {
                     // tensor.sum(...) vs torch.sum(tensor, ...)
                     let base = if in_torch {
                         call.args.first()?
@@ -1386,7 +1383,7 @@ fn infer_expr_shape(
                     };
                     return infer_squeeze(
                         base,
-                        get_arg(&call, "dim", offset),
+                        get_arg(call, "dim", offset),
                         vars,
                         func_map,
                         imports,
@@ -1400,7 +1397,7 @@ fn infer_expr_shape(
                         module_path,
                         false,
                     );
-                } else if NOOP_DIM_ALIASES.contains(&attr_name) {
+                } else if NOOP_DIM_ALIASES.contains(attr_name) {
                     let base = if in_torch {
                         call.args.first()?
                     } else {
@@ -1421,13 +1418,13 @@ fn infer_expr_shape(
                     );
                     return infer_noop(
                         base_hint,
-                        get_arg(&call, "dim", offset),
+                        get_arg(call, "dim", offset),
                         diagnostics,
                         source,
                         call.range,
                         attr_name != "argsort", // dim optional for argsort
                     );
-                } else if NOOP_ALIASES.contains(&attr_name) {
+                } else if NOOP_ALIASES.contains(attr_name) {
                     return infer_expr_shape(
                         if in_torch {
                             call.args.first()?
@@ -1445,11 +1442,11 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if CREATION_SIZE_ALIASES.contains(&attr_name) & in_torch {
+                } else if CREATION_SIZE_ALIASES.contains(attr_name) & in_torch {
                     // a torch.Tensor.shape might be the first argument
-                    let shape_assign = if let Some(Expr::Attribute(_)) = call.args.get(0) {
+                    let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
                         infer_expr_shape(
-                            &call.args[0],
+                            arg0,
                             vars,
                             func_map,
                             imports,
@@ -1522,22 +1519,20 @@ fn infer_expr_shape(
             }
             None
         }
-        Expr::Subscript(sub) => {
-            return infer_index(
-                &sub.value,
-                &sub.slice,
-                vars,
-                func_map,
-                imports,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            );
-        }
+        Expr::Subscript(sub) => infer_index(
+            &sub.value,
+            &sub.slice,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        ),
         // attributes of a tensor, not a method!
         Expr::Attribute(attr) => {
             let attr_name: &str = attr.attr.as_ref();
@@ -1573,11 +1568,9 @@ fn infer_expr_shape(
                     source,
                     attr.range,
                 );
-                if record_hovers {
-                    if let Some(s) = res.clone() {
-                        let range = text_range_to_lsp(attr.range, source);
-                        hover_entries.push((range, HoverInfo { shape: Some(s) }));
-                    }
+                if record_hovers && let Some(s) = res.clone() {
+                    let range = text_range_to_lsp(attr.range, source);
+                    hover_entries.push((range, HoverInfo { shape: Some(s) }));
                 }
                 return res;
             } else if attr_name == "shape" || attr_name == "dtype" {
@@ -1706,7 +1699,7 @@ fn collect_imports(
                     }
                     if let Some(val) = imports.func_aliases.get_mut(name) {
                         val.insert(as_id);
-                    } else if AGGR_ALIASES.contains(&name) {
+                    } else if AGGR_ALIASES.contains(name) {
                         imports.func_aliases.entry("sum").or_default().insert(as_id);
                     }
                 }
@@ -1724,13 +1717,13 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             val.insert(id);
-                        } else if AGGR_ALIASES.contains(&name) {
+                        } else if AGGR_ALIASES.contains(name) {
                             let id = alias
                                 .asname
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("sum").or_default().insert(id);
-                        } else if NOOP_DIM_ALIASES.contains(&name) {
+                        } else if NOOP_DIM_ALIASES.contains(name) {
                             let id = alias
                                 .asname
                                 .clone()
@@ -1740,13 +1733,13 @@ fn collect_imports(
                                 .entry("softmax")
                                 .or_default()
                                 .insert(id);
-                        } else if NOOP_ALIASES.contains(&name) {
+                        } else if NOOP_ALIASES.contains(name) {
                             let id = alias
                                 .asname
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("noop").or_default().insert(id);
-                        } else if CREATION_SIZE_ALIASES.contains(&name) {
+                        } else if CREATION_SIZE_ALIASES.contains(name) {
                             let id = alias
                                 .asname
                                 .clone()
@@ -1783,10 +1776,8 @@ fn module_name_from_path(path: &Path, project_root: Option<&Path>) -> Option<Str
         } else {
             break;
         }
-        if let Some(root) = project_root {
-            if dir == root {
-                break;
-            }
+        if let Some(root) = project_root && dir == root {
+            break;
         }
         if let Some(parent) = dir.parent() {
             dir = parent;
@@ -2125,15 +2116,15 @@ fn get_arg<'a, R>(
 fn get_dtype<'expr, R>(dtype_expr: &'expr Expr<R>, imports: &Imports) -> Option<&'expr str> {
     match dtype_expr {
         Expr::Constant(constant) => match &constant.value {
-            Constant::Str(string_dtype) if TORCH_DTYPES.contains(&string_dtype.as_str()) => {
+            Constant::Str(string_dtype) if TORCH_DTYPES.contains(string_dtype.as_str()) => {
                 Some(string_dtype.as_str())
             }
-            _ => return Some("Float"),
+            _ => Some("Float"),
         },
         Expr::Name(name) => Some(name.id.as_str()),
         Expr::Attribute(attr)
             if is_torch_base(attr.value.as_ref(), imports)
-                && TORCH_DTYPES.contains(&attr.attr.as_str()) =>
+                && TORCH_DTYPES.contains(attr.attr.as_str()) =>
         {
             Some(attr.attr.as_str())
         }

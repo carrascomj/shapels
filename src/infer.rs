@@ -6,7 +6,7 @@
 //! However, in functions like (un)squeeze or reduce ops, shapels parses dim as i16 because
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
-#![allow(clippy::too_many_arguments)]
+#![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
 use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_dtype};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{
@@ -191,13 +191,7 @@ fn parse_index_kind(expr: &Expr) -> IndexKind<'_> {
         },
         Expr::Name(n) if n.id.as_str() == "Ellipsis" => IndexKind::Ellipsis,
         Expr::Slice(s) => IndexKind::Slice(s.step.as_deref().and_then(expr_to_int)),
-        Expr::Tuple(t) => {
-            if t.elts.is_empty() {
-                IndexKind::Tensor(expr)
-            } else {
-                IndexKind::Tensor(expr)
-            }
-        }
+        Expr::Tuple(_) => IndexKind::Tensor(expr),
         _ => IndexKind::Tensor(expr),
     }
 }
@@ -337,19 +331,19 @@ pub fn infer_matmul_shapes(
     module_path: Option<&Path>,
 ) -> Option<Shape> {
     let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
-        infer_expr_shape(
-            left,
-            vars,
-            func_map,
-            imports,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            false,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
-        )
+            infer_expr_shape(
+                left,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
     });
     let right_shape =
         lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
@@ -861,10 +855,10 @@ pub fn infer_broadcastable_poswise(
     let left_shape = match left {
         ShapeOrExpr::Shape(left_shape) => *left_shape,
         ShapeOrExpr::Expr(left_expr) => {
-            inferred_left = lookup_shape(&left_expr, vars, hover_entries, record_hovers, source)
+            inferred_left = lookup_shape(left_expr, vars, hover_entries, record_hovers, source)
                 .or_else(|| {
                     infer_expr_shape(
-                        &left_expr,
+                        left_expr,
                         vars,
                         func_map,
                         imports,
@@ -953,8 +947,8 @@ fn broadcast_dims(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
         let b_dim = b.get(b.len().wrapping_sub(1 + idx)).map(String::as_str);
         let res = match (a_dim, b_dim) {
             (Some(ad), Some(bd)) if ad == bd => ad.to_string(),
-            (Some(ad), Some(bd)) if ad == "1" => bd.to_string(),
-            (Some(ad), Some(bd)) if bd == "1" => ad.to_string(),
+            (Some("1"), Some(bd)) => bd.to_string(),
+            (Some(ad), Some("1")) => ad.to_string(),
             (Some(ad), None) => ad.to_string(),
             (None, Some(bd)) => bd.to_string(),
             (Some(_), Some(_)) => {
@@ -971,7 +965,7 @@ fn broadcast_dims(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
 
 /// Variants for an operation that transposes dimensions.
 pub enum Transpose {
-    Transpose,
+    Explicit,
     T,
     Permute,
 }
@@ -993,7 +987,7 @@ pub fn infer_permute(
         .or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source))?;
     let mut order = Vec::new();
     match transpose {
-        Transpose::Transpose => {
+        Transpose::Explicit => {
             if order_args.len() != 2 {
                 diagnostics.push(Diagnostic {
                     range: text_range_to_lsp(whole_range, source),
@@ -1010,15 +1004,13 @@ pub fn infer_permute(
             }
             let mut dims = Vec::with_capacity(2);
             for expr in order_args {
-                if let Expr::Constant(c) = expr {
-                    if let ast::Constant::Int(i) = &c.value {
-                        if let Ok(val) = i.to_string().parse::<isize>() {
-                            if val >= 0 {
-                                dims.push(val as usize);
-                                continue;
-                            }
-                        }
-                    }
+                if let Expr::Constant(c) = expr
+                    && let ast::Constant::Int(i) = &c.value
+                    && let Ok(val) = i.to_string().parse::<isize>()
+                    && val >= 0
+                {
+                    dims.push(val as usize);
+                    continue;
                 }
                 diagnostics.push(Diagnostic {
                     range: text_range_to_lsp(expr_text_range(expr), source),
@@ -1060,15 +1052,13 @@ pub fn infer_permute(
         Transpose::Permute => {
             order.reserve(order_args.len());
             for expr in order_args {
-                if let Expr::Constant(c) = expr {
-                    if let ast::Constant::Int(i) = &c.value {
-                        if let Ok(val) = i.to_string().parse::<isize>() {
-                            if val >= 0 {
-                                order.push(val as usize);
-                                continue;
-                            }
-                        }
-                    }
+                if let Expr::Constant(c) = expr
+                    && let ast::Constant::Int(i) = &c.value
+                    && let Ok(val) = i.to_string().parse::<isize>()
+                    && val >= 0
+                {
+                    order.push(val as usize);
+                    continue;
                 }
                 diagnostics.push(Diagnostic {
                     range: text_range_to_lsp(expr_text_range(expr), source),
@@ -1160,7 +1150,7 @@ pub fn infer_noop(
         if (dim_i > 0) && (dim_i > (ndim - 1))  // positive dims must be a valid index
             || (dim_i < 0 && dim_i.abs() > ndim && ndim > 0)  // negative dims can be at most -ndim
             // dim 0 or -1 is always valid even for empty tensors
-            || (ndim == 0 && (dim_i < -1 || dim_i > 0))
+            || (ndim == 0 && !(-1..=0).contains(&dim_i))
         {
             diagnostics.push(Diagnostic {
                 range: text_range_to_lsp(whole_range, source),
@@ -1257,7 +1247,7 @@ pub fn infer_creation_size(
                 code: None,
                 code_description: None,
                 source: Some("shapels".into()),
-                message: format!("Shape could not be initialized from expression",),
+                message: "Shape could not be initialized from expression".to_string(),
                 related_information: None,
                 tags: None,
                 data: None,
