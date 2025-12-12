@@ -5,6 +5,7 @@ use shapels::Analysis;
 
 const VIEW_PY_DATA: &str = include_str!("../../test_data/view.py");
 const PERMUTE_PY_DATA: &str = include_str!("../../test_data/permute.py");
+const SHAPE_ASSIGN_PY_DATA: &str = include_str!("../../test_data/shape_assign.py");
 
 fn assert_hover_dtype(src: &str, analysis: &Analysis, pat: &str, expected_dtype: &str) {
     let mut line_idx = 0;
@@ -65,4 +66,12 @@ fn to_returns_torch_dtype_arg() {
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
     assert_hover_dtype(&src, &analysis, "y =", "bfloat16");
+}
+
+#[test]
+fn shape_assign_from_tensor_dtype_attr() {
+    let src = extract_test_case(SHAPE_ASSIGN_PY_DATA, 7);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_dtype(&src, &analysis, "eps =", "bfloat16");
 }

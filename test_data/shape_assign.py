@@ -51,12 +51,13 @@ def ann_creation_size_list_is_the_right_shape():
     Batch, Channels, Height, Width = 32, 3, 224, 224
     x = ones([Batch, Channels, Height, Width], dtype="bool")
 
-# # test 6
-# import torch
+# test 7
+import torch
 
-# def ann_creation_size_is_the_right_shape():
-#     Batch, Channels, Height, Width = 32, 3, 224, 224
-#     x = torch.zeros(Batch, Channels, Height, Width, dtype="bool")
+def ann_creation_size_is_the_right_shape():
+    Batch, Features = 32, 3
+    z = torch.zeros(Batch, Features, dtype=torch.bfloat16)
+    eps = torch.randn(z.shape, device=z.device, dtype=z.dtype)
 
 
 

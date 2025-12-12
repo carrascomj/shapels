@@ -80,3 +80,11 @@ fn test_zeros_creation_size() {
     assert_eq!(shape.dim_string(), expected);
     assert_eq!(shape.dtype, Some(String::from("bool")));
 }
+
+#[test]
+fn test_infer_from_shape_attr() {
+    let src = extract_test_case(PY_DATA, 7);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "eps =", "Batch Features");
+}

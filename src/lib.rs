@@ -16,7 +16,9 @@ use crate::infer::{
     infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
-use crate::op_groups::{CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES};
+use crate::op_groups::{
+    CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES, TORCH_DTYPES,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -1014,7 +1016,53 @@ fn infer_expr_shape(
                         module_path,
                     );
                 } else if is_alias_of("Tensor", &func_name.id, imports) {
-                    return infer_creation_size(call, diagnostics, imports, source, true);
+                    // a torch.Tensor.shape might be the first argument
+                    let shape_assign = if let Some(Expr::Attribute(_)) = call.args.get(0) {
+                        infer_expr_shape(
+                            &call.args[0],
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                    } else {
+                        None
+                    };
+                    let dtype = get_arg(call, "dtype", 3).and_then(|expr| {
+                        let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
+                            infer_expr_shape(
+                                expr,
+                                vars,
+                                func_map,
+                                imports,
+                                call_stack,
+                                diagnostics,
+                                hover_entries,
+                                record_hovers,
+                                source,
+                                module_cache.as_deref_mut(),
+                                module_path,
+                            )
+                            .and_then(|shape| shape.dtype)
+                        } else {
+                            None
+                        };
+                        attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
+                    });
+                    return infer_creation_size(
+                        call,
+                        diagnostics,
+                        source,
+                        shape_assign,
+                        dtype,
+                        true,
+                    );
                 }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
                     // avoid infinite recursion
@@ -1398,7 +1446,54 @@ fn infer_expr_shape(
                         module_path,
                     );
                 } else if CREATION_SIZE_ALIASES.contains(&attr_name) & in_torch {
-                    return infer_creation_size(call, diagnostics, imports, source, true);
+                    // a torch.Tensor.shape might be the first argument
+                    let shape_assign = if let Some(Expr::Attribute(_)) = call.args.get(0) {
+                        infer_expr_shape(
+                            &call.args[0],
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                    } else {
+                        None
+                    };
+                    let dtype = get_arg(call, "dtype", 3).and_then(|expr| {
+                        let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
+                            infer_expr_shape(
+                                expr,
+                                vars,
+                                func_map,
+                                imports,
+                                call_stack,
+                                diagnostics,
+                                hover_entries,
+                                record_hovers,
+                                source,
+                                module_cache,
+                                module_path,
+                            )
+                            .and_then(|shape| shape.dtype)
+                        } else {
+                            None
+                        };
+                        attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
+                    });
+
+                    return infer_creation_size(
+                        call,
+                        diagnostics,
+                        source,
+                        shape_assign,
+                        dtype,
+                        true,
+                    );
                 } else if (attr_name == "to" || TO_NOARG_ALIASES.contains(attr_name)) && !in_torch {
                     let base_expr = infer_expr_shape(
                         attr.value.as_ref(),
@@ -1485,6 +1580,23 @@ fn infer_expr_shape(
                     }
                 }
                 return res;
+            } else if attr_name == "shape" || attr_name == "dtype" {
+                return lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
+                    .or_else(|| {
+                        infer_expr_shape(
+                            &attr.value,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            false,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                    });
             }
             None
         }
@@ -2008,4 +2120,23 @@ fn get_arg<'a, R>(
         .iter()
         .find(|kw| kw.arg.as_deref() == Some(name_arg))
         .map(|kw| &kw.value))
+}
+
+fn get_dtype<'expr, R>(dtype_expr: &'expr Expr<R>, imports: &Imports) -> Option<&'expr str> {
+    match dtype_expr {
+        Expr::Constant(constant) => match &constant.value {
+            Constant::Str(string_dtype) if TORCH_DTYPES.contains(&string_dtype.as_str()) => {
+                Some(string_dtype.as_str())
+            }
+            _ => return Some("Float"),
+        },
+        Expr::Name(name) => Some(name.id.as_str()),
+        Expr::Attribute(attr)
+            if is_torch_base(attr.value.as_ref(), imports)
+                && TORCH_DTYPES.contains(&attr.attr.as_str()) =>
+        {
+            Some(attr.attr.as_str())
+        }
+        _ => Some("Float"),
+    }
 }

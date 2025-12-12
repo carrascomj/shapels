@@ -7,10 +7,7 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments)]
-use crate::op_groups::TORCH_DTYPES;
-use crate::{
-    HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, is_torch_base,
-};
+use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_dtype};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{
     self, Arguments, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt,
@@ -1192,10 +1189,17 @@ pub fn infer_noop(
 pub fn infer_creation_size(
     call: &ExprCall<TextRange>,
     diagnostics: &mut Vec<Diagnostic>,
-    imports: &Imports,
     source: &str,
+    shape_hint: Option<Shape>,
+    dtype: Option<String>,
     not_tensor: bool,
 ) -> Option<Shape> {
+    if let Some(shape) = shape_hint {
+        return Some(Shape {
+            dims: shape.dims,
+            dtype,
+        });
+    }
     let list = match call.args.as_slice() {
         [Expr::List(list)] if not_tensor => list.elts.as_slice(),
         [Expr::Tuple(seq)] if not_tensor => seq.elts.as_slice(),
@@ -1261,34 +1265,12 @@ pub fn infer_creation_size(
             None
         },
         |dims| {
-            let dtype = get_arg(call, "dtype", 3)
-                .and_then(|expr| get_dtype(expr, imports))
-                .map(|x| x.to_string());
             Some(Shape {
                 dtype,
                 dims: dims.into_iter().map(|x| x.to_string()).collect(),
             })
         },
     )
-}
-
-fn get_dtype<'expr, R>(dtype_expr: &'expr Expr<R>, imports: &Imports) -> Option<&'expr str> {
-    match dtype_expr {
-        Expr::Constant(constant) => match &constant.value {
-            Constant::Str(string_dtype) if TORCH_DTYPES.contains(&string_dtype.as_str()) => {
-                Some(string_dtype.as_str())
-            }
-            _ => return Some("Float"),
-        },
-        Expr::Name(name) => Some(name.id.as_str()),
-        Expr::Attribute(attr)
-            if is_torch_base(attr.value.as_ref(), imports)
-                && TORCH_DTYPES.contains(&attr.attr.as_str()) =>
-        {
-            Some(attr.attr.as_str())
-        }
-        _ => Some("Float"),
-    }
 }
 
 /// `torch.Tensor.to` changes the dtype.
