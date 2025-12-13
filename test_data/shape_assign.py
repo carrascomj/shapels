@@ -60,4 +60,15 @@ def ann_creation_size_is_the_right_shape():
     eps = torch.randn(z.shape, device=z.device, dtype=z.dtype)
 
 
+# test 8
+from jaxtyping import Float
+import torch
+
+def randperm_from_namevar():
+    x: Float[torch.Tensor, "B Features"]
+    n_instances = int(x.shape[0] * 0.5)
+    # [n_instances]: Long
+    idx = torch.randperm(n_instances)[: int(n_instances)]
+    # [n_instances, Features]: Float
+    out = x[idx] 
 

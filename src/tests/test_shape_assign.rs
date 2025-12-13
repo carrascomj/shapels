@@ -88,3 +88,11 @@ fn test_infer_from_shape_attr() {
     assert!(analysis.diagnostics.is_empty());
     assert_hover_expected(&src, &analysis, "eps =", "Batch Features");
 }
+
+#[test]
+fn randperm_from_namevar() {
+    let src = extract_test_case(PY_DATA, 8);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "out =", "n_instances Features");
+}

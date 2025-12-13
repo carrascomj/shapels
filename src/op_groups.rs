@@ -51,6 +51,9 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
 pub static CREATION_SIZE_ALIASES: Set<&'static str> =
     phf_set!["Tensor", "zeros", "ones", "empty", "full", "rand", "randn"];
 
+/// Creation ops that only accept an int
+pub static CREATION_INT_ALIASES: Set<&'static str> = phf_set!["randperm"];
+
 // TODO(carrascomj): separate this into torch.ATTR_NAME only functions
 // e.g., relu is both a tensor and and a top-level function but contiguous is not
 /// Shape-wise NoOp

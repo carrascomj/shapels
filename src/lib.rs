@@ -19,7 +19,8 @@ use crate::infer::{
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
-    CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES, TORCH_DTYPES,
+    CREATION_INT_ALIASES, CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES,
+    TORCH_DTYPES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -681,23 +682,21 @@ fn infer_expr_shape(
                     module_path,
                 )
             }
-            Operator::MatMult => {
-                infer_matmul_shapes(
-                    left,
-                    right,
-                    vars,
-                    func_map,
-                    imports,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    *expr_range,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                )
-            }
+            Operator::MatMult => infer_matmul_shapes(
+                left,
+                right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                *expr_range,
+                module_cache.as_deref_mut(),
+                module_path,
+            ),
             _ => None,
         },
         Expr::Compare(ExprCompare {
@@ -1012,7 +1011,9 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if is_alias_of("Tensor", &func_name.id, imports) {
+                } else if is_alias_of("Tensor", &func_name.id, imports)
+                    || is_alias_of("randperm", &func_name.id, imports)
+                {
                     // a torch.Tensor.shape might be the first argument
                     let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
                         infer_expr_shape(
@@ -1058,7 +1059,7 @@ fn infer_expr_shape(
                         source,
                         shape_assign,
                         dtype,
-                        true,
+                        is_alias_of("Tensor", &func_name.id, imports),
                     );
                 }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
@@ -1442,7 +1443,10 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if CREATION_SIZE_ALIASES.contains(attr_name) & in_torch {
+                } else if (CREATION_SIZE_ALIASES.contains(attr_name)
+                    || CREATION_INT_ALIASES.contains(attr_name))
+                    & in_torch
+                {
                     // a torch.Tensor.shape might be the first argument
                     let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
                         infer_expr_shape(
@@ -1489,7 +1493,7 @@ fn infer_expr_shape(
                         source,
                         shape_assign,
                         dtype,
-                        true,
+                        CREATION_SIZE_ALIASES.contains(attr_name),
                     );
                 } else if (attr_name == "to" || TO_NOARG_ALIASES.contains(attr_name)) && !in_torch {
                     let base_expr = infer_expr_shape(
@@ -1672,6 +1676,7 @@ fn collect_imports(
         "softmax",
         "noop",
         "Tensor",
+        "randperm",
     ] {
         imports
             .func_aliases
@@ -1745,6 +1750,16 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("Tensor").or_default().insert(id);
+                        } else if CREATION_INT_ALIASES.contains(name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports
+                                .func_aliases
+                                .entry("randperm")
+                                .or_default()
+                                .insert(id);
                         }
                     }
                 } else if let Some(module) = &resolved_module {
@@ -1776,7 +1791,9 @@ fn module_name_from_path(path: &Path, project_root: Option<&Path>) -> Option<Str
         } else {
             break;
         }
-        if let Some(root) = project_root && dir == root {
+        if let Some(root) = project_root
+            && dir == root
+        {
             break;
         }
         if let Some(parent) = dir.parent() {
