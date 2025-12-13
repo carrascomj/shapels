@@ -96,3 +96,29 @@ fn randperm_from_namevar() {
     assert!(analysis.diagnostics.is_empty());
     assert_hover_expected(&src, &analysis, "out =", "n_instances Features");
 }
+
+#[test]
+fn range_from_all_numbers() {
+    let src = extract_test_case(PY_DATA, 9);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "some_range =", "100");
+    assert_hover_expected(&src, &analysis, "some_arange =", "101");
+}
+
+#[test]
+fn range_from_denom_numbers() {
+    let src = extract_test_case(PY_DATA, 9);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "some_range_n =", "10/n_instances+0");
+    assert_hover_expected(&src, &analysis, "some_arange_n =", "10/n_instances+1");
+}
+
+#[test]
+fn linspace_from_name_expr() {
+    let src = extract_test_case(PY_DATA, 9);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "lin_n =", "n_instances");
+}

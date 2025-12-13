@@ -14,13 +14,13 @@ mod infer;
 mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_index,
-    infer_matmul_shapes, infer_noop, infer_permute, infer_squeeze, infer_to, infer_unsqueeze,
-    infer_view_like, shape_dims_equal,
+    infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_squeeze, infer_to,
+    infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
-    CREATION_INT_ALIASES, CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TO_NOARG_ALIASES,
-    TORCH_DTYPES,
+    CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps,
+    TO_NOARG_ALIASES, TORCH_DTYPES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,9 +1011,7 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if is_alias_of("Tensor", &func_name.id, imports)
-                    || is_alias_of("randperm", &func_name.id, imports)
-                {
+                } else if is_alias_of("Tensor", &func_name.id, imports) {
                     // a torch.Tensor.shape might be the first argument
                     let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
                         infer_expr_shape(
@@ -1060,6 +1058,26 @@ fn infer_expr_shape(
                         shape_assign,
                         dtype,
                         is_alias_of("Tensor", &func_name.id, imports),
+                    );
+                } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
+                    .iter()
+                    .filter(|x| is_alias_of(x, &func_name.id, imports))
+                    .map(|&x| RangeOps::try_from(x))
+                    .next()
+                {
+                    return infer_range_size(
+                        call,
+                        range_op,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 }
                 if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
@@ -1443,10 +1461,7 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if (CREATION_SIZE_ALIASES.contains(attr_name)
-                    || CREATION_INT_ALIASES.contains(attr_name))
-                    & in_torch
-                {
+                } else if CREATION_SIZE_ALIASES.contains(attr_name) & in_torch {
                     // a torch.Tensor.shape might be the first argument
                     let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
                         infer_expr_shape(
@@ -1494,6 +1509,21 @@ fn infer_expr_shape(
                         shape_assign,
                         dtype,
                         CREATION_SIZE_ALIASES.contains(attr_name),
+                    );
+                } else if CREATION_RANGE_ALIASES.contains(attr_name) & in_torch {
+                    return infer_range_size(
+                        call,
+                        RangeOps::try_from(attr_name).unwrap(),
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
                     );
                 } else if (attr_name == "to" || TO_NOARG_ALIASES.contains(attr_name)) && !in_torch {
                     let base_expr = infer_expr_shape(
@@ -1677,6 +1707,10 @@ fn collect_imports(
         "noop",
         "Tensor",
         "randperm",
+        "linspace",
+        "logspace",
+        "arange",
+        "range",
     ] {
         imports
             .func_aliases
@@ -1750,16 +1784,6 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("Tensor").or_default().insert(id);
-                        } else if CREATION_INT_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports
-                                .func_aliases
-                                .entry("randperm")
-                                .or_default()
-                                .insert(id);
                         }
                     }
                 } else if let Some(module) = &resolved_module {

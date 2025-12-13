@@ -51,8 +51,47 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
 pub static CREATION_SIZE_ALIASES: Set<&'static str> =
     phf_set!["Tensor", "zeros", "ones", "empty", "full", "rand", "randn"];
 
-/// Creation ops that only accept an int
-pub static CREATION_INT_ALIASES: Set<&'static str> = phf_set!["randperm"];
+pub static CREATION_RANGE_ALIASES: Set<&'static str> =
+    phf_set!["randperm", "linspace", "logspace", "arange", "range"];
+
+#[derive(PartialEq)]
+pub enum RangeOps {
+    /// Single position argument is the shape.
+    Randperm,
+    /// Steps is the shape
+    Linspace,
+    /// Steps is the shape
+    Logspace,
+    /// (end - start) / steps is the shape
+    Range,
+    /// (end - start) / steps - 1 is the shape
+    Arange,
+}
+
+impl TryFrom<&'_ str> for RangeOps {
+    type Error = ();
+
+    fn try_from(value: &'_ str) -> Result<Self, Self::Error> {
+        match value {
+            "randperm" => Ok(Self::Randperm),
+            "linspace" => Ok(Self::Linspace),
+            "logspace" => Ok(Self::Logspace),
+            "arange" => Ok(Self::Arange),
+            "range" => Ok(Self::Range),
+            _ => Err(()),
+        }
+    }
+}
+
+impl RangeOps {
+    pub fn dtype_arg_pos(&self) -> usize {
+        match self {
+            RangeOps::Randperm => 3,
+            RangeOps::Range | RangeOps::Arange | RangeOps::Linspace => 4,
+            RangeOps::Logspace => 5,
+        }
+    }
+}
 
 // TODO(carrascomj): separate this into torch.ATTR_NAME only functions
 // e.g., relu is both a tensor and and a top-level function but contiguous is not

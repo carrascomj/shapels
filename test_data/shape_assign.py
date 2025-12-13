@@ -72,3 +72,18 @@ def randperm_from_namevar():
     # [n_instances, Features]: Float
     out = x[idx] 
 
+
+# test 9
+from jaxtyping import Float
+import torch
+
+def randperm_from_namevar():
+    x: Float[torch.Tensor, "B Features"]
+    n_instances = int(x.shape[0] * 0.5)
+    # [n_instances]: Long
+    some_range = torch.range(0, 10, 0.1)
+    some_arange = torch.arange(0, 10, 0.1)
+    some_range_n = torch.range(0, 10, n_instances)
+    some_arange_n = torch.arange(0, 10, n_instances)
+    lin_n = torch.linspace(steps=n_instances)
+

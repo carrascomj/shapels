@@ -7,7 +7,10 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
-use crate::{HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_dtype};
+use crate::op_groups::RangeOps;
+use crate::{
+    HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, get_dtype,
+};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{
     self, Arguments, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt,
@@ -331,19 +334,19 @@ pub fn infer_matmul_shapes(
     module_path: Option<&Path>,
 ) -> Option<Shape> {
     let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
-            infer_expr_shape(
-                left,
-                vars,
-                func_map,
-                imports,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
+        infer_expr_shape(
+            left,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            false,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        )
     });
     let right_shape =
         lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
@@ -576,6 +579,7 @@ fn expr_to_dim_token(expr: &Expr) -> Option<String> {
     match expr {
         Expr::Constant(c) => match &c.value {
             ast::Constant::Int(i) => Some(i.to_string()),
+            ast::Constant::Float(i) => Some(i.to_string()),
             _ => None,
         },
         Expr::Name(n) => Some(n.id.to_string()),
@@ -1195,6 +1199,7 @@ pub fn infer_creation_size(
         [Expr::Tuple(seq)] if not_tensor => seq.elts.as_slice(),
         rest => rest,
     };
+    let mut diag_already = false;
 
     let vec_dims: Vec<Option<Cow<_>>> = list
         .iter()
@@ -1204,32 +1209,38 @@ pub fn infer_creation_size(
                 Constant::Str(s) => Some(Cow::Borrowed(s.as_str())),
                 Constant::Int(int) => Some(Cow::Owned(int.to_string())),
                 _ => {
-                    diagnostics.push(Diagnostic {
-                        range: text_range_to_lsp(constant.range, source),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        code: None,
-                        code_description: None,
-                        source: Some("shapels".into()),
-                        message: "Shape could not be initialized from this dim".into(),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    });
+                    if !diag_already {
+                        diagnostics.push(Diagnostic {
+                            range: text_range_to_lsp(constant.range, source),
+                            severity: Some(DiagnosticSeverity::INFORMATION),
+                            code: None,
+                            code_description: None,
+                            source: Some("shapels".into()),
+                            message: "Shape could not be initialized from this dim".into(),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        });
+                        diag_already = true;
+                    }
                     None
                 }
             },
             expr => {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(expr_text_range(expr), source),
-                    severity: Some(DiagnosticSeverity::INFORMATION),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "Shape could not be initialized from this expression".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                if !diag_already {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(expr_text_range(expr), source),
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: "Shape could not be initialized from this expression".into(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    diag_already = true;
+                }
                 None
             }
         })
@@ -1241,17 +1252,19 @@ pub fn infer_creation_size(
         .collect();
     maybe_dims.map_or_else(
         || {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(call.range, source),
-                severity: Some(DiagnosticSeverity::INFORMATION),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: "Shape could not be initialized from expression".to_string(),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
+            if !diag_already {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(call.range, source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Shape could not be initialized from expression".to_string(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
             None
         },
         |dims| {
@@ -1301,5 +1314,122 @@ pub fn infer_to(
     } else {
         // no dtype arg provided, return base_expr as is
         base_expr
+    }
+}
+
+pub fn infer_range_size(
+    call: &ExprCall<TextRange>,
+    range_op: RangeOps,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    // helper function
+    let push_diag = |diag: &mut Vec<_>, range, msg: &str| {
+        diag.push(Diagnostic {
+            range: text_range_to_lsp(range, source),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: msg.into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        })
+    };
+
+    if let Some(dim) = match range_op {
+        RangeOps::Randperm => get_arg(call, "n", 0).map(Cow::Borrowed).or_else(|| {
+            push_diag(diagnostics, call.range, "Failed shape init: `n` arg");
+            None
+        }),
+        RangeOps::Linspace | RangeOps::Logspace => {
+            get_arg(call, "steps", 2).map(Cow::Borrowed).or_else(|| {
+                push_diag(diagnostics, call.range, "Failed shape init: `steps`");
+                None
+            })
+        }
+        RangeOps::Range | RangeOps::Arange => {
+            let names = ["start", "end", "step"];
+            let defaults: [Option<String>; 3] = [Some("0".into()), None, Some("1".into())];
+
+            let arg_tuple: [Option<String>; 3] = std::array::from_fn(|i| {
+                get_arg(call, names[i], i)
+                    .and_then(expr_to_dim_token)
+                    .or_else(|| defaults[i].clone())
+            });
+            if let [Some(start), Some(end), Some(step)] = arg_tuple {
+                let plus_one = if range_op == RangeOps::Arange {
+                    1.0
+                } else {
+                    0.0
+                };
+                let ident = match (
+                    start.parse::<f32>(),
+                    end.parse::<f32>(),
+                    step.parse::<f32>(),
+                ) {
+                    (Ok(s), Ok(e), Ok(ste)) => ((e - s) / ste + plus_one).to_string(),
+                    (Ok(s), Ok(e), Err(_)) => {
+                        (e - s).to_string() + format!("/{step}+{plus_one}").as_str()
+                    }
+                    _ => format!("{end}-{start}/{step}+{plus_one}"),
+                };
+                Some(Cow::Owned(Expr::Name(ast::ExprName {
+                    range: call.range,
+                    id: ast::Identifier::new(ident),
+                    ctx: ast::ExprContext::Store,
+                })))
+            } else {
+                None
+            }
+        }
+    }
+    .as_deref()
+    .and_then(expr_to_dim_token)
+    .or_else(|| {
+        push_diag(
+            diagnostics,
+            call.range,
+            "Argument was not understood as shape",
+        );
+        None
+    }) {
+        let dtype = get_arg(call, "dtype", range_op.dtype_arg_pos()).and_then(|expr| {
+            // dtype as torch.Tensor.dtype
+            let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
+                infer_expr_shape(
+                    expr,
+                    vars,
+                    func_map,
+                    imports,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                )
+                .and_then(|shape| shape.dtype)
+            } else {
+                None
+            };
+            attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
+        });
+        Some(Shape {
+            dtype,
+            dims: vec![dim],
+        })
+    } else {
+        None
     }
 }
