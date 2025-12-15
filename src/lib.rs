@@ -1775,7 +1775,6 @@ fn collect_imports(
         "transpose",
         "t",
         "softmax",
-        "noop",
         "Tensor",
         "randperm",
         "linspace",
@@ -1827,64 +1826,24 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             val.insert(id);
-                        } else if AGGR_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports.func_aliases.entry("sum").or_default().insert(id);
-                        } else if NOOP_DIM_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports
-                                .func_aliases
-                                .entry("softmax")
-                                .or_default()
-                                .insert(id);
-                        } else if NOOP_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports.func_aliases.entry("noop").or_default().insert(id);
-                        } else if CREATION_SIZE_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports.func_aliases.entry("Tensor").or_default().insert(id);
-                        } else if BROADCASTABLE_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports
-                                .func_aliases
-                                .entry("broadcast")
-                                .or_default()
-                                .insert(id);
-                        } else if BITWISE_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports
-                                .func_aliases
-                                .entry("bitwise")
-                                .or_default()
-                                .insert(id);
-                        } else if EQ_BROADCAST_ALIASES.contains(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            imports
-                                .func_aliases
-                                .entry("broadcast_eq")
-                                .or_default()
-                                .insert(id);
+                        } else {
+                            for (container, key) in [
+                                (&AGGR_ALIASES, "sum"),
+                                (&NOOP_DIM_ALIASES, "softmax"),
+                                (&NOOP_ALIASES, "noop"),
+                                (&CREATION_SIZE_ALIASES, "Tensor"),
+                                (&BROADCASTABLE_ALIASES, "broadcast"),
+                                (&BITWISE_ALIASES, "bitwise"),
+                                (&EQ_BROADCAST_ALIASES, "broadcast_eq"),
+                            ] {
+                                if container.contains(name) {
+                                    let id = alias
+                                        .asname
+                                        .clone()
+                                        .unwrap_or_else(|| Identifier::from(name));
+                                    imports.func_aliases.entry(key).or_default().insert(id);
+                                }
+                            }
                         }
                     }
                 } else if let Some(module) = &resolved_module {
