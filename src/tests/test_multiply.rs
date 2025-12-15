@@ -212,12 +212,46 @@ fn test_op_bitwise_broadcasts() {
 
 #[test]
 fn test_op_bitwise_wrong_dtype() {
-    // this is the example from the torch docs but with * instead of +
+    // this is the example from the torch docs but with & instead of +
     let mult_source = extract_test_case(PY_DATA, 15);
     for symbol in ["&", ">>", "<<", "|"] {
-        let src = mult_source.replace("mul", symbol);
+        let src = mult_source.replace("&", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 1);
         assert_hover_expected(&src, &analysis, "good =", "A B C 1");
+    }
+}
+
+#[test]
+fn equality_operators_always_return_bool() {
+    // this is the example from the torch docs but with torch.ge/* instead of +
+    let mult_source = extract_test_case(PY_DATA, 16);
+    for symbol in ["ge", "lt", "gt", "eq"] {
+        let src = mult_source.replace("ge", symbol);
+        let analysis = analyze_source(&src);
+        assert!(analysis.diagnostics.is_empty());
+        let pattern = "good =";
+        let expected = "A B C 1";
+        let mut line_idx = 0;
+        let mut col_idx = 0;
+        for (idx, line) in src.lines().enumerate() {
+            if let Some(pos) = line.find(pattern) {
+                line_idx = idx as u32;
+                col_idx = pos as u32;
+                break;
+            }
+        }
+        let hover = analysis
+            .hover(Position {
+                line: line_idx,
+                character: col_idx,
+            })
+            .expect(
+                format!("Hover info failed for pat {pattern} with expected shape {expected}")
+                    .as_str(),
+            );
+        let shape = hover.shape.as_ref().unwrap();
+        assert_eq!(shape.dim_string(), "A B C 1");
+        assert_eq!(shape.dtype.as_ref().map(|x| x.as_str()), Some("bool"));
     }
 }

@@ -242,3 +242,17 @@ def wrong_dtype_raises_diagnostics_for_bitwise():
     good = x & y # good: broadcastable shapes, bitwise with bool
     z = torch.empty(B, 1, 1, dtype=torch.float)
     bad = x & z  # diagnostic, bitwise with float
+
+
+# test 16
+from torch import Tensor
+
+
+def equality_operators_return_bool():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    A, B, C = 5, 3, 4
+    # same shapes are always broadcastable (i.e. the above rules always hold)
+    x = torch.ones(A, B, C, 1, dtype=torch.float16)
+    y = torch.ones(B, 1, 1, dtype=torch.float16)
+    good = x.ge(y) # good: broadcastable shapes, bitwise with bool
+    return good

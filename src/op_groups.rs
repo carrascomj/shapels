@@ -1,5 +1,8 @@
 use phf::Set;
 use phf_macros::phf_set;
+use rustpython_parser::ast::Identifier;
+
+use crate::{Imports, is_alias_of};
 
 /// Operations that accept an argument dim (integer or sequence),
 /// return a single tensor and the provided dims have been reduced
@@ -37,6 +40,7 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
     // dim is optional
     "argsort",
     "bitwise_not",
+    "logical_not",
 ];
 
 // TODO: Tensor should be separated from the rest
@@ -194,7 +198,7 @@ pub static TORCH_DTYPES: Set<&'static str> = phf_set![
     "bool",
 ];
 
-// functional equivalent to broadcastable operators (+, *, -, etc.).
+/// Functional equivalent to broadcastable operators (+, *, -, etc.).
 pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
     "add",
     "sub",
@@ -209,7 +213,7 @@ pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
     "positive",
 ];
 
-// functional equivalent to broadcastable operators (+, *, -, etc.).
+/// Functional equivalent to bitwise broadcastable operators (&, >>, etc.).
 pub static BITWISE_ALIASES: Set<&'static str> = phf_set![
     "bitwise_and",
     "bitwise_or",
@@ -217,3 +221,52 @@ pub static BITWISE_ALIASES: Set<&'static str> = phf_set![
     "bitwise_left_shift",
     "bitwise_right_shift",
 ];
+
+/// Functional equivalent to bitwise broadcastable operators (&, >>, etc.).
+pub static EQ_BROADCAST_ALIASES: Set<&'static str> = phf_set![
+    "eq",
+    "ne",
+    "lt",
+    "le",
+    "gt",
+    "ge",
+    "logical_or",
+    "logical_and",
+    "logical_xor",
+];
+
+/// Broadcastable operations.
+pub enum BroadcastOp {
+    /// +, -, /, etc.
+    Arithmetic,
+    /// &, >>, etc.: constrained to input of dtype bool/int
+    Bitwise,
+    /// ==, !=, etc.: returns a bool dtype
+    Eq,
+}
+
+impl BroadcastOp {
+    pub(crate) fn try_from_alias(func_name_id: &Identifier, imports: &Imports) -> Option<Self> {
+        if is_alias_of("broadcast", func_name_id, imports) {
+            Some(Self::Arithmetic)
+        } else if is_alias_of("bitwise", func_name_id, imports) {
+            Some(Self::Bitwise)
+        } else if is_alias_of("broadcast_eq", func_name_id, imports) {
+            Some(Self::Eq)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn try_from_attr(attr_name: &str) -> Option<Self> {
+        if BROADCASTABLE_ALIASES.contains(attr_name) {
+            Some(Self::Arithmetic)
+        } else if BITWISE_ALIASES.contains(attr_name) {
+            Some(Self::Bitwise)
+        } else if EQ_BROADCAST_ALIASES.contains(attr_name) {
+            Some(Self::Eq)
+        } else {
+            None
+        }
+    }
+}

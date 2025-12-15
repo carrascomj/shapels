@@ -19,8 +19,9 @@ use crate::infer::{
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
-    BITWISE_ALIASES, BROADCASTABLE_ALIASES, CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES,
-    NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps, TO_NOARG_ALIASES, TORCH_DTYPES,
+    BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_RANGE_ALIASES,
+    CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps,
+    TO_NOARG_ALIASES, TORCH_DTYPES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,27 +681,29 @@ fn infer_expr_shape(
                     *expr_range,
                     module_cache.as_deref_mut(),
                     module_path,
-                    false,
+                    BroadcastOp::Arithmetic,
                 )
             }
-            Operator::BitAnd | Operator::BitXor | Operator::LShift | Operator::RShift => {
-                infer_broadcastable_poswise(
-                    &ShapeOrExpr::Expr(left),
-                    right,
-                    vars,
-                    func_map,
-                    imports,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    *expr_range,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                    true,
-                )
-            }
+            Operator::BitAnd
+            | Operator::BitXor
+            | Operator::BitOr
+            | Operator::LShift
+            | Operator::RShift => infer_broadcastable_poswise(
+                &ShapeOrExpr::Expr(left),
+                right,
+                vars,
+                func_map,
+                imports,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                *expr_range,
+                module_cache.as_deref_mut(),
+                module_path,
+                BroadcastOp::Bitwise,
+            ),
             Operator::MatMult => infer_matmul_shapes(
                 left,
                 right,
@@ -742,7 +745,7 @@ fn infer_expr_shape(
                 *expr_range,
                 module_cache.as_deref_mut(),
                 module_path,
-                false,
+                BroadcastOp::Eq,
             );
 
             // second, fold with Shape and Expr
@@ -761,7 +764,7 @@ fn infer_expr_shape(
                     *expr_range,
                     module_cache.as_deref_mut(),
                     module_path,
-                    false,
+                    BroadcastOp::Eq,
                 )
             })
         }
@@ -786,10 +789,11 @@ fn infer_expr_shape(
                         module_path,
                     );
                 }
-                if (is_alias_of("broadcast", &func_name.id, imports)
-                    || is_alias_of("bitwise", &func_name.id, imports))
-                    && let (Some(left), Some(right)) = (call.args.first(), call.args.get(1))
-                {
+                if let (Some(left), Some(right), Some(broadcast_op)) = (
+                    call.args.first(),
+                    call.args.get(1),
+                    BroadcastOp::try_from_alias(&func_name.id, imports),
+                ) {
                     return infer_broadcastable_poswise(
                         &ShapeOrExpr::Expr(left),
                         right,
@@ -804,7 +808,7 @@ fn infer_expr_shape(
                         call.range,
                         module_cache.as_deref_mut(),
                         module_path,
-                        is_alias_of("bitwise", &func_name.id, imports),
+                        broadcast_op,
                     );
                 }
                 if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
@@ -1262,8 +1266,7 @@ fn infer_expr_shape(
                         );
                     }
                 }
-                if BROADCASTABLE_ALIASES.contains(attr_name) || BITWISE_ALIASES.contains(attr_name)
-                {
+                if let Some(broadcast_op) = BroadcastOp::try_from_attr(attr_name) {
                     let args = match (in_torch, call.args.first(), call.args.get(1)) {
                         (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
                         (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
@@ -1284,8 +1287,7 @@ fn infer_expr_shape(
                             call.range,
                             module_cache.as_deref_mut(),
                             module_path,
-                            // FIXME: should be true for bitwise
-                            BITWISE_ALIASES.contains(attr_name),
+                            broadcast_op,
                         );
                     }
                 }
@@ -1871,6 +1873,16 @@ fn collect_imports(
                             imports
                                 .func_aliases
                                 .entry("bitwise")
+                                .or_default()
+                                .insert(id);
+                        } else if EQ_BROADCAST_ALIASES.contains(name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports
+                                .func_aliases
+                                .entry("broadcast_eq")
                                 .or_default()
                                 .insert(id);
                         }

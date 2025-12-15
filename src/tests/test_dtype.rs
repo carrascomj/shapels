@@ -32,7 +32,7 @@ fn assert_hover_dtype(src: &str, analysis: &Analysis, pat: &str, expected_dtype:
         .unwrap()
         .dtype
         .as_ref()
-        .expect("Hover on {pat} does not contain a dtype.");
+        .expect("Hover does not contain a dtype.");
     assert_eq!(dtype, expected_dtype);
 }
 

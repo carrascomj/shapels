@@ -7,7 +7,7 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
-use crate::op_groups::RangeOps;
+use crate::op_groups::{BroadcastOp, RangeOps};
 use crate::{
     HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, get_dtype,
 };
@@ -854,7 +854,7 @@ pub fn infer_broadcastable_poswise(
     whole_range: TextRange,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-    is_bitwise: bool,
+    broadcast_op: BroadcastOp,
 ) -> Option<Shape> {
     let inferred_left: Option<Shape>;
     let mut left_range = whole_range;
@@ -899,7 +899,8 @@ pub fn infer_broadcastable_poswise(
             )
         });
 
-    if is_bitwise {
+    // check bitwise operator is applied int/bool, emit diagnostic otherwise
+    if matches!(broadcast_op, BroadcastOp::Bitwise) {
         for (text_range, shape) in [
             (left_range, &left_shape),
             (expr_text_range(right), &right_shape.as_ref()),
@@ -930,7 +931,13 @@ pub fn infer_broadcastable_poswise(
     }
 
     match broadcastable_poswise(left_shape, right_shape) {
-        Ok(shape_opt) => shape_opt,
+        Ok(mut shape_opt) => {
+            if let (Some(Shape { dtype, .. }), BroadcastOp::Eq) = (&mut shape_opt, broadcast_op) {
+                // ==, !=, torch.ge always return bool dtypes
+                *dtype = Some("bool".to_string());
+            }
+            shape_opt
+        }
         Err(msg) => {
             diagnostics.push(Diagnostic {
                 range: text_range_to_lsp(whole_range, source),
