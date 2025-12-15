@@ -1235,8 +1235,8 @@ pub fn infer_creation_size(
         });
     }
     let list = match call.args.as_slice() {
-        [Expr::List(list)] if not_tensor => list.elts.as_slice(),
-        [Expr::Tuple(seq)] if not_tensor => seq.elts.as_slice(),
+        [Expr::List(list), ..] if not_tensor => list.elts.as_slice(),
+        [Expr::Tuple(seq), ..] if not_tensor => seq.elts.as_slice(),
         rest => rest,
     };
     let mut diag_already = false;

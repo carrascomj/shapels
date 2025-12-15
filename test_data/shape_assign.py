@@ -87,3 +87,12 @@ def randperm_from_namevar():
     some_arange_n = torch.arange(0, 10, n_instances)
     lin_n = torch.linspace(steps=n_instances)
 
+
+# test 10
+import torch
+
+def full_from_tuple():
+    bag_indices = torch.Tensor([0, 1, 2, 3])
+    num_bags = int(bag_indices.max()) + 1
+    bag_max = torch.full((num_bags,), float("-inf"), device=bag_indices.device, dtype=bag_indices.dtype)
+    bag_list = torch.full([num_bags,], float("-inf"), device=bag_indices.device, dtype=bag_indices.dtype)

@@ -122,3 +122,12 @@ fn linspace_from_name_expr() {
     assert!(analysis.diagnostics.is_empty());
     assert_hover_expected(&src, &analysis, "lin_n =", "n_instances");
 }
+
+#[test]
+fn init_full_from_tuple() {
+    let src = extract_test_case(PY_DATA, 10);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert_hover_expected(&src, &analysis, "bag_max =", "num_bags");
+    assert_hover_expected(&src, &analysis, "bag_list =", "num_bags");
+}
