@@ -207,11 +207,13 @@ pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
     "pow",
     "neg",
     "positive",
-    // TODO(carrascomj): these have dtype constraints that should be checked
+];
+
+// functional equivalent to broadcastable operators (+, *, -, etc.).
+pub static BITWISE_ALIASES: Set<&'static str> = phf_set![
     "bitwise_and",
     "bitwise_or",
     "bitwise_xor",
-    "bitwise_not",
     "bitwise_left_shift",
     "bitwise_right_shift",
 ];

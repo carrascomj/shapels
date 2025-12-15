@@ -854,11 +854,14 @@ pub fn infer_broadcastable_poswise(
     whole_range: TextRange,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
+    is_bitwise: bool,
 ) -> Option<Shape> {
     let inferred_left: Option<Shape>;
+    let mut left_range = whole_range;
     let left_shape = match left {
         ShapeOrExpr::Shape(left_shape) => *left_shape,
         ShapeOrExpr::Expr(left_expr) => {
+            left_range = expr_text_range(left_expr);
             inferred_left = lookup_shape(left_expr, vars, hover_entries, record_hovers, source)
                 .or_else(|| {
                     infer_expr_shape(
@@ -895,6 +898,36 @@ pub fn infer_broadcastable_poswise(
                 module_path,
             )
         });
+
+    if is_bitwise {
+        for (text_range, shape) in [
+            (left_range, &left_shape),
+            (expr_text_range(right), &right_shape.as_ref()),
+        ] {
+            if let Some(Shape {
+                dtype: Some(dtype), ..
+            }) = shape
+            {
+                // TODO(carrascomj): a bit hacky, should be more systematic like get_dtype
+                let dlower = dtype.to_lowercase();
+                if !(dlower.contains("int") || dlower.contains("bool")) {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(text_range, source),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: format!(
+                            "Bitwise operations only support integer or bool dtypes, found {dtype}"
+                        ),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
 
     match broadcastable_poswise(left_shape, right_shape) {
         Ok(shape_opt) => shape_opt,

@@ -197,3 +197,27 @@ fn test_functional_broadcasts() {
         assert_hover_expected(&src, &analysis, "z =", "A B C 1");
     }
 }
+
+#[test]
+fn test_op_bitwise_broadcasts() {
+    // this is the example from the torch docs but with * instead of +
+    let mult_source = extract_test_case(PY_DATA, 14);
+    for symbol in ["&", ">>", "<<", "|"] {
+        let src = mult_source.replace("mul", symbol);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 6);
+        assert_hover_expected(&src, &analysis, "z =", "A B C 1");
+    }
+}
+
+#[test]
+fn test_op_bitwise_wrong_dtype() {
+    // this is the example from the torch docs but with * instead of +
+    let mult_source = extract_test_case(PY_DATA, 15);
+    for symbol in ["&", ">>", "<<", "|"] {
+        let src = mult_source.replace("mul", symbol);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 1);
+        assert_hover_expected(&src, &analysis, "good =", "A B C 1");
+    }
+}

@@ -19,8 +19,8 @@ use crate::infer::{
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
-    BROADCASTABLE_ALIASES, CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES, NOOP_ALIASES,
-    NOOP_DIM_ALIASES, RangeOps, TO_NOARG_ALIASES, TORCH_DTYPES,
+    BITWISE_ALIASES, BROADCASTABLE_ALIASES, CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES,
+    NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps, TO_NOARG_ALIASES, TORCH_DTYPES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,6 +680,25 @@ fn infer_expr_shape(
                     *expr_range,
                     module_cache.as_deref_mut(),
                     module_path,
+                    false,
+                )
+            }
+            Operator::BitAnd | Operator::BitXor | Operator::LShift | Operator::RShift => {
+                infer_broadcastable_poswise(
+                    &ShapeOrExpr::Expr(left),
+                    right,
+                    vars,
+                    func_map,
+                    imports,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    *expr_range,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                    true,
                 )
             }
             Operator::MatMult => infer_matmul_shapes(
@@ -723,6 +742,7 @@ fn infer_expr_shape(
                 *expr_range,
                 module_cache.as_deref_mut(),
                 module_path,
+                false,
             );
 
             // second, fold with Shape and Expr
@@ -741,6 +761,7 @@ fn infer_expr_shape(
                     *expr_range,
                     module_cache.as_deref_mut(),
                     module_path,
+                    false,
                 )
             })
         }
@@ -765,7 +786,8 @@ fn infer_expr_shape(
                         module_path,
                     );
                 }
-                if is_alias_of("broadcast", &func_name.id, imports)
+                if (is_alias_of("broadcast", &func_name.id, imports)
+                    || is_alias_of("bitwise", &func_name.id, imports))
                     && let (Some(left), Some(right)) = (call.args.first(), call.args.get(1))
                 {
                     return infer_broadcastable_poswise(
@@ -782,6 +804,7 @@ fn infer_expr_shape(
                         call.range,
                         module_cache.as_deref_mut(),
                         module_path,
+                        is_alias_of("bitwise", &func_name.id, imports),
                     );
                 }
                 if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
@@ -1049,7 +1072,7 @@ fn infer_expr_shape(
                     } else {
                         None
                     };
-                    let dtype = get_arg(call, "dtype", 3).and_then(|expr| {
+                    let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
                         let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
                             infer_expr_shape(
                                 expr,
@@ -1239,7 +1262,8 @@ fn infer_expr_shape(
                         );
                     }
                 }
-                if BROADCASTABLE_ALIASES.contains(attr_name) {
+                if BROADCASTABLE_ALIASES.contains(attr_name) || BITWISE_ALIASES.contains(attr_name)
+                {
                     let args = match (in_torch, call.args.first(), call.args.get(1)) {
                         (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
                         (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
@@ -1260,6 +1284,8 @@ fn infer_expr_shape(
                             call.range,
                             module_cache.as_deref_mut(),
                             module_path,
+                            // FIXME: should be true for bitwise
+                            BITWISE_ALIASES.contains(attr_name),
                         );
                     }
                 }
@@ -1523,7 +1549,7 @@ fn infer_expr_shape(
                     } else {
                         None
                     };
-                    let dtype = get_arg(call, "dtype", 3).and_then(|expr| {
+                    let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
                         let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
                             infer_expr_shape(
                                 expr,
@@ -1835,6 +1861,16 @@ fn collect_imports(
                             imports
                                 .func_aliases
                                 .entry("broadcast")
+                                .or_default()
+                                .insert(id);
+                        } else if BITWISE_ALIASES.contains(name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports
+                                .func_aliases
+                                .entry("bitwise")
                                 .or_default()
                                 .insert(id);
                         }

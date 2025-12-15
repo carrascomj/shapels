@@ -198,3 +198,47 @@ def not_broadcastable_func_tensors_should_produce_diagnostics():
     # since 2 is not 3
     bad2 = x.mul(y)  # diagnostic
 
+
+# test 14
+from jaxtyping import Bool, Int, Float as F
+from torch import Tensor as T
+
+def not_broadcastable_bitwise_should_produce_diagnostics():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    # same shapes are always broadcastable (i.e. the above rules always hold)
+    x: F[T, "0"]=torch.empty((0,))
+    y: F[T, "A A"]=torch.empty(2,2)
+    # x and y are not broadcastable, because x does not have at least 1 dimension
+    bad = x & y.relu()  # diagnostic
+    # can line up trailing dimensions
+    x: Bool[T, "A B C 1"]=torch.empty(5,3,4,1)
+    y: Bool[T, "B 1 1"]=torch.empty(  3,1,1)
+    # x and y are broadcastable.
+    # 1st trailing dimension: both have size 1
+    # 2nd trailing dimension: y has size 1
+    # 3rd trailing dimension: x size == y size
+    # 4th trailing dimension: y dimension doesn't exist
+    z = x & y # good
+
+    # but this does not work
+    x: F[Int, "A B C 1"]=torch.empty(5,2,4,1)
+    y: F[Int, "Y 1 1"]=torch.empty(  3,1,1)
+    # since 2 is not 3
+    bad2 = x & y  # diagnostic
+
+ 
+# test 15
+import torch
+from jaxtyping import Float as F
+from jaxtyping import Bool
+from torch import Tensor as T
+
+def wrong_dtype_raises_diagnostics_for_bitwise():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    A, B, C = 5, 3, 4
+    # same shapes are always broadcastable (i.e. the above rules always hold)
+    x = torch.ones(A, B, C, 1, dtype=torch.int32)
+    y = torch.ones(B, 1, 1, dtype=torch.int32)
+    good = x & y # good: broadcastable shapes, bitwise with bool
+    z = torch.empty(B, 1, 1, dtype=torch.float)
+    bad = x & z  # diagnostic, bitwise with float
