@@ -56,6 +56,19 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
 pub static CREATION_SIZE_ALIASES: Set<&'static str> =
     phf_set!["Tensor", "zeros", "ones", "empty", "full", "rand", "randn"];
 
+/// `*_like`, accepting a tensor as input.
+pub static CREATION_LIKE_ALIASES: Set<&'static str> = phf_set![
+    "empty_like",
+    "zeros_like",
+    "ones_like",
+    "rand_like",
+    "randn_like",
+    "randint_like",
+    // full_like does require an extra arg "fill_value", but
+    // catching that is the job of a generalist LSP
+    "full_like",
+];
+
 pub static CREATION_RANGE_ALIASES: Set<&'static str> =
     phf_set!["randperm", "linspace", "logspace", "arange", "range"];
 

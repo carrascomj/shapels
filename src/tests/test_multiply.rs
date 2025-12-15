@@ -205,8 +205,8 @@ fn test_op_bitwise_broadcasts() {
     for symbol in ["&", ">>", "<<", "|"] {
         let src = mult_source.replace("mul", symbol);
         let analysis = analyze_source(&src);
-        assert_eq!(analysis.diagnostics.len(), 6);
-        assert_hover_expected(&src, &analysis, "z =", "A B C 1");
+        assert_eq!(analysis.diagnostics.len(), 5);
+        assert_hover_expected(&src, &analysis, "z =", "D B C 1");
     }
 }
 

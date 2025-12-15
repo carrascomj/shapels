@@ -19,9 +19,9 @@ use crate::infer::{
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
-    BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_RANGE_ALIASES,
-    CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps,
-    TO_NOARG_ALIASES, TORCH_DTYPES,
+    BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_LIKE_ALIASES,
+    CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES,
+    NOOP_DIM_ALIASES, RangeOps, TO_NOARG_ALIASES, TORCH_DTYPES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1057,25 +1057,24 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if is_alias_of("Tensor", &func_name.id, imports) {
+                } else if is_alias_of("Tensor", &func_name.id, imports)
+                    || is_alias_of("like", &func_name.id, imports)
+                {
                     // a torch.Tensor.shape might be the first argument
-                    let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
-                        infer_expr_shape(
-                            arg0,
-                            vars,
-                            func_map,
-                            imports,
-                            call_stack,
-                            diagnostics,
-                            hover_entries,
-                            record_hovers,
-                            source,
-                            module_cache.as_deref_mut(),
-                            module_path,
-                        )
-                    } else {
-                        None
-                    };
+                    let shape_assign = tensor_or_shape_as_arg(
+                        is_alias_of("Tensor", &func_name.id, imports),
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        &mut module_cache,
+                        module_path,
+                        call,
+                    );
                     let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
                         let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
                             infer_expr_shape(
@@ -1532,25 +1531,24 @@ fn infer_expr_shape(
                         module_cache.as_deref_mut(),
                         module_path,
                     );
-                } else if CREATION_SIZE_ALIASES.contains(attr_name) & in_torch {
-                    // a torch.Tensor.shape might be the first argument
-                    let shape_assign = if let Some(arg0 @ Expr::Attribute(_)) = call.args.first() {
-                        infer_expr_shape(
-                            arg0,
-                            vars,
-                            func_map,
-                            imports,
-                            call_stack,
-                            diagnostics,
-                            hover_entries,
-                            record_hovers,
-                            source,
-                            module_cache.as_deref_mut(),
-                            module_path,
-                        )
-                    } else {
-                        None
-                    };
+                } else if (CREATION_SIZE_ALIASES.contains(attr_name)
+                    || CREATION_LIKE_ALIASES.contains(attr_name))
+                    & in_torch
+                {
+                    let shape_assign = tensor_or_shape_as_arg(
+                        CREATION_SIZE_ALIASES.contains(attr_name),
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        &mut module_cache,
+                        module_path,
+                        call,
+                    );
                     let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
                         let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
                             infer_expr_shape(
@@ -1712,6 +1710,53 @@ fn infer_expr_shape(
     }
 }
 
+fn tensor_or_shape_as_arg(
+    is_size: bool,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    imports: &Imports,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    module_cache: &mut Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+    call: &ExprCall,
+) -> Option<Shape> {
+    match call.args.first() {
+        // a torch.Tensor.shape might be the first argument
+        Some(arg0 @ Expr::Attribute(_)) if is_size => infer_expr_shape(
+            arg0,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        ),
+        // zeros_like, ones_like etc. accept a tensor as first arg
+        Some(arg0 @ Expr::Name(_)) if !is_size => infer_expr_shape(
+            arg0,
+            vars,
+            func_map,
+            imports,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        ),
+        _ => None,
+    }
+}
+
 fn lookup_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
@@ -1835,6 +1880,7 @@ fn collect_imports(
                                 (&BROADCASTABLE_ALIASES, "broadcast"),
                                 (&BITWISE_ALIASES, "bitwise"),
                                 (&EQ_BROADCAST_ALIASES, "broadcast_eq"),
+                                (&CREATION_LIKE_ALIASES, "like"),
                             ] {
                                 if container.contains(name) {
                                     let id = alias

@@ -205,14 +205,15 @@ from torch import Tensor as T
 
 def not_broadcastable_bitwise_should_produce_diagnostics():
     """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    A, B, C, D = 2, 3, 4, 5
     # same shapes are always broadcastable (i.e. the above rules always hold)
-    x: F[T, "0"]=torch.empty((0,))
-    y: F[T, "A A"]=torch.empty(2,2)
+    x = torch.empty((0,), dtype=torch.float32)
+    y =torch.empty(A, A, dtype=torch.float32)
     # x and y are not broadcastable, because x does not have at least 1 dimension
     bad = x & y.relu()  # diagnostic
     # can line up trailing dimensions
-    x: Bool[T, "A B C 1"]=torch.empty(5,3,4,1)
-    y: Bool[T, "B 1 1"]=torch.empty(  3,1,1)
+    x=torch.empty(D,B,C,1, dtype=torch.bool)
+    y=torch.empty(  B,1,1, dtype=torch.bool)
     # x and y are broadcastable.
     # 1st trailing dimension: both have size 1
     # 2nd trailing dimension: y has size 1
@@ -221,8 +222,8 @@ def not_broadcastable_bitwise_should_produce_diagnostics():
     z = x & y # good
 
     # but this does not work
-    x: F[Int, "A B C 1"]=torch.empty(5,2,4,1)
-    y: F[Int, "Y 1 1"]=torch.empty(  3,1,1)
+    x=torch.empty(D,A,C,1, dtype=torch.float32)
+    y=torch.empty_like(y)
     # since 2 is not 3
     bad2 = x & y  # diagnostic
 
@@ -240,7 +241,7 @@ def wrong_dtype_raises_diagnostics_for_bitwise():
     x = torch.ones(A, B, C, 1, dtype=torch.int32)
     y = torch.ones(B, 1, 1, dtype=torch.int32)
     good = x & y # good: broadcastable shapes, bitwise with bool
-    z = torch.empty(B, 1, 1, dtype=torch.float)
+    z = torch.zeros_like(y, dtype=torch.float)
     bad = x & z  # diagnostic, bitwise with float
 
 
