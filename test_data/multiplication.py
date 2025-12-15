@@ -169,3 +169,32 @@ def single_line_reassignment(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B X S"]:
     x = x @ y
     z = x @ y.T
     return x
+
+
+# test 13
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def not_broadcastable_func_tensors_should_produce_diagnostics():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    # same shapes are always broadcastable (i.e. the above rules always hold)
+    x: F[T, "0"]=torch.empty((0,))
+    y: F[T, "A A"]=torch.empty(2,2)
+    # x and y are not broadcastable, because x does not have at least 1 dimension
+    bad = torch.mul(x, y.relu())  # diagnostic
+    # can line up trailing dimensions
+    x: F[T, "A B C 1"]=torch.empty(5,3,4,1)
+    y: F[T, "B 1 1"]=torch.empty(  3,1,1)
+    # x and y are broadcastable.
+    # 1st trailing dimension: both have size 1
+    # 2nd trailing dimension: y has size 1
+    # 3rd trailing dimension: x size == y size
+    # 4th trailing dimension: y dimension doesn't exist
+    z = torch.mul(x, y.abs()) # good
+
+    # but this does not work
+    x: F[T, "A B C 1"]=torch.empty(5,2,4,1)
+    y: F[T, "Y 1 1"]=torch.empty(  3,1,1)
+    # since 2 is not 3
+    bad2 = x.mul(y)  # diagnostic
+

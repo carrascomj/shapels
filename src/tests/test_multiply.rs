@@ -1,6 +1,7 @@
 use crate::analyze_source;
 use crate::tests::{assert_hover_expected, extract_test_case};
 use lsp_types::Position;
+use shapels::op_groups::BROADCASTABLE_ALIASES;
 
 const PY_DATA: &str = include_str!("../../test_data/multiplication.py");
 
@@ -183,4 +184,16 @@ fn test_reassignment_is_properly_treated() {
     let pat = "x @";
     let expected = "B X R";
     assert_hover_expected(&src, &analysis, pat, expected);
+}
+
+#[test]
+fn test_functional_broadcasts() {
+    // this is the example from the torch docs but with * instead of +
+    let mult_source = extract_test_case(PY_DATA, 13);
+    for symbol in &BROADCASTABLE_ALIASES {
+        let src = mult_source.replace("mul", symbol);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 2);
+        assert_hover_expected(&src, &analysis, "z =", "A B C 1");
+    }
 }

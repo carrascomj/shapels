@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 mod infer;
-mod op_groups;
+pub mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_index,
     infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_squeeze, infer_to,
@@ -19,8 +19,8 @@ use crate::infer::{
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
-    CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps,
-    TO_NOARG_ALIASES, TORCH_DTYPES,
+    BROADCASTABLE_ALIASES, CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES, NOOP_ALIASES,
+    NOOP_DIM_ALIASES, RangeOps, TO_NOARG_ALIASES, TORCH_DTYPES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -765,6 +765,25 @@ fn infer_expr_shape(
                         module_path,
                     );
                 }
+                if is_alias_of("broadcast", &func_name.id, imports)
+                    && let (Some(left), Some(right)) = (call.args.first(), call.args.get(1))
+                {
+                    return infer_broadcastable_poswise(
+                        &ShapeOrExpr::Expr(left),
+                        right,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    );
+                }
                 if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
                     && let (Some(cache), Some(cur_path)) =
                         (module_cache.as_deref_mut(), module_path)
@@ -1206,6 +1225,30 @@ fn infer_expr_shape(
                         return infer_matmul_shapes(
                             arg0,
                             arg1,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                    }
+                }
+                if BROADCASTABLE_ALIASES.contains(attr_name) {
+                    let args = match (in_torch, call.args.first(), call.args.get(1)) {
+                        (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
+                        (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
+                        _ => None,
+                    };
+                    if let Some((left, right)) = args {
+                        return infer_broadcastable_poswise(
+                            &ShapeOrExpr::Expr(left),
+                            right,
                             vars,
                             func_map,
                             imports,
@@ -1784,6 +1827,16 @@ fn collect_imports(
                                 .clone()
                                 .unwrap_or_else(|| Identifier::from(name));
                             imports.func_aliases.entry("Tensor").or_default().insert(id);
+                        } else if BROADCASTABLE_ALIASES.contains(name) {
+                            let id = alias
+                                .asname
+                                .clone()
+                                .unwrap_or_else(|| Identifier::from(name));
+                            imports
+                                .func_aliases
+                                .entry("broadcast")
+                                .or_default()
+                                .insert(id);
                         }
                     }
                 } else if let Some(module) = &resolved_module {

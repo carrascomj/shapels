@@ -36,6 +36,7 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
     "log_softmax",
     // dim is optional
     "argsort",
+    "bitwise_not",
 ];
 
 // TODO: Tensor should be separated from the rest
@@ -191,4 +192,26 @@ pub static TORCH_DTYPES: Set<&'static str> = phf_set![
     "uint64",
     "int64",
     "bool",
+];
+
+// functional equivalent to broadcastable operators (+, *, -, etc.).
+pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "true_divide",
+    "floor_divide",
+    "remainder",
+    "fmod",
+    "pow",
+    "neg",
+    "positive",
+    // TODO(carrascomj): these have dtype constraints that should be checked
+    "bitwise_and",
+    "bitwise_or",
+    "bitwise_xor",
+    "bitwise_not",
+    "bitwise_left_shift",
+    "bitwise_right_shift",
 ];
