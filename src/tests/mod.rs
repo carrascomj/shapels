@@ -6,6 +6,7 @@ use lsp_types::Position;
 use shapels::Analysis;
 
 mod test_aggr;
+mod test_class;
 mod test_dtype;
 mod test_index;
 mod test_multifile;
@@ -34,7 +35,7 @@ pub fn extract_test_case(py_data: &'static str, n: usize) -> String {
     buf.join("\n")
 }
 
-pub fn assert_hover_expected(src: &str, analysis: &Analysis, pat: &str, expected: &str) {
+pub fn is_hover_expected(src: &str, analysis: &Analysis, pat: &str, expected: &str) -> bool {
     let mut line_idx = 0;
     let mut col_idx = 0;
     for (idx, line) in src.lines().enumerate() {
@@ -51,5 +52,34 @@ pub fn assert_hover_expected(src: &str, analysis: &Analysis, pat: &str, expected
         })
         .expect(format!("Hover info failed for pat {pat} with expected shape {expected}").as_str());
     let shape = hover.shape.as_ref().unwrap();
-    assert_eq!(shape.dim_string(), expected);
+    shape.dim_string() == expected
+}
+
+fn is_hover_dtype(src: &str, analysis: &Analysis, pat: &str, expected_dtype: &str) -> bool {
+    let mut line_idx = 0;
+    let mut col_idx = 0;
+    for (idx, line) in src.lines().enumerate() {
+        if let Some(pos) = line.find(pat) {
+            line_idx = idx as u32;
+            col_idx = pos as u32;
+            break;
+        }
+    }
+    let hover = analysis
+        .hover(Position {
+            line: line_idx,
+            character: col_idx,
+        })
+        .expect(
+            format!("Hover info failed for pat {pat} with expected dtype {expected_dtype}")
+                .as_str(),
+        );
+    let dtype = hover
+        .shape
+        .as_ref()
+        .unwrap()
+        .dtype
+        .as_ref()
+        .expect("Hover does not contain a dtype.");
+    dtype == expected_dtype
 }

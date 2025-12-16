@@ -103,6 +103,15 @@ struct VarState {
     inferred: Option<Shape>,
 }
 
+#[derive(Clone)]
+struct FunctionInfo {
+    args: Box<Arguments>,
+    body: Vec<Stmt>,
+    returns: Option<Box<Expr>>,
+}
+
+type FuncMap = HashMap<Identifier, FunctionInfo>;
+
 #[derive(Default, Clone)]
 struct Imports {
     torch_aliases: HashSet<Identifier>,
@@ -118,7 +127,7 @@ struct Imports {
 pub(crate) struct CachedModule {
     path: PathBuf,
     source: String,
-    func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: FuncMap,
     imports: Imports,
 }
 
@@ -149,12 +158,8 @@ impl ModuleCache {
         let source = fs::read_to_string(&path).ok()?;
         let module = Suite::parse(&source, module_name).ok()?;
         let imports = collect_imports(&module, Some(&path), self.project_root());
-        let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
-        for stmt in &module {
-            if let Stmt::FunctionDef(func) = stmt {
-                func_map.insert(func.name.clone(), (func.args.clone(), func.body.clone()));
-            }
-        }
+        let mut func_map: FuncMap = HashMap::new();
+        collect_function_defs(&module, &mut func_map);
         let cached = CachedModule {
             path,
             source,
@@ -334,12 +339,8 @@ fn analyze_source_internal<'a>(
                 module_cache.as_deref().and_then(|c| c.project_root()),
             );
             // collect function definitions first
-            let mut func_map: HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)> = HashMap::new();
-            for stmt in &module {
-                if let Stmt::FunctionDef(func) = stmt {
-                    func_map.insert(func.name.clone(), (func.args.clone(), func.body.clone()));
-                }
-            }
+            let mut func_map: FuncMap = HashMap::new();
+            collect_function_defs(&module, &mut func_map);
 
             // analyze top-level statements (outside functions)
             let empty_args = Arguments {
@@ -368,24 +369,15 @@ fn analyze_source_internal<'a>(
             analysis.diagnostics.append(&mut top_diags);
             analysis.hover_entries.append(&mut top_hovers);
 
-            for stmt in &module {
-                if let Stmt::FunctionDef(func) = stmt {
-                    let mut func_analysis = analyze_function(
-                        &func.args,
-                        &func.body,
-                        source,
-                        &func_map,
-                        &imports,
-                        &mut Vec::new(),
-                        module_cache.as_deref_mut(),
-                        current_path,
-                    );
-                    analysis.diagnostics.append(&mut func_analysis.diagnostics);
-                    analysis
-                        .hover_entries
-                        .append(&mut func_analysis.hover_entries);
-                }
-            }
+            analyze_function_bodies(
+                &module,
+                source,
+                &func_map,
+                &imports,
+                &mut analysis,
+                module_cache.as_deref_mut(),
+                current_path,
+            );
         }
         Err(err) => {
             analysis.diagnostics.push(Diagnostic {
@@ -404,11 +396,67 @@ fn analyze_source_internal<'a>(
     analysis
 }
 
+fn collect_function_defs(body: &[Stmt], func_map: &mut FuncMap) {
+    for stmt in body {
+        if let Stmt::FunctionDef(func) = stmt {
+            func_map.insert(
+                func.name.clone(),
+                FunctionInfo {
+                    args: func.args.clone(),
+                    body: func.body.clone(),
+                    returns: func.returns.clone(),
+                },
+            );
+        }
+    }
+}
+
+fn analyze_function_bodies(
+    body: &[Stmt],
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    analysis: &mut Analysis,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) {
+    for stmt in body {
+        match stmt {
+            Stmt::FunctionDef(func) => {
+                let mut func_analysis = analyze_function(
+                    &func.args,
+                    &func.body,
+                    source,
+                    func_map,
+                    imports,
+                    &mut Vec::new(),
+                    module_cache.as_deref_mut(),
+                    module_path,
+                );
+                analysis.diagnostics.append(&mut func_analysis.diagnostics);
+                analysis
+                    .hover_entries
+                    .append(&mut func_analysis.hover_entries);
+            }
+            Stmt::ClassDef(class_def) => analyze_function_bodies(
+                &class_def.body,
+                source,
+                func_map,
+                imports,
+                analysis,
+                module_cache.as_deref_mut(),
+                module_path,
+            ),
+            _ => {}
+        }
+    }
+}
+
 fn analyze_function(
     args: &Arguments,
     body: &[Stmt],
     source: &str,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     module_cache: Option<&mut ModuleCache>,
@@ -438,7 +486,7 @@ fn simulate_function(
     args: &Arguments,
     body: &[Stmt],
     source: &str,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     mut initial_vars: HashMap<Identifier, VarState>,
@@ -649,7 +697,7 @@ fn simulate_function(
 fn infer_expr_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -815,14 +863,13 @@ fn infer_expr_shape(
                     && let (Some(cache), Some(cur_path)) =
                         (module_cache.as_deref_mut(), module_path)
                     && let Some(module) = cache.get_module(module_name, cur_path)
-                    && let Some((callee_args, callee_body)) = module.func_map.get(original)
+                    && let Some(callee_info) = module.func_map.get(original)
                 {
-                    // avoid infinite recursion
                     if call_stack.iter().any(|id| id == &func_name.id) {
                         return None;
                     }
                     let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                    for (idx, param) in callee_args.args.iter().enumerate() {
+                    for (idx, param) in callee_info.args.args.iter().enumerate() {
                         if let Some(arg_expr) = call.args.get(idx)
                             && let Some(shape) = infer_expr_shape(
                                 arg_expr,
@@ -838,6 +885,33 @@ fn infer_expr_shape(
                                 module_path,
                             )
                         {
+                            if let Some(ann) = param
+                                .def
+                                .annotation
+                                .as_deref()
+                                .and_then(parse_shape_annotation)
+                            {
+                                let dims_match =
+                                    ann.dims.len() == shape.dims.len()
+                                        && shape_dims_equal(&ann, &shape);
+                                if !dims_match {
+                                    diagnostics.push(Diagnostic {
+                                        range: text_range_to_lsp(expr_text_range(arg_expr), source),
+                                        severity: Some(DiagnosticSeverity::ERROR),
+                                        code: None,
+                                        code_description: None,
+                                        source: Some("shapels".into()),
+                                        message: format!(
+                                            "Shape mismatch: annotation {} vs inferred {}",
+                                            ann.render(),
+                                            shape.render()
+                                        ),
+                                        related_information: None,
+                                        tags: None,
+                                        data: None,
+                                    });
+                                }
+                            }
                             arg_shapes.insert(
                                 param.def.arg.clone(),
                                 VarState {
@@ -847,10 +921,17 @@ fn infer_expr_shape(
                             );
                         }
                     }
+                    if let Some(ret_shape) = callee_info
+                        .returns
+                        .as_deref()
+                        .and_then(parse_shape_annotation)
+                    {
+                        return Some(ret_shape);
+                    }
                     call_stack.push(func_name.id.clone());
                     let (mut diag, mut hovers, ret_shape) = simulate_function(
-                        callee_args.as_ref(),
-                        callee_body,
+                        callee_info.args.as_ref(),
+                        &callee_info.body,
                         &module.source,
                         &module.func_map,
                         &module.imports,
@@ -1125,14 +1206,14 @@ fn infer_expr_shape(
                         module_path,
                     );
                 }
-                if let Some((callee_args, callee_body)) = func_map.get(&func_name.id) {
+                if let Some(callee_info) = func_map.get(&func_name.id) {
                     // avoid infinite recursion
                     if call_stack.iter().any(|id| id == &func_name.id) {
                         return None;
                     }
                     // build argument binding map
                     let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                    for (idx, param) in callee_args.args.iter().enumerate() {
+                    for (idx, param) in callee_info.args.args.iter().enumerate() {
                         if let Some(arg_expr) = call.args.get(idx)
                             && let Some(shape) = infer_expr_shape(
                                 arg_expr,
@@ -1148,6 +1229,33 @@ fn infer_expr_shape(
                                 module_path,
                             )
                         {
+                            if let Some(ann) = param
+                                .def
+                                .annotation
+                                .as_deref()
+                                .and_then(parse_shape_annotation)
+                            {
+                                let dims_match =
+                                    ann.dims.len() == shape.dims.len()
+                                        && shape_dims_equal(&ann, &shape);
+                                if !dims_match {
+                                    diagnostics.push(Diagnostic {
+                                        range: text_range_to_lsp(expr_text_range(arg_expr), source),
+                                        severity: Some(DiagnosticSeverity::ERROR),
+                                        code: None,
+                                        code_description: None,
+                                        source: Some("shapels".into()),
+                                        message: format!(
+                                            "Shape mismatch: annotation {} vs inferred {}",
+                                            ann.render(),
+                                            shape.render()
+                                        ),
+                                        related_information: None,
+                                        tags: None,
+                                        data: None,
+                                    });
+                                }
+                            }
                             arg_shapes.insert(
                                 param.def.arg.clone(),
                                 VarState {
@@ -1157,10 +1265,17 @@ fn infer_expr_shape(
                             );
                         }
                     }
+                    if let Some(ret_shape) = callee_info
+                        .returns
+                        .as_deref()
+                        .and_then(parse_shape_annotation)
+                    {
+                        return Some(ret_shape);
+                    }
                     call_stack.push(func_name.id.clone());
                     let (mut diag, mut hovers, ret_shape) = simulate_function(
-                        callee_args.as_ref(),
-                        callee_body,
+                        callee_info.args.as_ref(),
+                        &callee_info.body,
                         source,
                         func_map,
                         imports,
@@ -1187,13 +1302,13 @@ fn infer_expr_shape(
                     && let (Some(cache), Some(cur_path)) =
                         (module_cache.as_deref_mut(), module_path)
                     && let Some(module) = cache.get_module(module_name, cur_path)
-                    && let Some((callee_args, callee_body)) = module.func_map.get(&attr.attr)
+                    && let Some(callee_info) = module.func_map.get(&attr.attr)
                 {
                     if call_stack.iter().any(|id| id == &attr.attr) {
                         return None;
                     }
                     let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                    for (idx, param) in callee_args.args.iter().enumerate() {
+                    for (idx, param) in callee_info.args.args.iter().enumerate() {
                         if let Some(arg_expr) = call.args.get(idx)
                             && let Some(shape) = infer_expr_shape(
                                 arg_expr,
@@ -1209,6 +1324,33 @@ fn infer_expr_shape(
                                 module_path,
                             )
                         {
+                            if let Some(ann) = param
+                                .def
+                                .annotation
+                                .as_deref()
+                                .and_then(parse_shape_annotation)
+                            {
+                                let dims_match =
+                                    ann.dims.len() == shape.dims.len()
+                                        && shape_dims_equal(&ann, &shape);
+                                if !dims_match {
+                                    diagnostics.push(Diagnostic {
+                                        range: text_range_to_lsp(expr_text_range(arg_expr), source),
+                                        severity: Some(DiagnosticSeverity::ERROR),
+                                        code: None,
+                                        code_description: None,
+                                        source: Some("shapels".into()),
+                                        message: format!(
+                                            "Shape mismatch: annotation {} vs inferred {}",
+                                            ann.render(),
+                                            shape.render()
+                                        ),
+                                        related_information: None,
+                                        tags: None,
+                                        data: None,
+                                    });
+                                }
+                            }
                             arg_shapes.insert(
                                 param.def.arg.clone(),
                                 VarState {
@@ -1218,10 +1360,17 @@ fn infer_expr_shape(
                             );
                         }
                     }
+                    if let Some(ret_shape) = callee_info
+                        .returns
+                        .as_deref()
+                        .and_then(parse_shape_annotation)
+                    {
+                        return Some(ret_shape);
+                    }
                     call_stack.push(attr.attr.clone());
                     let (mut diag, mut hovers, ret_shape) = simulate_function(
-                        callee_args.as_ref(),
-                        callee_body,
+                        callee_info.args.as_ref(),
+                        &callee_info.body,
                         &module.source,
                         &module.func_map,
                         &module.imports,
@@ -1713,7 +1862,7 @@ fn infer_expr_shape(
 fn tensor_or_shape_as_arg(
     is_size: bool,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2137,7 +2286,7 @@ fn seed_args_from_annotations(
     source: &str,
     vars: &mut HashMap<Identifier, VarState>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
-    diagnostics: &mut Vec<Diagnostic>,
+    _diagnostics: &mut Vec<Diagnostic>,
     provided: Option<&mut HashMap<Identifier, VarState>>,
     record_hovers: bool,
 ) {
@@ -2149,28 +2298,6 @@ fn seed_args_from_annotations(
             .and_then(|expr| parse_shape_annotation(expr.as_ref()));
         let range = text_range_to_lsp(arg.def.range, source);
         let mut provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg)).cloned();
-
-        if let (Some(ann), Some(inf_state)) = (
-            ann_shape.clone(),
-            provided_state.as_ref().and_then(|s| s.inferred.clone()),
-        ) && ann.dims != inf_state.dims
-        {
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: format!(
-                    "Shape mismatch: annotation {} vs inferred {}",
-                    ann.render(),
-                    inf_state.render()
-                ),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
-        }
 
         let state = VarState {
             annotated: ann_shape.clone(),

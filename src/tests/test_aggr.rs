@@ -5,7 +5,7 @@
 //! any supported aggregation.
 
 use crate::analyze_source;
-use crate::tests::{assert_hover_expected, extract_test_case};
+use crate::tests::{extract_test_case, is_hover_expected};
 
 use shapels::AGGR_ALIASES;
 
@@ -18,7 +18,7 @@ fn test_sum_after_unsqueeze_multiply() {
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
         let (pat, expected) = ("z =", "B 1");
-        assert_hover_expected(&src, &analysis, pat, expected);
+        assert!(is_hover_expected(&src, &analysis, pat, expected));
     }
 }
 
@@ -28,7 +28,7 @@ fn test_sum_multiple_dims() {
         let src = extract_test_case(VIEW_PY_DATA, 2).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
-        assert_hover_expected(&src, &analysis, "z =", "B");
+        assert!(is_hover_expected(&src, &analysis, "z =", "B"));
     }
 }
 
@@ -38,6 +38,6 @@ fn sum_all() {
         let src = extract_test_case(VIEW_PY_DATA, 3).replace("sum", agg_fn);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 0);
-        assert_hover_expected(&src, &analysis, "aggr =", "");
+        assert!(is_hover_expected(&src, &analysis, "aggr =", ""));
     }
 }

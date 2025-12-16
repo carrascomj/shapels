@@ -9,12 +9,10 @@
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
 use crate::op_groups::{BroadcastOp, RangeOps};
 use crate::{
-    HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, get_dtype,
+    FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, get_dtype,
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use rustpython_parser::ast::{
-    self, Arguments, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator, Stmt,
-};
+use rustpython_parser::ast::{self, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator};
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -36,7 +34,7 @@ pub fn infer_index(
     base_expr: &Expr,
     slice: &Expr,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -220,7 +218,7 @@ fn apply_slice(dim: &str, step: Option<i64>) -> String {
 fn advanced_shape<'a>(
     kind: &IndexKind<'a>,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -322,7 +320,7 @@ pub fn infer_matmul_shapes(
     left: &Expr,
     right: &Expr,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -416,7 +414,7 @@ pub fn infer_squeeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -535,7 +533,7 @@ pub fn infer_squeeze(
 fn infer_shallow_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -676,7 +674,7 @@ pub fn infer_unsqueeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -844,7 +842,7 @@ pub fn infer_broadcastable_poswise(
     left: &ShapeOrExpr,
     right: &Expr,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1361,7 +1359,7 @@ pub fn infer_range_size(
     call: &ExprCall<TextRange>,
     range_op: RangeOps,
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, (Box<Arguments>, Vec<Stmt>)>,
+    func_map: &FuncMap,
     imports: &Imports,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,

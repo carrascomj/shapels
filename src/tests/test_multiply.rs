@@ -1,5 +1,5 @@
 use crate::analyze_source;
-use crate::tests::{assert_hover_expected, extract_test_case};
+use crate::tests::{extract_test_case, is_hover_expected};
 use lsp_types::Position;
 use shapels::op_groups::BROADCASTABLE_ALIASES;
 
@@ -32,7 +32,7 @@ fn test_hover_inferred_shape() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
     let (pat, expected) = ("z =", "B X S");
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn test_hover_inferred_shape_from_caller_to_callee() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
     let (pat, expected) = ("z =", "B X O");
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_matmul_top_level_caller_to_callee() {
     // one diagnostic for x @ y
     assert_eq!(analysis.diagnostics.len(), 1);
     let (pat, expected) = ("z =", "B X O");
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn test_hover_inferred_shape_from_caller_to_callee_torchmm() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
     let (pat, expected) = ("z =", "B X O");
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -147,7 +147,12 @@ fn test_hover_hadamard() {
         let analysis = analyze_source(&src);
         // one diagnostic for non-compatible shapes `output_wrong`
         assert_eq!(analysis.diagnostics.len(), 1);
-        assert_hover_expected(&src, &analysis, "output_right =", expected);
+        assert!(is_hover_expected(
+            &src,
+            &analysis,
+            "output_right =",
+            expected
+        ));
     }
 }
 
@@ -159,7 +164,7 @@ fn test_hover_hadamard_with_broadcasting_not_broadcastable() {
         let src = mult_source.replace("*", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 2);
-        assert_hover_expected(&src, &analysis, "z =", "A B C 1");
+        assert!(is_hover_expected(&src, &analysis, "z =", "A B C 1"));
     }
 }
 
@@ -170,7 +175,7 @@ fn test_torch_mm_as_method_works() {
     assert!(analysis.diagnostics.is_empty());
     let pat = "z:";
     let expected = "B X S";
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -180,10 +185,10 @@ fn test_reassignment_is_properly_treated() {
     assert!(analysis.diagnostics.is_empty());
     let pat = "x =";
     let expected = "B X S";
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
     let pat = "x @";
     let expected = "B X R";
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -194,7 +199,7 @@ fn test_functional_broadcasts() {
         let src = mult_source.replace("mul", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 2);
-        assert_hover_expected(&src, &analysis, "z =", "A B C 1");
+        assert!(is_hover_expected(&src, &analysis, "z =", "A B C 1"));
     }
 }
 
@@ -206,7 +211,7 @@ fn test_op_bitwise_broadcasts() {
         let src = mult_source.replace("mul", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 5);
-        assert_hover_expected(&src, &analysis, "z =", "D B C 1");
+        assert!(is_hover_expected(&src, &analysis, "z =", "D B C 1"));
     }
 }
 
@@ -218,7 +223,7 @@ fn test_op_bitwise_wrong_dtype() {
         let src = mult_source.replace("&", symbol);
         let analysis = analyze_source(&src);
         assert_eq!(analysis.diagnostics.len(), 1);
-        assert_hover_expected(&src, &analysis, "good =", "A B C 1");
+        assert!(is_hover_expected(&src, &analysis, "good =", "A B C 1"));
     }
 }
 

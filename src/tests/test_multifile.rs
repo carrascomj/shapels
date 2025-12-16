@@ -3,19 +3,60 @@
 use shapels::analyze_file;
 use std::path::Path;
 
-use crate::tests::assert_hover_expected;
+use crate::analyze_source_at_path;
+use crate::tests::{extract_test_case, is_hover_dtype, is_hover_expected};
+
+const PY_MULTI_CALLER: &str = include_str!("../../test_data/multi_caller.py");
 
 #[test]
 fn multifile_hover_follows_imported_function() {
     // analyze entire caller file from disk so relative module resolution works
-    let path = Path::new("test_data/multi_caller.py");
-    let analysis = analyze_file(path);
+    let src = extract_test_case(PY_MULTI_CALLER, 1);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X O"));
+}
 
-    // find "z =" and ensure hover shows inferred shape B X O
-    let src = std::fs::read_to_string(path).expect("read caller");
-    assert_hover_expected(&src, &analysis, "z =", "B X O");
+#[test]
+fn multi_file_wrong_shape_arg_is_reported_on_caller() {
+    let src = extract_test_case(PY_MULTI_CALLER, 2);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    if let Some(diag) = analysis.diagnostics.first() {
+        // TODO: check if it is 0 or 1 indexed
+        assert!(diag.range.start.line == 6 || diag.range.start.line == 7);
+    } else {
+        panic!("Expected at least one diagnostic.")
+    }
+}
+#[test]
+fn multi_file_runs_inference_on_callee() {
+    // analyze entire caller file from disk so relative module resolution works
+    let src = extract_test_case(PY_MULTI_CALLER, 3);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    // no diagnostics expected
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B A X"));
+}
+
+#[test]
+fn multi_file_reads_callee_float_type_hint() {
+    // analyze entire caller file from disk so relative module resolution works
+    let src = extract_test_case(PY_MULTI_CALLER, 4);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    // no diagnostics expected
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_dtype(&src, &analysis, "z =", "F"));
+}
+
+#[test]
+fn multi_file_reads_callee_int_type_hint() {
+    // analyze entire caller file from disk so relative module resolution works
+    let src = extract_test_case(PY_MULTI_CALLER, 5);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    // no diagnostics expected
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_dtype(&src, &analysis, "z =", "Int"));
 }
 
 #[test]
@@ -37,5 +78,5 @@ fn venv_site_packages_module_resolves() {
     assert_eq!(analysis.diagnostics.len(), 0);
 
     let src = std::fs::read_to_string(path).expect("read caller");
-    assert_hover_expected(&src, &analysis, "z =", "B X O");
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X O"));
 }

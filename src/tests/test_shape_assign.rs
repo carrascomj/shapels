@@ -1,7 +1,7 @@
 use lsp_types::Position;
 use shapels::analyze_source;
 
-use crate::tests::{assert_hover_expected, extract_test_case};
+use crate::tests::{extract_test_case, is_hover_expected};
 
 ///! Tests for assignments of shapes by hints or special methods.
 
@@ -12,7 +12,12 @@ fn test_inferred_from_shape_unrolling() {
     let src = extract_test_case(PY_DATA, 1);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "output =", "Batch Width Height NumClasses");
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "output =",
+        "Batch Width Height NumClasses"
+    ));
 }
 
 #[test]
@@ -27,12 +32,12 @@ fn test_shape_unrolling_renames_shapes_on_samedims() {
     let src = extract_test_case(PY_DATA, 3);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(
+    assert!(is_hover_expected(
         &src,
         &analysis,
         "after_renamed",
         "Batch Channels Height Width",
-    );
+    ));
 }
 
 #[test]
@@ -40,12 +45,12 @@ fn test_ann_assign_renames_shapes_on_samedims() {
     let src = extract_test_case(PY_DATA, 4);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(
+    assert!(is_hover_expected(
         &src,
         &analysis,
         "after_renamed",
         "Batch Channels Height Width",
-    );
+    ));
 }
 
 #[test]
@@ -86,7 +91,12 @@ fn test_infer_from_shape_attr() {
     let src = extract_test_case(PY_DATA, 7);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "eps =", "Batch Features");
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "eps =",
+        "Batch Features"
+    ));
 }
 
 #[test]
@@ -94,7 +104,12 @@ fn randperm_from_namevar() {
     let src = extract_test_case(PY_DATA, 8);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "out =", "n_instances Features");
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "out =",
+        "n_instances Features"
+    ));
 }
 
 #[test]
@@ -102,8 +117,8 @@ fn range_from_all_numbers() {
     let src = extract_test_case(PY_DATA, 9);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "some_range =", "100");
-    assert_hover_expected(&src, &analysis, "some_arange =", "101");
+    assert!(is_hover_expected(&src, &analysis, "some_range =", "100"));
+    assert!(is_hover_expected(&src, &analysis, "some_arange =", "101"));
 }
 
 #[test]
@@ -111,8 +126,18 @@ fn range_from_denom_numbers() {
     let src = extract_test_case(PY_DATA, 9);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "some_range_n =", "10/n_instances+0");
-    assert_hover_expected(&src, &analysis, "some_arange_n =", "10/n_instances+1");
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "some_range_n =",
+        "10/n_instances+0"
+    ));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "some_arange_n =",
+        "10/n_instances+1"
+    ));
 }
 
 #[test]
@@ -120,7 +145,7 @@ fn linspace_from_name_expr() {
     let src = extract_test_case(PY_DATA, 9);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "lin_n =", "n_instances");
+    assert!(is_hover_expected(&src, &analysis, "lin_n =", "n_instances"));
 }
 
 #[test]
@@ -128,6 +153,6 @@ fn init_full_from_tuple() {
     let src = extract_test_case(PY_DATA, 10);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "bag_max =", "num_bags");
-    assert_hover_expected(&src, &analysis, "bag_list =", "num_bags");
+    assert!(is_hover_expected(&src, &analysis, "bag_max =", "num_bags"));
+    assert!(is_hover_expected(&src, &analysis, "bag_list =", "num_bags"));
 }

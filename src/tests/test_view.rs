@@ -1,5 +1,5 @@
 use crate::tests::extract_test_case;
-use crate::{analyze_source, tests::assert_hover_expected};
+use crate::{analyze_source, tests::is_hover_expected};
 use lsp_types::{Position, Range};
 
 const VIEW_PY_DATA: &str = include_str!("../../test_data/view.py");
@@ -9,7 +9,7 @@ fn test_proper_view_on_same_variable() {
     let src = extract_test_case(VIEW_PY_DATA, 1);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    assert_hover_expected(&src, &analysis, "x =", "B*X R O");
+    assert!(is_hover_expected(&src, &analysis, "x =", "B*X R O"));
 }
 
 #[test]
@@ -17,7 +17,7 @@ fn test_proper_view_on_different_variable() {
     let src = extract_test_case(VIEW_PY_DATA, 1);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    assert_hover_expected(&src, &analysis, "y =", "B*X R*O");
+    assert!(is_hover_expected(&src, &analysis, "y =", "B*X R*O"));
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn test_proper_reshape_on_different_variable() {
     let src = extract_test_case(VIEW_PY_DATA, 2);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    assert_hover_expected(&src, &analysis, "z =", "B X*Watch");
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X*Watch"));
 }
 
 #[test]
@@ -33,7 +33,12 @@ fn test_exp_then_proper_reshape() {
     let src = extract_test_case(VIEW_PY_DATA, 2);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "exp_then_reshape =", "B X*Watch");
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "exp_then_reshape =",
+        "B X*Watch"
+    ));
 }
 
 #[test]
@@ -41,7 +46,7 @@ fn test_squeeze_after_multiply() {
     let src = extract_test_case(VIEW_PY_DATA, 3);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "z =", "B X");
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X"));
 }
 
 #[test]
@@ -49,7 +54,7 @@ fn test_squeeze_multiply_oneliner() {
     let src = extract_test_case(VIEW_PY_DATA, 4);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    assert_hover_expected(&src, &analysis, "z =", "B X");
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X"));
 }
 
 #[test]
@@ -86,7 +91,7 @@ fn test_hover_on_squeeze_all() {
     let src = extract_test_case(VIEW_PY_DATA, 6);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert_hover_expected(&src, &analysis, "z =", "B R");
+    assert!(is_hover_expected(&src, &analysis, "z =", "B R"));
 }
 
 #[test]
@@ -95,7 +100,7 @@ fn test_unsqueeze_hover_dim0_pos() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
     let (pat, expected) = ("z_pos", "1 B R");
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
 
 #[test]
@@ -104,5 +109,5 @@ fn test_unsqueeze_hover_dim0_arg() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
     let (pat, expected) = ("z_arg", "1 R");
-    assert_hover_expected(&src, &analysis, pat, expected);
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
 }

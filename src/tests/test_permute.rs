@@ -1,5 +1,5 @@
 use crate::analyze_source;
-use crate::tests::{assert_hover_expected, extract_test_case};
+use crate::tests::{extract_test_case, is_hover_expected};
 
 const PERMUTE_PY_DATA: &str = include_str!("../../test_data/permute.py");
 
@@ -9,7 +9,7 @@ fn permute_hovers_and_diagnostics_are_captured() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 2);
     for (var, expected) in [("z =", "X B R"), ("y =", "B R X")] {
-        assert_hover_expected(&src, &analysis, var, expected);
+        is_hover_expected(&src, &analysis, var, expected);
     }
 }
 
@@ -19,7 +19,7 @@ fn transpose_hovers_and_diagnostics_are_captured() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 2);
     for (var, expected) in [("z =", "X B R"), ("y =", "B R X")] {
-        assert_hover_expected(&src, &analysis, var, expected);
+        is_hover_expected(&src, &analysis, var, expected);
     }
 }
 
@@ -29,7 +29,7 @@ fn torch_t_hover() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
     for (var, expected) in [("y =", "B R X"), ("w =", "B R X"), ("z =", "B R X")] {
-        assert_hover_expected(&src, &analysis, var, expected);
+        is_hover_expected(&src, &analysis, var, expected);
     }
 }
 
@@ -40,5 +40,5 @@ fn torch_t_hover_oneliner() {
     assert_eq!(analysis.diagnostics.len(), 0);
     let var = "z =";
     let expected = "B";
-    assert_hover_expected(&src, &analysis, var, expected);
+    is_hover_expected(&src, &analysis, var, expected);
 }

@@ -12,3 +12,44 @@ def hovering_with_inference_on_arg_with_mm():
     # hovering z should return [F, "B X O"]
     z = mc(x, y)
     return z
+
+
+# test 2
+from multi_callee import from_zeros_fully_annotated
+
+def arg_hint_returns_diagnostic_on_mismatch():
+    J, K, L = 3, 27, 81
+    arg = torch.zeros(J, K, L)
+    # arg should be [B T O]
+    arg_shape_is_wrong = from_zeros_fully_annotated(arg)
+    # this is added here so that there are enough lines
+    # when the test extracted to show the diagnostic if wrongly
+    # placed as in the callee
+    return (
+        arg,
+        J + K + L,
+        arg_shape_is_wrong
+    )
+
+
+# test 3
+from multi_callee import from_zeros_no_annotation
+
+def shape_inference_is_propagated_through_non_annotated_callee():
+    x = [1, 2, 3, 4]
+    # z is [B A X]: float64 because of callee code
+    z = from_zeros_no_annotation(x)
+
+
+# test 4
+from multi_callee import from_zeros_with_float_return_dtype
+
+def float_return_type_hint_is_returned_as_hover():
+    z = from_zeros_with_float_return_dtype(None)
+
+
+# test 5
+from multi_callee import from_zeros_with_int_return_dtype
+
+def int_return_type_hint_is_returned_as_hover():
+    z = from_zeros_with_int_return_dtype([1, 2])
