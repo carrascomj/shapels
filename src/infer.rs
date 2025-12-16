@@ -12,7 +12,9 @@ use crate::{
     FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg, get_dtype,
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use rustpython_parser::ast::{self, Constant, Expr, ExprBinOp, ExprCall, Identifier, Operator};
+use rustpython_parser::ast::{
+    self, Constant, Expr, ExprBinOp, ExprCall, ExprSubscript, Identifier, Operator,
+};
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1220,6 +1222,7 @@ pub fn infer_noop(
 /// An optional dtype might be used for the dtype. Otherwise, use Float.
 pub fn infer_creation_size(
     call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
     shape_hint: Option<Shape>,
@@ -1239,6 +1242,7 @@ pub fn infer_creation_size(
     };
     let mut diag_already = false;
 
+    // TODO(carrascomj): refactor into function
     let vec_dims: Vec<Option<Cow<_>>> = list
         .iter()
         .map(|x| match x {
@@ -1264,6 +1268,67 @@ pub fn infer_creation_size(
                     None
                 }
             },
+            // e.g., torch.zeros(x.shape[int])
+            Expr::Subscript(ExprSubscript { value, slice, .. }) => {
+                if let (Expr::Attribute(attr), Expr::Constant(c)) = (value.as_ref(), slice.as_ref())
+                    && let Expr::Name(name) = attr.value.as_ref()
+                    && let Constant::Int(i) = &c.value
+                    && let Ok(idx) = usize::try_from(i)
+                    && attr.attr.as_str() == "shape"
+                {
+                    let shape = vars
+                        .get(&name.id)
+                        .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
+                    shape.and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Owned(dim.clone())))
+                } else {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(expr_text_range(x), source),
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: "Shape could not be initialized from this argument".into(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    None
+                }
+            }
+            // e.g., torch.zeros(x.size(int))
+            Expr::Call(ExprCall {
+                func,
+                args,
+                keywords,
+                ..
+            }) => {
+                if let (true, [arg0], Expr::Attribute(attr)) =
+                    (keywords.is_empty(), args.as_slice(), func.as_ref())
+                    && attr.attr.as_str() == "size"
+                    && let Expr::Name(name) = attr.value.as_ref()
+                    && let Expr::Constant(c) = arg0
+                    && let Constant::Int(i) = &c.value
+                    && let Ok(idx) = usize::try_from(i)
+                {
+                    let shape = vars
+                        .get(&name.id)
+                        .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
+                    shape.and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Owned(dim.clone())))
+                } else {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(expr_text_range(x), source),
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: "Shape could not be initialized from this argument".into(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    None
+                }
+            }
             expr => {
                 if !diag_already {
                     diagnostics.push(Diagnostic {

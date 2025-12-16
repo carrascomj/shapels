@@ -503,7 +503,6 @@ fn simulate_function(
         source,
         &mut vars,
         &mut hover_entries,
-        &mut diagnostics,
         Some(&mut initial_vars),
         record_hovers,
     );
@@ -891,9 +890,8 @@ fn infer_expr_shape(
                                 .as_deref()
                                 .and_then(parse_shape_annotation)
                             {
-                                let dims_match =
-                                    ann.dims.len() == shape.dims.len()
-                                        && shape_dims_equal(&ann, &shape);
+                                let dims_match = ann.dims.len() == shape.dims.len()
+                                    && shape_dims_equal(&ann, &shape);
                                 if !dims_match {
                                     diagnostics.push(Diagnostic {
                                         range: text_range_to_lsp(expr_text_range(arg_expr), source),
@@ -1179,6 +1177,7 @@ fn infer_expr_shape(
                     });
                     return infer_creation_size(
                         call,
+                        vars,
                         diagnostics,
                         source,
                         shape_assign,
@@ -1235,9 +1234,8 @@ fn infer_expr_shape(
                                 .as_deref()
                                 .and_then(parse_shape_annotation)
                             {
-                                let dims_match =
-                                    ann.dims.len() == shape.dims.len()
-                                        && shape_dims_equal(&ann, &shape);
+                                let dims_match = ann.dims.len() == shape.dims.len()
+                                    && shape_dims_equal(&ann, &shape);
                                 if !dims_match {
                                     diagnostics.push(Diagnostic {
                                         range: text_range_to_lsp(expr_text_range(arg_expr), source),
@@ -1330,9 +1328,8 @@ fn infer_expr_shape(
                                 .as_deref()
                                 .and_then(parse_shape_annotation)
                             {
-                                let dims_match =
-                                    ann.dims.len() == shape.dims.len()
-                                        && shape_dims_equal(&ann, &shape);
+                                let dims_match = ann.dims.len() == shape.dims.len()
+                                    && shape_dims_equal(&ann, &shape);
                                 if !dims_match {
                                     diagnostics.push(Diagnostic {
                                         range: text_range_to_lsp(expr_text_range(arg_expr), source),
@@ -1722,6 +1719,7 @@ fn infer_expr_shape(
 
                     return infer_creation_size(
                         call,
+                        vars,
                         diagnostics,
                         source,
                         shape_assign,
@@ -2286,7 +2284,6 @@ fn seed_args_from_annotations(
     source: &str,
     vars: &mut HashMap<Identifier, VarState>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
-    _diagnostics: &mut Vec<Diagnostic>,
     provided: Option<&mut HashMap<Identifier, VarState>>,
     record_hovers: bool,
 ) {

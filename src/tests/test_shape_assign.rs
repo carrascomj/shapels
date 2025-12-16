@@ -156,3 +156,22 @@ fn init_full_from_tuple() {
     assert!(is_hover_expected(&src, &analysis, "bag_max =", "num_bags"));
     assert!(is_hover_expected(&src, &analysis, "bag_list =", "num_bags"));
 }
+
+#[test]
+fn creation_size_op_from_index_on_shape() {
+    let src = extract_test_case(PY_DATA, 11);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "bag_max_shape =",
+        "num_bags Feat"
+    ));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "bag_max_size =",
+        "num_bags Batch"
+    ));
+}

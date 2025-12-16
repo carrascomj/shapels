@@ -96,3 +96,16 @@ def full_from_tuple():
     num_bags = int(bag_indices.max()) + 1
     bag_max = torch.full((num_bags,), float("-inf"), device=bag_indices.device, dtype=bag_indices.dtype)
     bag_list = torch.full([num_bags,], float("-inf"), device=bag_indices.device, dtype=bag_indices.dtype)
+
+
+# test 11
+import torch
+
+def zeros_from_shape_indexed():
+    Batch, Feat = 32, 64
+    bag_indices = torch.ones(Batch, Feat)
+    num_bags = int(bag_indices.max()) + 1
+    # should be [num_bags, Feat]
+    bag_max_shape = torch.zeros(num_bags, bag_indices.shape[1], device=bag_indices.device, dtype=bag_indices.dtype)
+    # should be [num_bags, Batch]
+    bag_max_size = torch.zeros(num_bags, bag_indices.size(0), device=bag_indices.device, dtype=bag_indices.dtype)
