@@ -53,3 +53,17 @@ from multi_callee import from_zeros_with_int_return_dtype
 
 def int_return_type_hint_is_returned_as_hover():
     z = from_zeros_with_int_return_dtype([1, 2])
+
+
+# test 6
+from multi_callee import from_zeros_to_tuple
+
+def simple_tuple_destructuring():
+    z, a_list = from_zeros_to_tuple([1, 2])
+
+
+# test 7
+from multi_callee import from_zeros_to_tuple
+
+def int_return_tint_return_type_hint_is_returned_as_hoverype_hint_is_returned_as_hover():
+    z, (val1, val2) = from_zeros_to_tuple((1, 2))

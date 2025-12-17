@@ -34,3 +34,9 @@ def from_zeros_with_int_return_dtype(x) -> Int[T, "X Y Z"]:
     X, Y, Z = 3, 27, 81
     return torch.zeros(X, Y, Z)
 
+
+def from_zeros_to_tuple(x):
+    """Calling this function should return an annotated shape on the caller."""
+    B, A, X = 2, 8, 16
+    out = torch.zeros(B, A, X, dtype=torch.float64)
+    return out, x

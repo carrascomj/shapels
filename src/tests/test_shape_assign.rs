@@ -1,9 +1,8 @@
+///! Tests for assignments of shapes by hints or special methods.
 use lsp_types::Position;
 use shapels::analyze_source;
 
 use crate::tests::{extract_test_case, is_hover_expected};
-
-///! Tests for assignments of shapes by hints or special methods.
 
 const PY_DATA: &str = include_str!("../../test_data/shape_assign.py");
 
