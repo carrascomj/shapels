@@ -2,7 +2,121 @@ use phf::Set;
 use phf_macros::phf_set;
 use rustpython_parser::ast::Identifier;
 
-use crate::{Imports, is_alias_of};
+use crate::{Imports, infer::Transpose, is_alias_of};
+
+/// Torch functions and operations whose inference is supported.
+///
+/// This is used to match a torch function (imported, from a qualified or as a tensor method)
+/// against a supported tensor impolement.
+pub enum TorchOp {
+    /// `torch.mm`
+    MatMul,
+    /// Aggregate over a dimension or the whole tensor: `tensor.sum`, `tensor.max`, etc.
+    Aggr,
+    /// Shape-wise noops, but accept a dim argument like `softmax`.
+    NoopDim,
+    /// Shape-wise noops.
+    Noop,
+    /// Tensor initialization, with variadic arguments or *_like operations.
+    Creation { is_size: bool },
+    /// Tensor initialization from a range: `tensor.arange`, `tensor.linspace`, etc.
+    RangeOp(RangeOps),
+    /// Only change the dtype.
+    NoArg { can_be_function: bool },
+    /// Element-wise, broadcastable operations: `torch.mul`, `torch.eq`, etc..
+    Broadcastable(BroadcastOp),
+    /// `torch.view` and `torch.reshape`
+    View,
+    /// Permute-like operations.
+    Transpose(Transpose),
+    /// `torch.unsqueeze`.
+    Unsqueeze,
+    /// `torch.squeeze`.
+    Squeeze,
+    /// The operation is not supported or not properly indicated by the user.
+    Unknown,
+}
+
+impl TorchOp {
+    pub fn from_attr(attr_name: &str) -> Self {
+        if attr_name == "mm" {
+            Self::MatMul
+        } else if attr_name == "view" || attr_name == "reshape" {
+            Self::View
+        } else if attr_name == "permute" {
+            // only permute is checked since transpose
+            Self::Transpose(Transpose::Permute)
+        } else if attr_name == "transpose" {
+            Self::Transpose(Transpose::Explicit)
+        } else if attr_name == "t" {
+            Self::Transpose(Transpose::T)
+        } else if attr_name == "unsqueeze" {
+            Self::Unsqueeze
+        } else if attr_name == "squeeze" {
+            Self::Squeeze
+        } else if AGGR_ALIASES.contains(attr_name) {
+            Self::Aggr
+        } else if NOOP_DIM_ALIASES.contains(attr_name) {
+            Self::NoopDim
+        } else if NOOP_ALIASES.contains(attr_name) {
+            Self::Noop
+        } else if CREATION_SIZE_ALIASES.contains(attr_name) {
+            Self::Creation { is_size: true }
+        } else if CREATION_LIKE_ALIASES.contains(attr_name) {
+            Self::Creation { is_size: false }
+        } else if let Ok(op) = RangeOps::try_from(attr_name) {
+            Self::RangeOp(op)
+        } else if TO_NOARG_ALIASES.contains(attr_name) {
+            Self::NoArg {
+                can_be_function: attr_name == "to",
+            }
+        } else if let Some(op) = BroadcastOp::try_from_attr(attr_name) {
+            Self::Broadcastable(op)
+        } else {
+            Self::Unknown
+        }
+    }
+    pub(crate) fn as_call(func_name_id: &Identifier, imports: &Imports) -> Self {
+        if is_alias_of("mm", func_name_id, imports) {
+            Self::MatMul
+        } else if let Some(op) = BroadcastOp::try_from_alias(func_name_id, imports) {
+            Self::Broadcastable(op)
+        } else if is_alias_of("view", func_name_id, imports)
+            || is_alias_of("reshape", func_name_id, imports)
+        {
+            Self::View
+        } else if is_alias_of("permute", func_name_id, imports) {
+            Self::Transpose(Transpose::Permute)
+        } else if is_alias_of("transpose", func_name_id, imports) {
+            Self::Transpose(Transpose::Explicit)
+        } else if is_alias_of("t", func_name_id, imports) {
+            Self::Transpose(Transpose::T)
+        } else if is_alias_of("unsqueeze", func_name_id, imports) {
+            Self::Unsqueeze
+        } else if is_alias_of("squeeze", func_name_id, imports) {
+            Self::Squeeze
+        } else if is_alias_of("sum", func_name_id, imports) {
+            Self::Aggr
+        } else if is_alias_of("softmax", func_name_id, imports) {
+            Self::NoopDim
+        } else if is_alias_of("noop", func_name_id, imports) {
+            Self::Noop
+        } else if is_alias_of("Tensor", func_name_id, imports) {
+            Self::Creation { is_size: true }
+        } else if is_alias_of("like", func_name_id, imports) {
+            Self::Creation { is_size: false }
+        } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
+            .iter()
+            .filter(|x| is_alias_of(x, func_name_id, imports))
+            .map(|&x| RangeOps::try_from(x))
+            .next()
+        {
+            Self::RangeOp(range_op)
+        } else {
+            Self::Unknown
+        }
+    }
+}
 
 /// Operations that accept an argument dim (integer or sequence),
 /// return a single tensor and the provided dims have been reduced
@@ -177,6 +291,7 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
 
 /// Shape-wise NoOp, changes dtype, do not accept arguments.
 pub static TO_NOARG_ALIASES: Set<&'static str> = phf_set! {
+    "to",
     "float",
     "long",
     "int",
@@ -184,6 +299,7 @@ pub static TO_NOARG_ALIASES: Set<&'static str> = phf_set! {
     "bfloat16",
     "cfloat",
     "bool",
+    "neg",
 };
 
 pub static TORCH_DTYPES: Set<&'static str> = phf_set![
@@ -222,7 +338,6 @@ pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
     "remainder",
     "fmod",
     "pow",
-    "neg",
     "positive",
 ];
 

@@ -198,6 +198,9 @@ fn test_functional_broadcasts() {
     for symbol in &BROADCASTABLE_ALIASES {
         let src = mult_source.replace("mul", symbol);
         let analysis = analyze_source(&src);
+        if analysis.diagnostics.len() != 2 {
+            println!("symbol = {symbol}")
+        }
         assert_eq!(analysis.diagnostics.len(), 2);
         assert!(is_hover_expected(&src, &analysis, "z =", "A B C 1"));
     }

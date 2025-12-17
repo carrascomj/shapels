@@ -73,6 +73,6 @@ from torch import Tensor as T
 def unsqueeze_first_is_correct():
     x: F[T, "B R"] = torch.Tensor(B, R)
     y: F[T, "R"] = torch.Tensor(R, )
-    z_pos = torch.unsqueeze(x.to("int32"), 0)
+    z_pos = torch.unsqueeze(x.to(torch.int32), 0)
     z_arg = y.unsqueeze(dim=0)
     z_as_x = x

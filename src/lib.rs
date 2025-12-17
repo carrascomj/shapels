@@ -3,8 +3,8 @@
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{
-    self, Arguments, Constant, Expr, ExprBinOp, ExprCall, ExprCompare, Identifier, Operator, Stmt,
-    Suite,
+    self, Arguments, Constant, Expr, ExprBinOp, ExprCall, ExprCompare, ExprList, ExprTuple,
+    Identifier, Operator, Stmt, Suite,
 };
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::collections::{HashMap, HashSet};
@@ -20,8 +20,8 @@ use crate::infer::{
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
     BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_LIKE_ALIASES,
-    CREATION_RANGE_ALIASES, CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES,
-    NOOP_DIM_ALIASES, RangeOps, TO_NOARG_ALIASES, TORCH_DTYPES,
+    CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, RangeOps,
+    TORCH_DTYPES, TorchOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -938,10 +938,12 @@ fn infer_expr_shape(
         }
         Expr::Call(call) => {
             if let Expr::Name(func_name) = call.func.as_ref() {
-                if is_alias_of("mm", &func_name.id, imports)
-                    && let (Some(arg0), Some(arg1)) = (call.args.first(), call.args.get(1))
-                {
-                    return infer_matmul_shapes(
+                let torchop_shape = match (
+                    TorchOp::as_call(&func_name.id, imports),
+                    call.args.first(),
+                    call.args.get(1),
+                ) {
+                    (TorchOp::MatMul, Some(arg0), Some(arg1)) => infer_matmul_shapes(
                         arg0,
                         arg1,
                         vars,
@@ -955,16 +957,78 @@ fn infer_expr_shape(
                         call.range,
                         module_cache.as_deref_mut(),
                         module_path,
-                    );
-                }
-                if let (Some(left), Some(right), Some(broadcast_op)) = (
-                    call.args.first(),
-                    call.args.get(1),
-                    BroadcastOp::try_from_alias(&func_name.id, imports),
-                ) {
-                    return infer_broadcastable_poswise(
-                        &ShapeOrExpr::Expr(left),
-                        right,
+                    ),
+                    (TorchOp::Broadcastable(broadcast_op), Some(left), Some(right)) => {
+                        infer_broadcastable_poswise(
+                            &ShapeOrExpr::Expr(left),
+                            right,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                            broadcast_op,
+                        )
+                    }
+                    (TorchOp::View, Some(arg0), _) => infer_view_like(
+                        arg0,
+                        &call.args.iter().skip(1).collect::<Vec<_>>(),
+                        None,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        call.range,
+                    ),
+                    (TorchOp::Transpose(transpose), Some(base), _) => {
+                        let order_args = match &transpose {
+                            Transpose::Permute => match get_arg(call, "dims", 1) {
+                                Some(Expr::Tuple(ExprTuple { elts, .. }))
+                                | Some(Expr::List(ExprList { elts, .. })) => elts.iter().collect(),
+                                _ => Vec::new(),
+                            },
+                            // torch.transpose does not accept a size-like
+                            Transpose::Explicit => call.args.iter().skip(1).take(2).collect(),
+                            // no args
+                            Transpose::T => Vec::new(),
+                        };
+                        infer_permute(
+                            base,
+                            &order_args,
+                            transpose,
+                            None,
+                            vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        )
+                    }
+                    (TorchOp::Unsqueeze, Some(arg0), _) => infer_unsqueeze(
+                        arg0,
+                        get_arg(call, "dim", 1),
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    ),
+                    (TorchOp::Squeeze | TorchOp::Aggr, Some(arg0), _) => infer_squeeze(
+                        arg0,
+                        get_arg(call, "dim", 1),
                         vars,
                         func_map,
                         imports,
@@ -976,9 +1040,112 @@ fn infer_expr_shape(
                         call.range,
                         module_cache.as_deref_mut(),
                         module_path,
-                        broadcast_op,
-                    );
+                        matches!(TorchOp::as_call(&func_name.id, imports), TorchOp::Squeeze),
+                    ),
+                    (TorchOp::NoopDim, _, _) => {
+                        let base_hint = infer_expr_shape(
+                            call.args.first()?,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            false,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                        infer_noop(
+                            base_hint,
+                            get_arg(call, "dim", 1),
+                            diagnostics,
+                            source,
+                            call.range,
+                            // TODO(carrascomj): hack: just treat argsort different
+                            func_name.id.contains("soft"),
+                        )
+                    }
+                    (TorchOp::Noop, _, _) => infer_expr_shape(
+                        call.args.first()?,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        false,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    ),
+                    (TorchOp::Creation { is_size }, _, _) => {
+                        // a torch.Tensor.shape might be the first argument
+                        let shape_assign = tensor_or_shape_as_arg(
+                            is_size,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            &mut module_cache,
+                            module_path,
+                            call,
+                        );
+                        let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
+                            let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
+                                infer_expr_shape(
+                                    expr,
+                                    vars,
+                                    func_map,
+                                    imports,
+                                    call_stack,
+                                    diagnostics,
+                                    hover_entries,
+                                    record_hovers,
+                                    source,
+                                    module_cache.as_deref_mut(),
+                                    module_path,
+                                )
+                                .and_then(|shape| shape.dtype)
+                            } else {
+                                None
+                            };
+                            attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
+                        });
+                        return infer_creation_size(
+                            call,
+                            vars,
+                            diagnostics,
+                            source,
+                            shape_assign,
+                            dtype,
+                            is_size,
+                        );
+                    }
+                    (TorchOp::RangeOp(range_op), _, _) => infer_range_size(
+                        call,
+                        range_op,
+                        vars,
+                        func_map,
+                        imports,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    ),
+                    _ => None,
+                };
+                if torchop_shape.is_some() {
+                    return torchop_shape;
                 }
+
                 if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
                     && let (Some(cache), Some(cur_path)) =
                         (module_cache.as_deref_mut(), module_path)
@@ -1066,265 +1233,6 @@ fn infer_expr_shape(
                     }
                     call_stack.pop();
                     return ret_value.first().cloned();
-                }
-                if (is_alias_of("view", &func_name.id, imports)
-                    || is_alias_of("reshape", &func_name.id, imports))
-                    && let Some(arg0) = call.args.first()
-                {
-                    let args = call.args.iter().skip(1).collect::<Vec<_>>();
-                    return infer_view_like(
-                        arg0,
-                        &args,
-                        None,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if is_alias_of("permute", &func_name.id, imports)
-                    && let Some(base) = call.args.first()
-                {
-                    let order_args: Vec<&Expr> = if call.args.len() >= 2 {
-                        if let Some(Expr::Tuple(t)) = call.args.get(1) {
-                            t.elts.iter().collect()
-                        } else {
-                            call.args.iter().skip(1).collect()
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    return infer_permute(
-                        base,
-                        &order_args,
-                        Transpose::Permute,
-                        None,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if is_alias_of("transpose", &func_name.id, imports)
-                    && let Some(base) = call.args.first()
-                {
-                    let order_args: Vec<&Expr> = if call.args.len() >= 3 {
-                        call.args.iter().skip(1).take(2).collect()
-                    } else if call.args.len() == 2 {
-                        if let Some(Expr::Tuple(t)) = call.args.get(1) {
-                            t.elts.iter().collect()
-                        } else {
-                            call.args.iter().skip(1).collect()
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    return infer_permute(
-                        base,
-                        &order_args,
-                        Transpose::Explicit,
-                        None,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if is_alias_of("t", &func_name.id, imports)
-                    && let Some(base) = call.args.first()
-                {
-                    let order_args: Vec<&Expr> = if call.args.len() >= 3 {
-                        call.args.iter().skip(1).take(2).collect()
-                    } else if call.args.len() == 2 {
-                        if let Some(Expr::Tuple(t)) = call.args.get(1) {
-                            t.elts.iter().collect()
-                        } else {
-                            call.args.iter().skip(1).collect()
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    return infer_permute(
-                        base,
-                        &order_args,
-                        Transpose::T,
-                        None,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if is_alias_of("unsqueeze", &func_name.id, imports)
-                    && let Some(arg0) = call.args.first()
-                {
-                    return infer_unsqueeze(
-                        arg0,
-                        get_arg(call, "dim", 1),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                } else if is_alias_of("squeeze", &func_name.id, imports)
-                    && let Some(arg0) = call.args.first()
-                {
-                    return infer_squeeze(
-                        arg0,
-                        get_arg(call, "dim", 1),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                        true,
-                    );
-                } else if is_alias_of("sum", &func_name.id, imports)
-                    && let Some(arg0) = call.args.first()
-                {
-                    let dim_arg = call
-                        .keywords
-                        .iter()
-                        .find(|kw| kw.arg.as_deref() == Some("dim"))
-                        .map(|kw| &kw.value)
-                        .or_else(|| call.args.get(1));
-                    return infer_squeeze(
-                        arg0,
-                        dim_arg,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                        false,
-                    );
-                } else if is_alias_of("softmax", &func_name.id, imports) {
-                    let base_hint = infer_expr_shape(
-                        call.args.first()?,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                    return infer_noop(
-                        base_hint,
-                        get_arg(call, "dim", 1),
-                        diagnostics,
-                        source,
-                        call.range,
-                        // TODO(carrascomj): hack: just treat argsort different
-                        func_name.id.contains("soft"),
-                    );
-                } else if is_alias_of("noop", &func_name.id, imports) {
-                    return infer_expr_shape(
-                        call.args.first()?,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                } else if is_alias_of("Tensor", &func_name.id, imports)
-                    || is_alias_of("like", &func_name.id, imports)
-                {
-                    // a torch.Tensor.shape might be the first argument
-                    let shape_assign = tensor_or_shape_as_arg(
-                        is_alias_of("Tensor", &func_name.id, imports),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        &mut module_cache,
-                        module_path,
-                        call,
-                    );
-                    let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
-                        let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
-                            infer_expr_shape(
-                                expr,
-                                vars,
-                                func_map,
-                                imports,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                record_hovers,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            )
-                            .and_then(|shape| shape.dtype)
-                        } else {
-                            None
-                        };
-                        attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
-                    });
-                    return infer_creation_size(
-                        call,
-                        vars,
-                        diagnostics,
-                        source,
-                        shape_assign,
-                        dtype,
-                        is_alias_of("Tensor", &func_name.id, imports),
-                    );
-                } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
-                    .iter()
-                    .filter(|x| is_alias_of(x, &func_name.id, imports))
-                    .map(|&x| RangeOps::try_from(x))
-                    .next()
-                {
-                    return infer_range_size(
-                        call,
-                        range_op,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
                 }
                 if let Some(callee_info) = func_map.get(&func_name.id) {
                     // avoid infinite recursion
@@ -1508,14 +1416,14 @@ fn infer_expr_shape(
                 // two cases: torch.ATTR_NAME(torch.Tensor, ...) or torch.Tensor.ATTR_NAME(...)
                 let in_torch = is_torch_base(&attr.value, imports);
                 let offset = if in_torch { 1 } else { 0 };
-                if attr_name == "mm" {
-                    let args = match (in_torch, call.args.first(), call.args.get(1)) {
+                let aliased_shape = match TorchOp::from_attr(attr_name) {
+                    TorchOp::MatMul => match (in_torch, call.args.first(), call.args.get(1)) {
                         (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
                         (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
                         _ => None,
-                    };
-                    if let Some((arg0, arg1)) = args {
-                        return infer_matmul_shapes(
+                    }
+                    .and_then(|(arg0, arg1)| {
+                        infer_matmul_shapes(
                             arg0,
                             arg1,
                             vars,
@@ -1529,19 +1437,18 @@ fn infer_expr_shape(
                             call.range,
                             module_cache.as_deref_mut(),
                             module_path,
-                        );
-                    }
-                }
-                if let Some(broadcast_op) = BroadcastOp::try_from_attr(attr_name) {
-                    let args = match (in_torch, call.args.first(), call.args.get(1)) {
-                        (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
-                        (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
-                        _ => None,
-                    };
-                    if let Some((left, right)) = args {
-                        return infer_broadcastable_poswise(
-                            &ShapeOrExpr::Expr(left),
-                            right,
+                        )
+                    }),
+                    TorchOp::Aggr => {
+                        // tensor.sum(...) vs torch.sum(tensor, ...)
+                        let base = if in_torch {
+                            call.args.first()?
+                        } else {
+                            attr.value.as_ref()
+                        };
+                        infer_squeeze(
+                            base,
+                            get_arg(call, "dim", offset),
                             vars,
                             func_map,
                             imports,
@@ -1553,235 +1460,38 @@ fn infer_expr_shape(
                             call.range,
                             module_cache.as_deref_mut(),
                             module_path,
-                            broadcast_op,
-                        );
+                            false,
+                        )
                     }
-                }
-                if attr_name == "view" || attr_name == "reshape" {
-                    let base_hint =
-                        lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
-                            .or_else(|| {
-                                infer_expr_shape(
-                                    &attr.value,
-                                    vars,
-                                    func_map,
-                                    imports,
-                                    call_stack,
-                                    diagnostics,
-                                    hover_entries,
-                                    false,
-                                    source,
-                                    module_cache.as_deref_mut(),
-                                    module_path,
-                                )
-                            });
-                    let args = call.args.iter().collect::<Vec<_>>();
-                    return infer_view_like(
-                        &attr.value,
-                        &args,
-                        base_hint,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if attr_name == "permute" {
-                    let (base, order_args): (&Expr, Vec<&Expr>) =
-                        if is_torch_base(&attr.value, imports) {
-                            let base = call.args.first()?;
-                            let rest = if call.args.len() >= 2 {
-                                if let Some(Expr::Tuple(t)) = call.args.get(1) {
-                                    t.elts.iter().collect()
-                                } else {
-                                    call.args.iter().skip(1).collect()
-                                }
-                            } else {
-                                Vec::new()
-                            };
-                            (base, rest)
+                    TorchOp::NoopDim => {
+                        let base = if in_torch {
+                            call.args.first()?
                         } else {
-                            let rest = if call.args.len() == 1 {
-                                if let Some(Expr::Tuple(t)) = call.args.first() {
-                                    t.elts.iter().collect()
-                                } else {
-                                    call.args.iter().collect()
-                                }
-                            } else {
-                                call.args.iter().collect()
-                            };
-                            (&attr.value, rest)
+                            attr.value.as_ref()
                         };
-                    return infer_permute(
-                        base,
-                        &order_args,
-                        Transpose::Permute,
-                        None,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if attr_name == "transpose" || attr_name == "t" {
-                    let (base, order_args): (&Expr, Vec<&Expr>) =
-                        if is_torch_base(&attr.value, imports) {
-                            let base = call.args.first()?;
-                            let rest = if call.args.len() >= 3 {
-                                call.args.iter().skip(1).take(2).collect()
-                            } else if call.args.len() == 2 {
-                                if let Some(Expr::Tuple(t)) = call.args.get(1) {
-                                    t.elts.iter().collect()
-                                } else {
-                                    call.args.iter().skip(1).collect()
-                                }
-                            } else {
-                                Vec::new()
-                            };
-                            (base, rest)
-                        } else {
-                            let rest = if call.args.len() >= 2 {
-                                call.args.iter().take(2).collect()
-                            } else if call.args.len() == 1 {
-                                if let Some(Expr::Tuple(t)) = call.args.first() {
-                                    t.elts.iter().collect()
-                                } else {
-                                    call.args.iter().collect()
-                                }
-                            } else {
-                                Vec::new()
-                            };
-                            (&attr.value, rest)
-                        };
-                    let trans_type = match attr_name {
-                        "transpose" => Transpose::Explicit,
-                        _ => Transpose::T,
-                    };
-                    let base_hint = infer_expr_shape(
-                        base,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                    return infer_permute(
-                        base,
-                        &order_args,
-                        trans_type,
-                        base_hint,
-                        vars,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                    );
-                } else if attr_name == "unsqueeze" {
-                    let base = if in_torch {
-                        // torch.unsqueeze(torch.Tensor, ...)
-                        call.args.first()?
-                    } else {
-                        attr.value.as_ref()
-                    };
-                    let dim_arg = get_arg(call, "dim", offset);
-                    return infer_unsqueeze(
-                        base,
-                        dim_arg,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                } else if attr_name == "squeeze" {
-                    // tensor.squeeze(...) vs torch.squeeze(tensor, ...)
-                    let base = if in_torch {
-                        call.args.first()?
-                    } else {
-                        attr.value.as_ref()
-                    };
-
-                    return infer_squeeze(
-                        base,
-                        get_arg(call, "dim", offset),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                        true,
-                    );
-                } else if AGGR_ALIASES.contains(attr_name) {
-                    // tensor.sum(...) vs torch.sum(tensor, ...)
-                    let base = if in_torch {
-                        call.args.first()?
-                    } else {
-                        attr.value.as_ref()
-                    };
-                    return infer_squeeze(
-                        base,
-                        get_arg(call, "dim", offset),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        call.range,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                        false,
-                    );
-                } else if NOOP_DIM_ALIASES.contains(attr_name) {
-                    let base = if in_torch {
-                        call.args.first()?
-                    } else {
-                        attr.value.as_ref()
-                    };
-                    let base_hint = infer_expr_shape(
-                        base,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                    return infer_noop(
-                        base_hint,
-                        get_arg(call, "dim", offset),
-                        diagnostics,
-                        source,
-                        call.range,
-                        attr_name != "argsort", // dim optional for argsort
-                    );
-                } else if NOOP_ALIASES.contains(attr_name) {
-                    return infer_expr_shape(
+                        let base_hint = infer_expr_shape(
+                            base,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            false,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                        infer_noop(
+                            base_hint,
+                            get_arg(call, "dim", offset),
+                            diagnostics,
+                            source,
+                            call.range,
+                            attr_name != "argsort", // dim optional for argsort
+                        )
+                    }
+                    TorchOp::Noop => infer_expr_shape(
                         if in_torch {
                             call.args.first()?
                         } else {
@@ -1797,58 +1507,55 @@ fn infer_expr_shape(
                         source,
                         module_cache.as_deref_mut(),
                         module_path,
-                    );
-                } else if (CREATION_SIZE_ALIASES.contains(attr_name)
-                    || CREATION_LIKE_ALIASES.contains(attr_name))
-                    & in_torch
-                {
-                    let shape_assign = tensor_or_shape_as_arg(
-                        CREATION_SIZE_ALIASES.contains(attr_name),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        &mut module_cache,
-                        module_path,
-                        call,
-                    );
-                    let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
-                        let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
-                            infer_expr_shape(
-                                expr,
-                                vars,
-                                func_map,
-                                imports,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                record_hovers,
-                                source,
-                                module_cache,
-                                module_path,
-                            )
-                            .and_then(|shape| shape.dtype)
-                        } else {
-                            None
-                        };
-                        attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
-                    });
+                    ),
+                    TorchOp::Creation { is_size } if in_torch => {
+                        let shape_assign = tensor_or_shape_as_arg(
+                            is_size,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            &mut module_cache,
+                            module_path,
+                            call,
+                        );
+                        let dtype = get_arg(call, "dtype", 200).and_then(|expr| {
+                            let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
+                                infer_expr_shape(
+                                    expr,
+                                    vars,
+                                    func_map,
+                                    imports,
+                                    call_stack,
+                                    diagnostics,
+                                    hover_entries,
+                                    record_hovers,
+                                    source,
+                                    module_cache.as_deref_mut(),
+                                    module_path,
+                                )
+                                .and_then(|shape| shape.dtype)
+                            } else {
+                                None
+                            };
+                            attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
+                        });
 
-                    return infer_creation_size(
-                        call,
-                        vars,
-                        diagnostics,
-                        source,
-                        shape_assign,
-                        dtype,
-                        CREATION_SIZE_ALIASES.contains(attr_name),
-                    );
-                } else if CREATION_RANGE_ALIASES.contains(attr_name) & in_torch {
-                    return infer_range_size(
+                        infer_creation_size(
+                            call,
+                            vars,
+                            diagnostics,
+                            source,
+                            shape_assign,
+                            dtype,
+                            is_size,
+                        )
+                    }
+                    TorchOp::RangeOp(range_ops) if in_torch => infer_range_size(
                         call,
                         RangeOps::try_from(attr_name).unwrap(),
                         vars,
@@ -1861,31 +1568,196 @@ fn infer_expr_shape(
                         source,
                         module_cache.as_deref_mut(),
                         module_path,
-                    );
-                } else if (attr_name == "to" || TO_NOARG_ALIASES.contains(attr_name)) && !in_torch {
-                    let base_expr = infer_expr_shape(
-                        attr.value.as_ref(),
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    );
-                    let dtype_expr = if TO_NOARG_ALIASES.contains(attr_name) {
-                        Some(&Expr::Constant(ast::ExprConstant {
-                            range: attr.range,
-                            value: Constant::Str(attr_name.to_string()),
-                            kind: None,
-                        }))
-                    } else {
-                        get_arg(call, "dtype", 0)
-                    };
-                    return infer_to(base_expr, dtype_expr, diagnostics, source, imports);
+                    ),
+                    TorchOp::NoArg { can_be_function } if can_be_function || !in_torch => {
+                        let base_expr = infer_expr_shape(
+                            attr.value.as_ref(),
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            false,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                        let dtype_expr = if !can_be_function {
+                            Some(&Expr::Constant(ast::ExprConstant {
+                                range: attr.range,
+                                value: Constant::Str(attr_name.to_string()),
+                                kind: None,
+                            }))
+                        } else {
+                            get_arg(call, "dtype", 0)
+                        };
+                        return infer_to(base_expr, dtype_expr, diagnostics, source, imports);
+                    }
+                    TorchOp::Broadcastable(broadcast_op) => {
+                        let args = match (in_torch, call.args.first(), call.args.get(1)) {
+                            (true, Some(arg0), Some(arg1)) => Some((arg0, arg1)),
+                            (false, Some(arg1), _) => Some((attr.value.as_ref(), arg1)),
+                            _ => None,
+                        };
+                        args.and_then(|(left, right)| {
+                            infer_broadcastable_poswise(
+                                &ShapeOrExpr::Expr(left),
+                                right,
+                                vars,
+                                func_map,
+                                imports,
+                                call_stack,
+                                diagnostics,
+                                hover_entries,
+                                record_hovers,
+                                source,
+                                call.range,
+                                module_cache.as_deref_mut(),
+                                module_path,
+                                broadcast_op,
+                            )
+                        })
+                    }
+                    TorchOp::View => {
+                        let base_hint =
+                            lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
+                                .or_else(|| {
+                                    infer_expr_shape(
+                                        &attr.value,
+                                        vars,
+                                        func_map,
+                                        imports,
+                                        call_stack,
+                                        diagnostics,
+                                        hover_entries,
+                                        false,
+                                        source,
+                                        module_cache.as_deref_mut(),
+                                        module_path,
+                                    )
+                                });
+                        infer_view_like(
+                            &attr.value,
+                            &call.args.iter().collect::<Vec<_>>(),
+                            base_hint,
+                            vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        )
+                    }
+                    TorchOp::Transpose(transpose) => {
+                        // the and the dimensions
+                        let base = if in_torch {
+                            get_arg(call, "input", 0)?
+                        } else {
+                            &attr.value
+                        };
+                        let order_args = match &transpose {
+                            Transpose::Permute => {
+                                match get_arg(call, "dims", offset) {
+                                    Some(Expr::Tuple(ExprTuple { elts, .. }))
+                                    | Some(Expr::List(ExprList { elts, .. })) => {
+                                        elts.iter().collect()
+                                    }
+                                    // torch.permute does not accept variadic args for dims
+                                    // but the torch.Tensor.permute does
+                                    _ if !in_torch => call.args.iter().collect(),
+                                    _ => Vec::new(),
+                                }
+                            }
+                            // torch.transpose does not accept a size-like
+                            Transpose::Explicit => call.args.iter().skip(offset).take(2).collect(),
+                            // no args
+                            Transpose::T => Vec::new(),
+                        };
+                        let base_hint = infer_expr_shape(
+                            base,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            false,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        );
+                        infer_permute(
+                            base,
+                            &order_args,
+                            transpose,
+                            base_hint,
+                            vars,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                        )
+                    }
+                    TorchOp::Unsqueeze => {
+                        let base = if in_torch {
+                            // torch.unsqueeze(torch.Tensor, ...)
+                            call.args.first()?
+                        } else {
+                            attr.value.as_ref()
+                        };
+                        let dim_arg = get_arg(call, "dim", offset);
+                        infer_unsqueeze(
+                            base,
+                            dim_arg,
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                    }
+                    TorchOp::Squeeze => {
+                        // tensor.squeeze(...) vs torch.squeeze(tensor, ...)
+                        let base = if in_torch {
+                            call.args.first()?
+                        } else {
+                            attr.value.as_ref()
+                        };
+
+                        infer_squeeze(
+                            base,
+                            get_arg(call, "dim", offset),
+                            vars,
+                            func_map,
+                            imports,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            record_hovers,
+                            source,
+                            call.range,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                            true,
+                        )
+                    }
+                    TorchOp::Unknown if in_torch => {
+                        // TODO(carrascomj): check if emitting diagnostics here
+                        // is not too annoying
+                        None
+                    }
+                    // unsupported or not a torch tensor method, etc.
+                    _ => None,
+                };
+                if aliased_shape.is_some() {
+                    return aliased_shape;
                 }
             }
             None
