@@ -11,10 +11,17 @@ use lsp_types::{
 use shapels::{analyze_source, analyze_source_at_path};
 use std::collections::HashMap;
 
+mod cli;
 #[cfg(test)]
 mod tests;
 
+use cli::{parse_args, run_analysis_if_args};
+
 fn main() {
+    let cli_args = parse_args();
+    // command mode if args where provided: exits early
+    run_analysis_if_args(cli_args);
+
     let (connection, io_threads) = Connection::stdio();
 
     let server_capabilities = serde_json::to_value(ServerCapabilities {
