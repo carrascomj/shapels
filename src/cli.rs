@@ -10,13 +10,13 @@ const HELP: &str = "Language server for torch shapes.
 Project home page: https://github.com/carrascomj/shapels
 
 \x1b[4mUsage\x1b[24m: shapels [OPTIONS]
-    If no args are provided, shapels stats a language server taking jsonl as
+    If no args are provided, shapels starts a language server taking JSONL as
     messages from stdin and outputting to stdout.
 
 \x1b[4mOptions\x1b[24m:
     \x1b[1m-p, --path\x1b[22m <path>   Outputs diagnostics to stdin. If any, returns an exit code of -1.
     \x1b[1m-H, --hover\x1b[22m <path>  Outputs hover information to stdin.
-    \x1b[1m-h\x1b[22m                  Prints this help message
+    \x1b[1m-h\x1b[22m                  Prints this help message.
 ";
 
 pub struct CliArgs {
@@ -26,6 +26,7 @@ pub struct CliArgs {
     pub hover: Option<PathBuf>,
 }
 
+/// Extract and parse the CLI args into [`CliArgs`].
 pub fn parse_args() -> CliArgs {
     let mut args = env::args().skip(1);
     let mut path = None;
@@ -78,7 +79,7 @@ fn format_location(path: &Path, line: u32, character: u32) -> String {
     )
 }
 
-pub fn pretty_print_analysis(
+fn pretty_print_analysis(
     analysis: &Analysis,
     path: Option<&Path>,
     hover: Option<&Path>,
@@ -139,6 +140,12 @@ fn print_or_exit(result: io::Result<()>) {
     }
 }
 
+/// Analyze one or two files, depending on [`CliArgs`], and print diagnostics
+/// and/or hover events to the screen.
+///
+/// If no arguments were provided, it is a noop. Otherwise, it will analyse the
+/// file(s) and exit, with -1 if any diagnostics were emitted and 0 otherwise;
+/// always 0 if `cli_args.path` is `None`.
 pub fn run_analysis_if_args(cli_args: CliArgs) {
     let diag_path = cli_args.path.as_deref();
     let hover_path = cli_args.hover.as_deref();
