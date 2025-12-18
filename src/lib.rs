@@ -657,7 +657,8 @@ fn analyze_function(
     }
 }
 
-/// Run static shape inference on assignments and return types.
+/// Initializes inputs of a function and wraps around [`simulate_block`]
+/// that may run recursively carrying the initialized inputs.
 fn simulate_function(
     args: &Arguments,
     body: &[Stmt],
@@ -686,15 +687,60 @@ fn simulate_function(
 
     let mut return_value = ReturnValue::default();
 
+    let _ = simulate_block(
+        body,
+        &mut vars,
+        &mut diagnostics,
+        &mut hover_entries,
+        &mut return_value,
+        source,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        record_hovers,
+        module_cache.as_deref_mut(),
+        module_path,
+        false,
+    );
+
+    (diagnostics, hover_entries, return_value)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockFlow {
+    None,
+    Break,
+    Continue,
+    Return,
+}
+
+/// Run static shape inference on assignments and return types.
+fn simulate_block(
+    body: &[Stmt],
+    vars: &mut HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    return_value: &mut ReturnValue,
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    record_hovers: bool,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+    in_loop: bool,
+) -> BlockFlow {
     for stmt in body {
         match stmt {
             Stmt::AnnAssign(assign) => {
                 if assignment_shape_checks(
                     &assign.target,
                     assign.value.as_deref().unwrap_or(assign.target.as_ref()),
-                    &mut vars,
-                    &mut diagnostics,
-                    &mut hover_entries,
+                    vars,
+                    diagnostics,
+                    hover_entries,
                     record_hovers,
                     source,
                 ) {
@@ -708,9 +754,9 @@ fn simulate_function(
                         if assignment_shape_checks(
                             val,
                             val,
-                            &mut vars,
-                            &mut diagnostics,
-                            &mut hover_entries,
+                            vars,
+                            diagnostics,
+                            hover_entries,
                             record_hovers,
                             source,
                         ) {
@@ -720,13 +766,13 @@ fn simulate_function(
                         } else {
                             inferred = infer_expr_shape(
                                 val,
-                                &vars,
+                                vars,
                                 func_map,
                                 imports,
                                 class_map,
                                 call_stack,
-                                &mut diagnostics,
-                                &mut hover_entries,
+                                diagnostics,
+                                hover_entries,
                                 record_hovers,
                                 source,
                                 module_cache.as_deref_mut(),
@@ -820,9 +866,9 @@ fn simulate_function(
                     && assignment_shape_checks(
                         &assign.targets[0],
                         &assign.value,
-                        &mut vars,
-                        &mut diagnostics,
-                        &mut hover_entries,
+                        vars,
+                        diagnostics,
+                        hover_entries,
                         record_hovers,
                         source,
                     )
@@ -834,13 +880,13 @@ fn simulate_function(
                     && let Expr::Tuple(target_tuple) = &assign.targets[0]
                     && let Some(tuple_shapes) = infer_tuple_elements(
                         &assign.value,
-                        &vars,
+                        vars,
                         func_map,
                         imports,
                         class_map,
                         call_stack,
-                        &mut diagnostics,
-                        &mut hover_entries,
+                        diagnostics,
+                        hover_entries,
                         record_hovers,
                         source,
                         module_cache.as_deref_mut(),
@@ -874,13 +920,13 @@ fn simulate_function(
                     let range = text_range_to_lsp(expr_text_range(&assign.targets[0]), source);
                     let shape = infer_expr_shape(
                         &assign.value,
-                        &vars,
+                        vars,
                         func_map,
                         imports,
                         class_map,
                         call_stack,
-                        &mut diagnostics,
-                        &mut hover_entries,
+                        diagnostics,
+                        hover_entries,
                         record_hovers,
                         source,
                         module_cache.as_deref_mut(),
@@ -916,6 +962,144 @@ fn simulate_function(
                     }
                 }
             }
+            Stmt::For(for_stmt) => {
+                let flow = simulate_block(
+                    &for_stmt.body,
+                    vars,
+                    diagnostics,
+                    hover_entries,
+                    return_value,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    record_hovers,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                    true,
+                );
+                if flow == BlockFlow::Return {
+                    return BlockFlow::Return;
+                }
+                if flow != BlockFlow::Break {
+                    let else_flow = simulate_block(
+                        &for_stmt.orelse,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        return_value,
+                        source,
+                        func_map,
+                        imports,
+                        class_map,
+                        call_stack,
+                        record_hovers,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                        true,
+                    );
+                    if else_flow == BlockFlow::Return {
+                        return BlockFlow::Return;
+                    }
+                }
+            }
+            Stmt::While(while_stmt) => {
+                let flow = simulate_block(
+                    &while_stmt.body,
+                    vars,
+                    diagnostics,
+                    hover_entries,
+                    return_value,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    record_hovers,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                    true,
+                );
+                if flow == BlockFlow::Return {
+                    return BlockFlow::Return;
+                }
+                if flow != BlockFlow::Break {
+                    let else_flow = simulate_block(
+                        &while_stmt.orelse,
+                        vars,
+                        diagnostics,
+                        hover_entries,
+                        return_value,
+                        source,
+                        func_map,
+                        imports,
+                        class_map,
+                        call_stack,
+                        record_hovers,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                        true,
+                    );
+                    if else_flow == BlockFlow::Return {
+                        return BlockFlow::Return;
+                    }
+                }
+            }
+            Stmt::If(if_stmt) => {
+                let mut body_vars = vars.clone();
+                let body_flow = simulate_block(
+                    &if_stmt.body,
+                    &mut body_vars,
+                    diagnostics,
+                    hover_entries,
+                    return_value,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    record_hovers,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                    in_loop,
+                );
+                let mut else_vars = vars.clone();
+                let else_flow = simulate_block(
+                    &if_stmt.orelse,
+                    &mut else_vars,
+                    diagnostics,
+                    hover_entries,
+                    return_value,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    record_hovers,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                    in_loop,
+                );
+                if body_flow == else_flow
+                    && matches!(
+                        body_flow,
+                        BlockFlow::Break | BlockFlow::Continue | BlockFlow::Return
+                    )
+                {
+                    return body_flow;
+                }
+            }
+            Stmt::Break(_) => {
+                if in_loop {
+                    return BlockFlow::Break;
+                }
+            }
+            Stmt::Continue(_) => {
+                if in_loop {
+                    return BlockFlow::Continue;
+                }
+            }
             Stmt::Return(ret) => {
                 if let Some(val) = &ret.value {
                     let new_value = match val.as_ref() {
@@ -926,13 +1110,13 @@ fn simulate_function(
                                 .map(|elt| {
                                     infer_expr_shape(
                                         elt,
-                                        &vars,
+                                        vars,
                                         func_map,
                                         imports,
                                         class_map,
                                         call_stack,
-                                        &mut diagnostics,
-                                        &mut hover_entries,
+                                        diagnostics,
+                                        hover_entries,
                                         record_hovers,
                                         source,
                                         module_cache.as_deref_mut(),
@@ -944,13 +1128,13 @@ fn simulate_function(
                         }
                         _ => ReturnValue::from_shape(infer_expr_shape(
                             val,
-                            &vars,
+                            vars,
                             func_map,
                             imports,
                             class_map,
                             call_stack,
-                            &mut diagnostics,
-                            &mut hover_entries,
+                            diagnostics,
+                            hover_entries,
                             record_hovers,
                             source,
                             module_cache.as_deref_mut(),
@@ -967,15 +1151,15 @@ fn simulate_function(
                         ));
                     }
                     if new_value.is_some() {
-                        return_value = new_value;
+                        *return_value = new_value;
                     }
                 }
+                return BlockFlow::Return;
             }
             _ => {}
         }
     }
-
-    (diagnostics, hover_entries, return_value)
+    BlockFlow::None
 }
 
 /// Recursively run static shape inference on an [`Expr`].
