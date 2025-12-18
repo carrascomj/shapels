@@ -1502,9 +1502,13 @@ pub fn infer_range_size(
                 ) {
                     (Ok(s), Ok(e), Ok(ste)) => ((e - s) / ste + plus_one).to_string(),
                     (Ok(s), Ok(e), Err(_)) => {
-                        (e - s).to_string() + format!("/{step}+{plus_one}").as_str()
+                        let plus_one = if plus_one == 0.0 { "" } else { "+1" };
+                        (e - s).to_string() + format!("/{step}{plus_one}").as_str()
                     }
-                    _ => format!("{end}-{start}/{step}+{plus_one}"),
+                    _ => {
+                        let plus_one = if plus_one == 0.0 { "" } else { "+1" };
+                        format!("{end}-{start}/{step}{plus_one}")
+                    }
                 };
                 Some(Cow::Owned(Expr::Name(ast::ExprName {
                     range: call.range,

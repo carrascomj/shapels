@@ -129,7 +129,7 @@ fn range_from_denom_numbers() {
         &src,
         &analysis,
         "some_range_n =",
-        "10/n_instances+0"
+        "10/n_instances"
     ));
     assert!(is_hover_expected(
         &src,
