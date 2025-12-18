@@ -101,6 +101,7 @@ fn range_span(range: &Range, _pos: &Position) -> u32 {
 struct VarState {
     annotated: Option<Shape>,
     inferred: Option<Shape>,
+    class_ref: Option<ClassRef>,
 }
 
 /// Output of [`simulate_function`], such that return type
@@ -156,6 +157,20 @@ struct FunctionInfo {
 
 type FuncMap = HashMap<Identifier, FunctionInfo>;
 
+#[derive(Debug, Clone)]
+struct ClassRef {
+    name: Identifier,
+    module: Option<String>,
+}
+
+#[derive(Clone)]
+struct ClassInfo {
+    is_torch_module: bool,
+    forward: Option<FunctionInfo>,
+}
+
+type ClassMap = HashMap<Identifier, ClassInfo>;
+
 #[derive(Default, Clone)]
 struct Imports {
     torch_aliases: HashSet<Identifier>,
@@ -173,6 +188,7 @@ pub(crate) struct CachedModule {
     source: String,
     func_map: FuncMap,
     imports: Imports,
+    class_map: ClassMap,
 }
 
 pub(crate) struct ModuleCache {
@@ -204,11 +220,13 @@ impl ModuleCache {
         let imports = collect_imports(&module, Some(&path), self.project_root());
         let mut func_map: FuncMap = HashMap::new();
         collect_function_defs(&module, &mut func_map);
+        let class_map = collect_class_defs(&module, &imports);
         let cached = CachedModule {
             path,
             source,
             func_map,
             imports,
+            class_map,
         };
         self.modules.insert(module_name.to_string(), cached.clone());
         Some(cached)
@@ -385,6 +403,7 @@ fn analyze_source_internal<'a>(
             // collect function definitions first
             let mut func_map: FuncMap = HashMap::new();
             collect_function_defs(&module, &mut func_map);
+            let class_map = collect_class_defs(&module, &imports);
 
             // analyze top-level statements (outside functions)
             let empty_args = Arguments {
@@ -404,6 +423,7 @@ fn analyze_source_internal<'a>(
                 source,
                 &func_map,
                 &imports,
+                &class_map,
                 &mut Vec::new(),
                 HashMap::new(),
                 true,
@@ -418,6 +438,7 @@ fn analyze_source_internal<'a>(
                 source,
                 &func_map,
                 &imports,
+                &class_map,
                 &mut analysis,
                 module_cache.as_deref_mut(),
                 current_path,
@@ -455,6 +476,108 @@ fn collect_function_defs(body: &[Stmt], func_map: &mut FuncMap) {
     }
 }
 
+struct ClassDefInfo {
+    forward: Option<FunctionInfo>,
+    base_names: Vec<Identifier>,
+    direct_torch: bool,
+}
+
+fn is_torch_nn_module_base(expr: &Expr, imports: &Imports) -> bool {
+    let Expr::Attribute(attr) = expr else {
+        return false;
+    };
+    if attr.attr.as_str() != "Module" {
+        return false;
+    }
+    match attr.value.as_ref() {
+        Expr::Attribute(nn_attr) if nn_attr.attr.as_str() == "nn" => {
+            if let Expr::Name(torch_name) = nn_attr.value.as_ref() {
+                return imports.torch_aliases.contains(&torch_name.id);
+            }
+            false
+        }
+        Expr::Name(nn_name) => imports
+            .module_aliases
+            .get(&nn_name.id)
+            .map(|module| module == "torch.nn")
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
+    let mut defs: HashMap<Identifier, ClassDefInfo> = HashMap::new();
+    for stmt in body {
+        if let Stmt::ClassDef(class_def) = stmt {
+            let forward = class_def.body.iter().find_map(|stmt| {
+                if let Stmt::FunctionDef(func) = stmt
+                    && func.name.as_str() == "forward"
+                {
+                    Some(FunctionInfo {
+                        args: func.args.clone(),
+                        body: func.body.clone(),
+                        returns: func.returns.clone(),
+                    })
+                } else {
+                    None
+                }
+            });
+            let base_names = class_def
+                .bases
+                .iter()
+                .filter_map(|base| match base {
+                    Expr::Name(name) => Some(name.id.clone()),
+                    _ => None,
+                })
+                .collect();
+            let direct_torch = class_def
+                .bases
+                .iter()
+                .any(|base| is_torch_nn_module_base(base, imports));
+            defs.insert(
+                class_def.name.clone(),
+                ClassDefInfo {
+                    forward,
+                    base_names,
+                    direct_torch,
+                },
+            );
+        }
+    }
+
+    let mut is_torch: HashMap<Identifier, bool> = defs
+        .iter()
+        .map(|(name, info)| (name.clone(), info.direct_torch))
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (name, info) in defs.iter() {
+            if !is_torch.get(name).copied().unwrap_or(false)
+                && info
+                    .base_names
+                    .iter()
+                    .any(|base| is_torch.get(base).copied().unwrap_or(false))
+            {
+                is_torch.insert(name.clone(), true);
+                changed = true;
+            }
+        }
+    }
+
+    let mut class_map = HashMap::new();
+    for (name, info) in defs {
+        class_map.insert(
+            name.clone(),
+            ClassInfo {
+                is_torch_module: is_torch.get(&name).copied().unwrap_or(false),
+                forward: info.forward,
+            },
+        );
+    }
+    class_map
+}
+
 /// Iterate over the function and classes of a module `body`.
 ///
 /// The base case is a function, where shape inference is run. For classes,
@@ -464,6 +587,7 @@ fn analyze_function_bodies(
     source: &str,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     analysis: &mut Analysis,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
@@ -477,6 +601,7 @@ fn analyze_function_bodies(
                     source,
                     func_map,
                     imports,
+                    class_map,
                     &mut Vec::new(),
                     module_cache.as_deref_mut(),
                     module_path,
@@ -491,6 +616,7 @@ fn analyze_function_bodies(
                 source,
                 func_map,
                 imports,
+                class_map,
                 analysis,
                 module_cache.as_deref_mut(),
                 module_path,
@@ -506,6 +632,7 @@ fn analyze_function(
     source: &str,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
@@ -516,6 +643,7 @@ fn analyze_function(
         source,
         func_map,
         imports,
+        class_map,
         call_stack,
         HashMap::new(),
         true,
@@ -530,13 +658,13 @@ fn analyze_function(
 }
 
 /// Run static shape inference on assignments and return types.
-#[allow(clippy::too_many_arguments)]
 fn simulate_function(
     args: &Arguments,
     body: &[Stmt],
     source: &str,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     mut initial_vars: HashMap<Identifier, VarState>,
     record_hovers: bool,
@@ -595,6 +723,7 @@ fn simulate_function(
                                 &vars,
                                 func_map,
                                 imports,
+                                class_map,
                                 call_stack,
                                 &mut diagnostics,
                                 &mut hover_entries,
@@ -623,6 +752,7 @@ fn simulate_function(
                                 VarState {
                                     annotated: ann_shape.clone(),
                                     inferred: Some(renamed.clone()),
+                                    class_ref: None,
                                 },
                             );
                             if record_hovers {
@@ -658,11 +788,29 @@ fn simulate_function(
                             VarState {
                                 annotated: ann_shape.clone(),
                                 inferred,
+                                class_ref: None,
                             },
                         );
                         if record_hovers {
                             hover_entries.push((range, HoverInfo { shape: Some(shape) }));
                         }
+                    } else if let Some(val) = &assign.value
+                        && let Some(class_ref) = class_ref_from_constructor_call(
+                            val,
+                            class_map,
+                            imports,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                    {
+                        vars.insert(
+                            name.clone(),
+                            VarState {
+                                annotated: ann_shape.clone(),
+                                inferred: None,
+                                class_ref: Some(class_ref),
+                            },
+                        );
                     }
                 }
             }
@@ -689,6 +837,7 @@ fn simulate_function(
                         &vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         &mut diagnostics,
                         &mut hover_entries,
@@ -708,6 +857,7 @@ fn simulate_function(
                                 VarState {
                                     annotated: None,
                                     inferred: Some(shape.clone()),
+                                    class_ref: None,
                                 },
                             );
                             if record_hovers {
@@ -727,6 +877,7 @@ fn simulate_function(
                         &vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         &mut diagnostics,
                         &mut hover_entries,
@@ -741,11 +892,27 @@ fn simulate_function(
                             VarState {
                                 annotated: None,
                                 inferred: Some(shape.clone()),
+                                class_ref: None,
                             },
                         );
                         if record_hovers {
                             hover_entries.push((range, HoverInfo { shape: Some(shape) }));
                         }
+                    } else if let Some(class_ref) = class_ref_from_constructor_call(
+                        &assign.value,
+                        class_map,
+                        imports,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    ) {
+                        vars.insert(
+                            name.clone(),
+                            VarState {
+                                annotated: None,
+                                inferred: None,
+                                class_ref: Some(class_ref),
+                            },
+                        );
                     }
                 }
             }
@@ -762,6 +929,7 @@ fn simulate_function(
                                         &vars,
                                         func_map,
                                         imports,
+                                        class_map,
                                         call_stack,
                                         &mut diagnostics,
                                         &mut hover_entries,
@@ -779,6 +947,7 @@ fn simulate_function(
                             &vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             &mut diagnostics,
                             &mut hover_entries,
@@ -813,12 +982,12 @@ fn simulate_function(
 ///
 /// This is the central function for inference, it calls the specialized
 /// inference at src/infer.rs depending on type of the expression.
-#[allow(clippy::too_many_arguments)]
 fn infer_expr_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -841,6 +1010,7 @@ fn infer_expr_shape(
                     vars,
                     func_map,
                     imports,
+                    class_map,
                     call_stack,
                     diagnostics,
                     hover_entries,
@@ -862,6 +1032,7 @@ fn infer_expr_shape(
                 vars,
                 func_map,
                 imports,
+                class_map,
                 call_stack,
                 diagnostics,
                 hover_entries,
@@ -878,6 +1049,7 @@ fn infer_expr_shape(
                 vars,
                 func_map,
                 imports,
+                class_map,
                 call_stack,
                 diagnostics,
                 hover_entries,
@@ -905,6 +1077,7 @@ fn infer_expr_shape(
                 vars,
                 func_map,
                 imports,
+                class_map,
                 call_stack,
                 diagnostics,
                 hover_entries,
@@ -924,6 +1097,7 @@ fn infer_expr_shape(
                     vars,
                     func_map,
                     imports,
+                    class_map,
                     call_stack,
                     diagnostics,
                     hover_entries,
@@ -938,6 +1112,25 @@ fn infer_expr_shape(
         }
         Expr::Call(call) => {
             if let Expr::Name(func_name) = call.func.as_ref() {
+                if let Some(class_ref) = vars.get(&func_name.id).and_then(|v| v.class_ref.as_ref())
+                    && let Some(ret) = infer_class_call_return(
+                        call,
+                        class_ref,
+                        vars,
+                        func_map,
+                        imports,
+                        class_map,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    )
+                {
+                    return ret.first().cloned();
+                }
                 let torchop_shape = match (
                     TorchOp::as_call(&func_name.id, imports),
                     call.args.first(),
@@ -949,6 +1142,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -965,6 +1159,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1018,6 +1213,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1032,6 +1228,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1048,6 +1245,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1071,6 +1269,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1086,6 +1285,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1102,6 +1302,7 @@ fn infer_expr_shape(
                                     vars,
                                     func_map,
                                     imports,
+                                    class_map,
                                     call_stack,
                                     diagnostics,
                                     hover_entries,
@@ -1132,6 +1333,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1151,173 +1353,54 @@ fn infer_expr_shape(
                         (module_cache.as_deref_mut(), module_path)
                     && let Some(module) = cache.get_module(module_name, cur_path)
                     && let Some(callee_info) = module.func_map.get(original)
-                {
-                    if call_stack.iter().any(|id| id == &func_name.id) {
-                        return None;
-                    }
-                    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                    for (idx, param) in callee_info.args.args.iter().enumerate() {
-                        if let Some(arg_expr) = call.args.get(idx)
-                            && let Some(shape) = infer_expr_shape(
-                                arg_expr,
-                                vars,
-                                func_map,
-                                imports,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                record_hovers,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            )
-                        {
-                            if let Some(ann) = param
-                                .def
-                                .annotation
-                                .as_deref()
-                                .and_then(parse_shape_annotation)
-                            {
-                                let dims_match = ann.dims.len() == shape.dims.len()
-                                    && shape_dims_equal(&ann, &shape);
-                                if !dims_match {
-                                    diagnostics.push(Diagnostic {
-                                        range: text_range_to_lsp(expr_text_range(arg_expr), source),
-                                        severity: Some(DiagnosticSeverity::ERROR),
-                                        code: None,
-                                        code_description: None,
-                                        source: Some("shapels".into()),
-                                        message: format!(
-                                            "Shape mismatch: annotation {} vs inferred {}",
-                                            ann.render(),
-                                            shape.render()
-                                        ),
-                                        related_information: None,
-                                        tags: None,
-                                        data: None,
-                                    });
-                                }
-                            }
-                            arg_shapes.insert(
-                                param.def.arg.clone(),
-                                VarState {
-                                    annotated: None,
-                                    inferred: Some(shape),
-                                },
-                            );
-                        }
-                    }
-                    if let Some(ret_shape) = callee_info
-                        .returns
-                        .as_deref()
-                        .and_then(parse_shape_annotation)
-                    {
-                        return Some(ret_shape);
-                    }
-                    call_stack.push(func_name.id.clone());
-                    let (mut diag, mut hovers, ret_value) = simulate_function(
-                        callee_info.args.as_ref(),
-                        &callee_info.body,
+                    && let Some(ret) = infer_call_return_from_info(
+                        call,
+                        &func_name.id,
+                        callee_info,
                         &module.source,
                         &module.func_map,
                         &module.imports,
+                        &module.class_map,
+                        vars,
+                        func_map,
+                        imports,
+                        class_map,
                         call_stack,
-                        arg_shapes,
-                        false,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
                         module_cache.as_deref_mut(),
                         Some(module.path.as_path()),
-                    );
-                    diagnostics.append(&mut diag);
-                    if record_hovers {
-                        hover_entries.append(&mut hovers);
-                    }
-                    call_stack.pop();
-                    return ret_value.first().cloned();
+                        0,
+                    )
+                {
+                    return ret.first().cloned();
                 }
-                if let Some(callee_info) = func_map.get(&func_name.id) {
-                    // avoid infinite recursion
-                    if call_stack.iter().any(|id| id == &func_name.id) {
-                        return None;
-                    }
-                    // build argument binding map
-                    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                    for (idx, param) in callee_info.args.args.iter().enumerate() {
-                        if let Some(arg_expr) = call.args.get(idx)
-                            && let Some(shape) = infer_expr_shape(
-                                arg_expr,
-                                vars,
-                                func_map,
-                                imports,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                record_hovers,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            )
-                        {
-                            if let Some(ann) = param
-                                .def
-                                .annotation
-                                .as_deref()
-                                .and_then(parse_shape_annotation)
-                            {
-                                let dims_match = ann.dims.len() == shape.dims.len()
-                                    && shape_dims_equal(&ann, &shape);
-                                if !dims_match {
-                                    diagnostics.push(Diagnostic {
-                                        range: text_range_to_lsp(expr_text_range(arg_expr), source),
-                                        severity: Some(DiagnosticSeverity::ERROR),
-                                        code: None,
-                                        code_description: None,
-                                        source: Some("shapels".into()),
-                                        message: format!(
-                                            "Shape mismatch: annotation {} vs inferred {}",
-                                            ann.render(),
-                                            shape.render()
-                                        ),
-                                        related_information: None,
-                                        tags: None,
-                                        data: None,
-                                    });
-                                }
-                            }
-                            arg_shapes.insert(
-                                param.def.arg.clone(),
-                                VarState {
-                                    annotated: None,
-                                    inferred: Some(shape),
-                                },
-                            );
-                        }
-                    }
-                    if let Some(ret_shape) = callee_info
-                        .returns
-                        .as_deref()
-                        .and_then(parse_shape_annotation)
-                    {
-                        return Some(ret_shape);
-                    }
-                    call_stack.push(func_name.id.clone());
-                    let (mut diag, mut hovers, ret_value) = simulate_function(
-                        callee_info.args.as_ref(),
-                        &callee_info.body,
+                if let Some(callee_info) = func_map.get(&func_name.id)
+                    && let Some(ret) = infer_call_return_from_info(
+                        call,
+                        &func_name.id,
+                        callee_info,
                         source,
                         func_map,
                         imports,
+                        class_map,
+                        vars,
+                        func_map,
+                        imports,
+                        class_map,
                         call_stack,
-                        arg_shapes,
-                        false,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
                         module_cache.as_deref_mut(),
                         module_path,
-                    );
-                    diagnostics.append(&mut diag);
-                    if record_hovers {
-                        hover_entries.append(&mut hovers);
-                    }
-                    call_stack.pop();
-                    return ret_value.first().cloned();
+                        0,
+                    )
+                {
+                    return ret.first().cloned();
                 }
             }
             // methods are functions with attributes
@@ -1330,88 +1413,29 @@ fn infer_expr_shape(
                         (module_cache.as_deref_mut(), module_path)
                     && let Some(module) = cache.get_module(module_name, cur_path)
                     && let Some(callee_info) = module.func_map.get(&attr.attr)
-                {
-                    if call_stack.iter().any(|id| id == &attr.attr) {
-                        return None;
-                    }
-                    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-                    for (idx, param) in callee_info.args.args.iter().enumerate() {
-                        if let Some(arg_expr) = call.args.get(idx)
-                            && let Some(shape) = infer_expr_shape(
-                                arg_expr,
-                                vars,
-                                func_map,
-                                imports,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                record_hovers,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            )
-                        {
-                            if let Some(ann) = param
-                                .def
-                                .annotation
-                                .as_deref()
-                                .and_then(parse_shape_annotation)
-                            {
-                                let dims_match = ann.dims.len() == shape.dims.len()
-                                    && shape_dims_equal(&ann, &shape);
-                                if !dims_match {
-                                    diagnostics.push(Diagnostic {
-                                        range: text_range_to_lsp(expr_text_range(arg_expr), source),
-                                        severity: Some(DiagnosticSeverity::ERROR),
-                                        code: None,
-                                        code_description: None,
-                                        source: Some("shapels".into()),
-                                        message: format!(
-                                            "Shape mismatch: annotation {} vs inferred {}",
-                                            ann.render(),
-                                            shape.render()
-                                        ),
-                                        related_information: None,
-                                        tags: None,
-                                        data: None,
-                                    });
-                                }
-                            }
-                            arg_shapes.insert(
-                                param.def.arg.clone(),
-                                VarState {
-                                    annotated: None,
-                                    inferred: Some(shape),
-                                },
-                            );
-                        }
-                    }
-                    if let Some(ret_shape) = callee_info
-                        .returns
-                        .as_deref()
-                        .and_then(parse_shape_annotation)
-                    {
-                        return Some(ret_shape);
-                    }
-                    call_stack.push(attr.attr.clone());
-                    let (mut diag, mut hovers, ret_value) = simulate_function(
-                        callee_info.args.as_ref(),
-                        &callee_info.body,
+                    && let Some(ret) = infer_call_return_from_info(
+                        call,
+                        &attr.attr,
+                        callee_info,
                         &module.source,
                         &module.func_map,
                         &module.imports,
+                        &module.class_map,
+                        vars,
+                        func_map,
+                        imports,
+                        class_map,
                         call_stack,
-                        arg_shapes,
-                        false,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
                         module_cache.as_deref_mut(),
                         Some(module.path.as_path()),
-                    );
-                    diagnostics.append(&mut diag);
-                    if record_hovers {
-                        hover_entries.append(&mut hovers);
-                    }
-                    call_stack.pop();
-                    return ret_value.first().cloned();
+                        0,
+                    )
+                {
+                    return ret.first().cloned();
                 }
                 // two cases: torch.ATTR_NAME(torch.Tensor, ...) or torch.Tensor.ATTR_NAME(...)
                 let in_torch = is_torch_base(&attr.value, imports);
@@ -1429,6 +1453,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1452,6 +1477,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1474,6 +1500,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1500,6 +1527,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1514,6 +1542,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1530,6 +1559,7 @@ fn infer_expr_shape(
                                     vars,
                                     func_map,
                                     imports,
+                                    class_map,
                                     call_stack,
                                     diagnostics,
                                     hover_entries,
@@ -1561,6 +1591,7 @@ fn infer_expr_shape(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1575,6 +1606,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1607,6 +1639,7 @@ fn infer_expr_shape(
                                 vars,
                                 func_map,
                                 imports,
+                                class_map,
                                 call_stack,
                                 diagnostics,
                                 hover_entries,
@@ -1628,6 +1661,7 @@ fn infer_expr_shape(
                                         vars,
                                         func_map,
                                         imports,
+                                        class_map,
                                         call_stack,
                                         diagnostics,
                                         hover_entries,
@@ -1679,6 +1713,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1714,6 +1749,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1737,6 +1773,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1768,6 +1805,7 @@ fn infer_expr_shape(
             vars,
             func_map,
             imports,
+            class_map,
             call_stack,
             diagnostics,
             hover_entries,
@@ -1788,6 +1826,7 @@ fn infer_expr_shape(
                                 vars,
                                 func_map,
                                 imports,
+                                class_map,
                                 call_stack,
                                 diagnostics,
                                 hover_entries,
@@ -1824,6 +1863,7 @@ fn infer_expr_shape(
                             vars,
                             func_map,
                             imports,
+                            class_map,
                             call_stack,
                             diagnostics,
                             hover_entries,
@@ -1850,12 +1890,12 @@ fn infer_expr_shape(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn infer_tuple_elements(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -1875,6 +1915,7 @@ fn infer_tuple_elements(
                         vars,
                         func_map,
                         imports,
+                        class_map,
                         call_stack,
                         diagnostics,
                         hover_entries,
@@ -1891,6 +1932,7 @@ fn infer_tuple_elements(
             vars,
             func_map,
             imports,
+            class_map,
             call_stack,
             diagnostics,
             hover_entries,
@@ -1904,12 +1946,83 @@ fn infer_tuple_elements(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn infer_defined_call_return(
+fn method_param_offset(args: &Arguments) -> usize {
+    match args.args.first() {
+        Some(param) if param.def.arg.as_str() == "self" => 1,
+        _ => 0,
+    }
+}
+
+fn class_ref_from_constructor_call(
+    call_expr: &Expr,
+    class_map: &ClassMap,
+    imports: &Imports,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ClassRef> {
+    let Expr::Call(call) = call_expr else {
+        return None;
+    };
+    match call.func.as_ref() {
+        Expr::Name(name) => {
+            if let Some(info) = class_map.get(&name.id)
+                && info.is_torch_module
+                && info.forward.is_some()
+            {
+                return Some(ClassRef {
+                    name: name.id.clone(),
+                    module: None,
+                });
+            }
+            if let Some((module_name, original)) = imports.from_imports.get(&name.id)
+                && module_name != "torch"
+                && !module_name.starts_with("torch.")
+                && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
+                && let Some(module) = cache.get_module(module_name, cur_path)
+                && let Some(info) = module.class_map.get(original)
+                && info.is_torch_module
+                && info.forward.is_some()
+            {
+                return Some(ClassRef {
+                    name: original.clone(),
+                    module: Some(module_name.to_string()),
+                });
+            }
+        }
+        Expr::Attribute(attr) => {
+            if let Expr::Name(module_ident) = attr.value.as_ref()
+                && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
+                && module_name != "torch"
+                && !module_name.starts_with("torch.")
+                && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
+                && let Some(module) = cache.get_module(module_name, cur_path)
+                && let Some(info) = module.class_map.get(&attr.attr)
+                && info.is_torch_module
+                && info.forward.is_some()
+            {
+                return Some(ClassRef {
+                    name: attr.attr.clone(),
+                    module: Some(module_name.to_string()),
+                });
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn infer_call_return_from_info(
     call: &ExprCall<TextRange>,
+    callee_name: &Identifier,
+    callee_info: &FunctionInfo,
+    callee_source: &str,
+    callee_func_map: &FuncMap,
+    callee_imports: &Imports,
+    callee_class_map: &ClassMap,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -1917,207 +2030,29 @@ fn infer_defined_call_return(
     source: &str,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
+    param_offset: usize,
 ) -> Option<ReturnValue> {
-    if let Expr::Name(func_name) = call.func.as_ref() {
-        if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
-            && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
-            && let Some(module) = cache.get_module(module_name, cur_path)
-            && let Some(callee_info) = module.func_map.get(original)
-        {
-            if call_stack.iter().any(|id| id == &func_name.id) {
-                return None;
-            }
-            let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-            for (idx, param) in callee_info.args.args.iter().enumerate() {
-                if let Some(arg_expr) = call.args.get(idx)
-                    && let Some(shape) = infer_expr_shape(
-                        arg_expr,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                {
-                    if let Some(ann) = param
-                        .def
-                        .annotation
-                        .as_deref()
-                        .and_then(parse_shape_annotation)
-                    {
-                        let dims_match =
-                            ann.dims.len() == shape.dims.len() && shape_dims_equal(&ann, &shape);
-                        if !dims_match {
-                            diagnostics.push(Diagnostic {
-                                range: text_range_to_lsp(expr_text_range(arg_expr), source),
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                code: None,
-                                code_description: None,
-                                source: Some("shapels".into()),
-                                message: format!(
-                                    "Shape mismatch: annotation {} vs inferred {}",
-                                    ann.render(),
-                                    shape.render()
-                                ),
-                                related_information: None,
-                                tags: None,
-                                data: None,
-                            });
-                        }
-                    }
-                    arg_shapes.insert(
-                        param.def.arg.clone(),
-                        VarState {
-                            annotated: None,
-                            inferred: Some(shape),
-                        },
-                    );
-                }
-            }
-            if let Some(ret_shape) = callee_info
-                .returns
-                .as_deref()
-                .and_then(parse_shape_annotation)
-            {
-                return Some(ReturnValue::from_shape(Some(ret_shape)));
-            }
-            call_stack.push(func_name.id.clone());
-            let (mut diag, mut hovers, ret_value) = simulate_function(
-                callee_info.args.as_ref(),
-                &callee_info.body,
-                &module.source,
-                &module.func_map,
-                &module.imports,
-                call_stack,
-                arg_shapes,
-                false,
-                module_cache.as_deref_mut(),
-                Some(module.path.as_path()),
-            );
-            diagnostics.append(&mut diag);
-            if record_hovers {
-                hover_entries.append(&mut hovers);
-            }
-            call_stack.pop();
-            return Some(ret_value);
-        }
-        if let Some(callee_info) = func_map.get(&func_name.id) {
-            if call_stack.iter().any(|id| id == &func_name.id) {
-                return None;
-            }
-            let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-            for (idx, param) in callee_info.args.args.iter().enumerate() {
-                if let Some(arg_expr) = call.args.get(idx)
-                    && let Some(shape) = infer_expr_shape(
-                        arg_expr,
-                        vars,
-                        func_map,
-                        imports,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                {
-                    if let Some(ann) = param
-                        .def
-                        .annotation
-                        .as_deref()
-                        .and_then(parse_shape_annotation)
-                    {
-                        let dims_match =
-                            ann.dims.len() == shape.dims.len() && shape_dims_equal(&ann, &shape);
-                        if !dims_match {
-                            diagnostics.push(Diagnostic {
-                                range: text_range_to_lsp(expr_text_range(arg_expr), source),
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                code: None,
-                                code_description: None,
-                                source: Some("shapels".into()),
-                                message: format!(
-                                    "Shape mismatch: annotation {} vs inferred {}",
-                                    ann.render(),
-                                    shape.render()
-                                ),
-                                related_information: None,
-                                tags: None,
-                                data: None,
-                            });
-                        }
-                    }
-                    arg_shapes.insert(
-                        param.def.arg.clone(),
-                        VarState {
-                            annotated: None,
-                            inferred: Some(shape),
-                        },
-                    );
-                }
-            }
-            if let Some(ret_shape) = callee_info
-                .returns
-                .as_deref()
-                .and_then(parse_shape_annotation)
-            {
-                return Some(ReturnValue::from_shape(Some(ret_shape)));
-            }
-            call_stack.push(func_name.id.clone());
-            let (mut diag, mut hovers, ret_value) = simulate_function(
-                callee_info.args.as_ref(),
-                &callee_info.body,
-                source,
+    if call_stack.iter().any(|id| id == callee_name) {
+        return None;
+    }
+    let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
+    for (idx, param) in callee_info.args.args.iter().enumerate().skip(param_offset) {
+        let call_idx = idx.saturating_sub(param_offset);
+        if let Some(arg_expr) = call.args.get(call_idx) {
+            if let Some(shape) = infer_expr_shape(
+                arg_expr,
+                vars,
                 func_map,
                 imports,
+                class_map,
                 call_stack,
-                arg_shapes,
-                false,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
                 module_cache.as_deref_mut(),
                 module_path,
-            );
-            diagnostics.append(&mut diag);
-            if record_hovers {
-                hover_entries.append(&mut hovers);
-            }
-            call_stack.pop();
-            return Some(ret_value);
-        }
-    }
-    if let Expr::Attribute(attr) = call.func.as_ref()
-        && let Expr::Name(module_ident) = attr.value.as_ref()
-        && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
-        && module_name != "torch"
-        && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
-        && let Some(module) = cache.get_module(module_name, cur_path)
-        && let Some(callee_info) = module.func_map.get(&attr.attr)
-    {
-        if call_stack.iter().any(|id| id == &attr.attr) {
-            return None;
-        }
-        let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
-        for (idx, param) in callee_info.args.args.iter().enumerate() {
-            if let Some(arg_expr) = call.args.get(idx)
-                && let Some(shape) = infer_expr_shape(
-                    arg_expr,
-                    vars,
-                    func_map,
-                    imports,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                )
-            {
+            ) {
                 if let Some(ann) = param
                     .def
                     .annotation
@@ -2149,36 +2084,239 @@ fn infer_defined_call_return(
                     VarState {
                         annotated: None,
                         inferred: Some(shape),
+                        class_ref: None,
+                    },
+                );
+            } else if let Expr::Name(name) = arg_expr
+                && let Some(class_ref) = vars.get(&name.id).and_then(|v| v.class_ref.clone())
+            {
+                arg_shapes.insert(
+                    param.def.arg.clone(),
+                    VarState {
+                        annotated: None,
+                        inferred: None,
+                        class_ref: Some(class_ref),
                     },
                 );
             }
         }
-        if let Some(ret_shape) = callee_info
-            .returns
-            .as_deref()
-            .and_then(parse_shape_annotation)
-        {
-            return Some(ReturnValue::from_shape(Some(ret_shape)));
+    }
+    if let Some(ret_shape) = callee_info
+        .returns
+        .as_deref()
+        .and_then(parse_shape_annotation)
+    {
+        return Some(ReturnValue::from_shape(Some(ret_shape)));
+    }
+    call_stack.push(callee_name.clone());
+    let (mut diag, mut hovers, ret_value) = simulate_function(
+        callee_info.args.as_ref(),
+        &callee_info.body,
+        callee_source,
+        callee_func_map,
+        callee_imports,
+        callee_class_map,
+        call_stack,
+        arg_shapes,
+        false,
+        module_cache.as_deref_mut(),
+        module_path,
+    );
+    diagnostics.append(&mut diag);
+    if record_hovers {
+        hover_entries.append(&mut hovers);
+    }
+    call_stack.pop();
+    Some(ret_value)
+}
+
+fn infer_class_call_return(
+    call: &ExprCall<TextRange>,
+    class_ref: &ClassRef,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ReturnValue> {
+    match &class_ref.module {
+        Some(module_name) => {
+            let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path) else {
+                return None;
+            };
+            let module = cache.get_module(module_name, cur_path)?;
+            let class_info = module.class_map.get(&class_ref.name)?;
+            let forward = class_info.forward.as_ref()?;
+            let param_offset = method_param_offset(&forward.args);
+            infer_call_return_from_info(
+                call,
+                &class_ref.name,
+                forward,
+                &module.source,
+                &module.func_map,
+                &module.imports,
+                &module.class_map,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                Some(module.path.as_path()),
+                param_offset,
+            )
         }
-        call_stack.push(attr.attr.clone());
-        let (mut diag, mut hovers, ret_value) = simulate_function(
-            callee_info.args.as_ref(),
-            &callee_info.body,
+        None => {
+            let class_info = class_map.get(&class_ref.name)?;
+            let forward = class_info.forward.as_ref()?;
+            let param_offset = method_param_offset(&forward.args);
+            infer_call_return_from_info(
+                call,
+                &class_ref.name,
+                forward,
+                source,
+                func_map,
+                imports,
+                class_map,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+                param_offset,
+            )
+        }
+    }
+}
+
+fn infer_defined_call_return(
+    call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ReturnValue> {
+    if let Expr::Name(func_name) = call.func.as_ref() {
+        if let Some(class_ref) = vars.get(&func_name.id).and_then(|v| v.class_ref.as_ref()) {
+            return infer_class_call_return(
+                call,
+                class_ref,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            );
+        }
+        if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
+            && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
+            && let Some(module) = cache.get_module(module_name, cur_path)
+            && let Some(callee_info) = module.func_map.get(original)
+        {
+            return infer_call_return_from_info(
+                call,
+                &func_name.id,
+                callee_info,
+                &module.source,
+                &module.func_map,
+                &module.imports,
+                &module.class_map,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                Some(module.path.as_path()),
+                0,
+            );
+        }
+        if let Some(callee_info) = func_map.get(&func_name.id) {
+            return infer_call_return_from_info(
+                call,
+                &func_name.id,
+                callee_info,
+                source,
+                func_map,
+                imports,
+                class_map,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+                0,
+            );
+        }
+    }
+    if let Expr::Attribute(attr) = call.func.as_ref()
+        && let Expr::Name(module_ident) = attr.value.as_ref()
+        && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
+        && module_name != "torch"
+        && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
+        && let Some(module) = cache.get_module(module_name, cur_path)
+        && let Some(callee_info) = module.func_map.get(&attr.attr)
+    {
+        return infer_call_return_from_info(
+            call,
+            &attr.attr,
+            callee_info,
             &module.source,
             &module.func_map,
             &module.imports,
+            &module.class_map,
+            vars,
+            func_map,
+            imports,
+            class_map,
             call_stack,
-            arg_shapes,
-            false,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
             module_cache.as_deref_mut(),
             Some(module.path.as_path()),
+            0,
         );
-        diagnostics.append(&mut diag);
-        if record_hovers {
-            hover_entries.append(&mut hovers);
-        }
-        call_stack.pop();
-        return Some(ret_value);
     }
     None
 }
@@ -2188,6 +2326,7 @@ fn tensor_or_shape_as_arg(
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -2204,6 +2343,7 @@ fn tensor_or_shape_as_arg(
             vars,
             func_map,
             imports,
+            class_map,
             call_stack,
             diagnostics,
             hover_entries,
@@ -2218,6 +2358,7 @@ fn tensor_or_shape_as_arg(
             vars,
             func_map,
             imports,
+            class_map,
             call_stack,
             diagnostics,
             hover_entries,
@@ -2452,6 +2593,7 @@ fn assignment_shape_checks(
                 VarState {
                     annotated: None,
                     inferred: Some(new_shape.clone()),
+                    class_ref: None,
                 },
             );
             if record_hovers {
@@ -2486,6 +2628,7 @@ fn assignment_shape_checks(
             VarState {
                 annotated: None,
                 inferred: Some(new_shape.clone()),
+                class_ref: None,
             },
         );
         if record_hovers {
@@ -2620,11 +2763,11 @@ fn seed_args_from_annotations(
             .as_ref()
             .and_then(|expr| parse_shape_annotation(expr.as_ref()));
         let range = text_range_to_lsp(arg.def.range, source);
-        let mut provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg)).cloned();
-
+        let provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg));
         let state = VarState {
             annotated: ann_shape.clone(),
-            inferred: provided_state.take().and_then(|s| s.inferred).or(None),
+            inferred: provided_state.and_then(|s| s.inferred.clone()),
+            class_ref: provided_state.and_then(|s| s.class_ref.clone()),
         };
 
         if state.annotated.is_some() || state.inferred.is_some() {

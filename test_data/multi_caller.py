@@ -67,3 +67,13 @@ from multi_callee import from_zeros_to_tuple
 
 def int_return_tint_return_type_hint_is_returned_as_hoverype_hint_is_returned_as_hover():
     z, (val1, val2) = from_zeros_to_tuple((1, 2))
+
+
+# test 8
+from multi_callee import from_zeros_to_tuple
+from multi_callee import UserLinear
+
+def int_return_tint_return_type_hint_is_returned_as_hoverype_hint_is_returned_as_hover():
+    z, (val1, val2) = from_zeros_to_tuple((1, 2))
+    linear = UserLinear()
+    b = linear(z, z[0].T)

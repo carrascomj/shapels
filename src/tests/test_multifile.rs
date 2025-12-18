@@ -80,6 +80,16 @@ fn multi_file_runs_inference_on_callee_with_complex_tuple_return() {
 }
 
 #[test]
+fn multi_file_runs_inference_on_torch_module_instances() {
+    // analyze entire caller file from disk so relative module resolution works
+    let src = extract_test_case(PY_MULTI_CALLER, 8);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    // no diagnostics expected
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "b =", "B A A"));
+}
+
+#[test]
 fn venv_site_packages_module_resolves() {
     // prepend fake venv bin to PATH
     let bin_path = Path::new("test_data/.venv_fake/bin")

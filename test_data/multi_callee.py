@@ -3,6 +3,12 @@ from jaxtyping import Float as F
 from torch import Tensor as T
 
 
+class UserLinear(torch.nn.Module):
+    def forward(x, y):
+        z = x @ y
+        return z
+
+
 def multiply_child_unnanotated_torch_mm_aliased(x, y):
     mat_mul_result = whatever(x, y)
     return mat_mul_result
