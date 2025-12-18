@@ -683,6 +683,8 @@ fn simulate_function(
         &mut hover_entries,
         Some(&mut initial_vars),
         record_hovers,
+        imports,
+        class_map,
     );
 
     let mut return_value = ReturnValue::default();
@@ -1978,6 +1980,62 @@ fn class_ref_from_constructor_call(
     None
 }
 
+fn class_ref_from_annotation(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> Option<ClassRef> {
+    if let Expr::Name(name) = ann {
+        if let Some(info) = class_map.get(&name.id)
+            && info.is_torch_module
+            && info.forward.is_some()
+        {
+            return Some(ClassRef {
+                name: name.id.clone(),
+                module: None,
+            });
+        }
+        if let Some((module_name, original)) = imports.from_imports.get(&name.id) {
+            return Some(ClassRef {
+                name: original.clone(),
+                module: Some(module_name.clone()),
+            });
+        }
+    }
+    None
+}
+
+fn union_members<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::BinOp(ExprBinOp {
+        left, op, right, ..
+    }) = expr
+        && matches!(op, Operator::BitOr)
+    {
+        union_members(left, out);
+        union_members(right, out);
+    } else {
+        out.push(expr);
+    }
+}
+
+fn shape_or_class_from_union(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> (Option<Shape>, Option<ClassRef>) {
+    let mut members = Vec::new();
+    union_members(ann, &mut members);
+    for member in members {
+        if let Some(shape) = parse_shape_annotation(member) {
+            return (Some(shape), None);
+        }
+        if let Some(class_ref) = class_ref_from_annotation(member, imports, class_map) {
+            return (None, Some(class_ref));
+        }
+    }
+    (None, None)
+}
+
 fn infer_call_return_from_info(
     call: &ExprCall<TextRange>,
     callee_name: &Identifier,
@@ -2733,6 +2791,8 @@ fn seed_args_from_annotations(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     provided: Option<&mut HashMap<Identifier, VarState>>,
     record_hovers: bool,
+    imports: &Imports,
+    class_map: &ClassMap,
 ) {
     for arg in &args.args {
         let ann_shape = arg
@@ -2740,15 +2800,29 @@ fn seed_args_from_annotations(
             .annotation
             .as_ref()
             .and_then(|expr| parse_shape_annotation(expr.as_ref()));
+        let (union_shape, union_class) = arg
+            .def
+            .annotation
+            .as_ref()
+            .map(|ann| shape_or_class_from_union(ann.as_ref(), imports, class_map))
+            .unwrap_or((None, None));
         let range = text_range_to_lsp(arg.def.range, source);
         let provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg));
         let state = VarState {
-            annotated: ann_shape.clone(),
+            annotated: ann_shape.clone().or(union_shape),
             inferred: provided_state.and_then(|s| s.inferred.clone()),
-            class_ref: provided_state.and_then(|s| s.class_ref.clone()),
+            class_ref: provided_state
+                .and_then(|s| s.class_ref.clone())
+                .or_else(|| {
+                    arg.def
+                        .annotation
+                        .as_ref()
+                        .and_then(|ann| class_ref_from_annotation(ann.as_ref(), imports, class_map))
+                })
+                .or(union_class),
         };
 
-        if state.annotated.is_some() || state.inferred.is_some() {
+        if state.annotated.is_some() || state.inferred.is_some() || state.class_ref.is_some() {
             vars.insert(arg.def.arg.clone(), state.clone());
             if record_hovers {
                 hover_entries.push((
