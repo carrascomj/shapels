@@ -1626,6 +1626,7 @@ fn torch_op_to_shape(
             infer_noop(
                 base_hint,
                 get_arg(call, "dim", offset),
+                vars,
                 diagnostics,
                 source,
                 call.range,

@@ -470,8 +470,13 @@ pub fn infer_squeeze(
         )
     })?;
 
-    // No dim specified: squeeze removes ones, sum collapses all dims.
-    if dim_arg.is_none() {
+    let dims_to_remove = if let Some(dim) = dim_arg {
+        match parse_dims(dim, base_shape.dims.len(), vars, diagnostics, source) {
+            Ok(v) => v,
+            Err(_) => return None,
+        }
+    } else {
+        // No dim specified: squeeze removes ones, sum collapses all dims.
         let mut dims = base_shape.dims.clone();
         if enforce_one {
             dims.retain(|d| d != "1");
@@ -482,13 +487,7 @@ pub fn infer_squeeze(
             dtype: base_shape.dtype.clone(),
             dims,
         });
-    }
-
-    let dims_to_remove =
-        match parse_dims(dim_arg.unwrap(), base_shape.dims.len(), diagnostics, source) {
-            Ok(v) => v,
-            Err(_) => return None,
-        };
+    };
 
     let mut dims = base_shape.dims.clone();
     for idx in dims_to_remove.into_iter().rev() {
@@ -589,38 +588,6 @@ fn infer_shallow_shape(
     }
 }
 
-fn expr_to_dim_token(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Constant(c) => match &c.value {
-            ast::Constant::Int(i) => Some(i.to_string()),
-            ast::Constant::Float(i) => Some(i.to_string()),
-            _ => None,
-        },
-        Expr::Name(n) => Some(n.id.to_string()),
-        Expr::BinOp(bin) => {
-            if matches!(bin.op, Operator::Mult) {
-                let l = expr_to_dim_token(&bin.left)?;
-                let r = expr_to_dim_token(&bin.right)?;
-                Some(format!("{l}*{r}"))
-            } else {
-                None
-            }
-        }
-        Expr::UnaryOp(u) => match (u.op, u.operand.as_ref()) {
-            (ast::UnaryOp::USub, Expr::Constant(c)) => {
-                if let ast::Constant::Int(i) = &c.value {
-                    let s = i.to_string();
-                    Some(format!("-{s}"))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn normalize_dim_index_squeeze(idx: i16, len: usize) -> Option<usize> {
     let size = len;
     let adj = if idx >= 0 { idx } else { size as i16 + idx };
@@ -634,10 +601,15 @@ fn normalize_dim_index_squeeze(idx: i16, len: usize) -> Option<usize> {
 fn parse_dims(
     dim_expr: &Expr,
     len: usize,
+    vars: &HashMap<Identifier, VarState>,
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
 ) -> Result<Vec<usize>, ()> {
-    let to_i16 = |e: &Expr| expr_to_dim_token(e).and_then(|s| s.parse::<i16>().ok());
+    let mut has_err = false;
+    let mut to_i16 = |e: &Expr| {
+        expr_to_dim_token(e, vars, diagnostics, source, &mut has_err)
+            .and_then(|s| s.parse::<i16>().ok())
+    };
     let dims_i: Vec<i16> = match dim_expr {
         Expr::Tuple(t) => t.elts.iter().filter_map(to_i16).collect(),
         other => to_i16(other).into_iter().collect(),
@@ -658,7 +630,6 @@ fn parse_dims(
         return Err(());
     }
     let mut out = Vec::new();
-    let mut has_err = false;
     for d in dims_i {
         if let Some(idx) = normalize_dim_index_squeeze(d, len) {
             out.push(idx);
@@ -716,7 +687,8 @@ pub fn infer_unsqueeze(
         module_path,
     );
     let base_shape = base_shape?;
-    let dim = dim_arg.and_then(expr_to_dim_token)?;
+    let dim =
+        dim_arg.and_then(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut false))?;
     let dim_i: i16 = dim.parse().ok()?;
     let idx = normalize_dim_index_unsqueeze(dim_i, base_shape.dims.len())?;
     let mut dims = base_shape.dims.clone();
@@ -752,12 +724,12 @@ pub fn infer_view_like(
         base_hint.or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source));
     let target_tokens = args
         .iter()
-        .filter_map(|e| expr_to_dim_token(e))
+        .filter_map(|e| expr_to_dim_token(e, vars, diagnostics, source, &mut false))
         .collect::<Vec<_>>();
     if target_tokens.is_empty() {
         return None;
     }
-    let res = reshape_dims(base_shape.as_ref(), &target_tokens);
+    let res = reshape_dims(base_shape.as_ref(), target_tokens.as_slice());
     match res {
         Ok(shape) => Some(shape),
         Err(msg) => {
@@ -777,7 +749,7 @@ pub fn infer_view_like(
     }
 }
 
-fn reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String> {
+fn reshape_dims(base: Option<&Shape>, target: &[Cow<str>]) -> Result<Shape, String> {
     let mut tokens = target.to_vec();
     let mut minus_one_idx = None;
     for (i, t) in tokens.iter().enumerate() {
@@ -810,21 +782,21 @@ fn reshape_dims(base: Option<&Shape>, target: &[String]) -> Result<Shape, String
             } else {
                 remaining.join("*")
             };
-            tokens[idx] = inferred;
+            tokens[idx] = Cow::Owned(inferred);
         }
         return Ok(Shape {
             dtype: base_shape.dtype.clone(),
-            dims: tokens,
+            dims: tokens.into_iter().map(|c| c.into_owned()).collect(),
         });
     }
 
     // No base shape: still return with -1 replaced by "Infer"
     if let Some(idx) = minus_one_idx {
-        tokens[idx] = "Infer".to_string();
+        tokens[idx] = Cow::Borrowed("Infer");
     }
     Ok(Shape {
         dtype: None,
-        dims: tokens,
+        dims: tokens.into_iter().map(|c| c.into_owned()).collect(),
     })
 }
 
@@ -1181,14 +1153,16 @@ pub fn infer_permute(
 pub fn infer_noop(
     base_expr: Option<Shape>,
     dim_arg: Option<&Expr>,
+    vars: &HashMap<Identifier, VarState>,
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
     whole_range: TextRange,
     enforce_dim: bool,
 ) -> Option<Shape> {
+    let mut diag_already = false;
     base_expr.filter(|shape| {
         let Some(Ok(dim_i)) = dim_arg
-            .and_then(expr_to_dim_token)
+            .and_then(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut diag_already))
             .map(|x| x.parse::<i16>())
         else {
             // for softmax at least, dim is always necessary since
@@ -1264,108 +1238,7 @@ pub fn infer_creation_size(
     // TODO(carrascomj): refactor into function
     let vec_dims: Vec<Option<Cow<_>>> = list
         .iter()
-        .map(|x| match x {
-            Expr::Name(name) => Some(Cow::Borrowed(name.id.as_str())),
-            Expr::Constant(constant) => match &constant.value {
-                Constant::Str(s) => Some(Cow::Borrowed(s.as_str())),
-                Constant::Int(int) => Some(Cow::Owned(int.to_string())),
-                _ => {
-                    if !diag_already {
-                        diagnostics.push(Diagnostic {
-                            range: text_range_to_lsp(constant.range, source),
-                            severity: Some(DiagnosticSeverity::INFORMATION),
-                            code: None,
-                            code_description: None,
-                            source: Some("shapels".into()),
-                            message: "Shape could not be initialized from this dim".into(),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
-                        diag_already = true;
-                    }
-                    None
-                }
-            },
-            // e.g., torch.zeros(x.shape[int])
-            Expr::Subscript(ExprSubscript { value, slice, .. }) => {
-                if let (Expr::Attribute(attr), Expr::Constant(c)) = (value.as_ref(), slice.as_ref())
-                    && let Expr::Name(name) = attr.value.as_ref()
-                    && let Constant::Int(i) = &c.value
-                    && let Ok(idx) = usize::try_from(i)
-                    && attr.attr.as_str() == "shape"
-                {
-                    let shape = vars
-                        .get(&name.id)
-                        .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
-                    shape.and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Owned(dim.clone())))
-                } else {
-                    diagnostics.push(Diagnostic {
-                        range: text_range_to_lsp(expr_text_range(x), source),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        code: None,
-                        code_description: None,
-                        source: Some("shapels".into()),
-                        message: "Shape could not be initialized from this argument".into(),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    });
-                    None
-                }
-            }
-            // e.g., torch.zeros(x.size(int))
-            Expr::Call(ExprCall {
-                func,
-                args,
-                keywords,
-                ..
-            }) => {
-                if let (true, [arg0], Expr::Attribute(attr)) =
-                    (keywords.is_empty(), args.as_slice(), func.as_ref())
-                    && attr.attr.as_str() == "size"
-                    && let Expr::Name(name) = attr.value.as_ref()
-                    && let Expr::Constant(c) = arg0
-                    && let Constant::Int(i) = &c.value
-                    && let Ok(idx) = usize::try_from(i)
-                {
-                    let shape = vars
-                        .get(&name.id)
-                        .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
-                    shape.and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Owned(dim.clone())))
-                } else {
-                    diagnostics.push(Diagnostic {
-                        range: text_range_to_lsp(expr_text_range(x), source),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        code: None,
-                        code_description: None,
-                        source: Some("shapels".into()),
-                        message: "Shape could not be initialized from this argument".into(),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    });
-                    None
-                }
-            }
-            expr => {
-                if !diag_already {
-                    diagnostics.push(Diagnostic {
-                        range: text_range_to_lsp(expr_text_range(expr), source),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        code: None,
-                        code_description: None,
-                        source: Some("shapels".into()),
-                        message: "Shape could not be initialized from this expression".into(),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    });
-                    diag_already = true;
-                }
-                None
-            }
-        })
+        .map(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut diag_already))
         .collect();
 
     let maybe_dims: Option<Vec<String>> = vec_dims
@@ -1396,6 +1269,137 @@ pub fn infer_creation_size(
             })
         },
     )
+}
+
+/// An expr that is to be resolved as a dimension like variadic args of
+/// `torch.zeros(8, x.shape[1], Batch, 10*Feat)`.
+fn expr_to_dim_token<'a>(
+    x: &'a Expr,
+    vars: &'a HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &'a str,
+    diag_already: &mut bool,
+) -> Option<Cow<'a, str>> {
+    match x {
+        Expr::Name(name) => Some(Cow::Borrowed(name.id.as_str())),
+        Expr::Constant(constant) => match &constant.value {
+            Constant::Int(int) => Some(Cow::Owned(int.to_string())),
+            // float is needed for ranges' steps but it's not valid for most dims
+            Constant::Float(float) => Some(Cow::Owned(float.to_string())),
+            _ => {
+                if !*diag_already {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(constant.range, source),
+                        severity: Some(DiagnosticSeverity::INFORMATION),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: "Shape could not be understand this dim".into(),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                    *diag_already = true;
+                }
+                None
+            }
+        },
+        Expr::BinOp(bin) => {
+            if matches!(bin.op, Operator::Mult) {
+                let l = expr_to_dim_token(&bin.left, vars, diagnostics, source, diag_already)?;
+                let r = expr_to_dim_token(&bin.right, vars, diagnostics, source, diag_already)?;
+                Some(Cow::Owned(format!("{l}*{r}")))
+            } else {
+                None
+            }
+        }
+        Expr::UnaryOp(u) => match u.op {
+            ast::UnaryOp::USub => {
+                expr_to_dim_token(u.operand.as_ref(), vars, diagnostics, source, diag_already)
+                    .map(|s| Cow::Owned(format!("-{s}")))
+            }
+            ast::UnaryOp::UAdd => {
+                expr_to_dim_token(u.operand.as_ref(), vars, diagnostics, source, diag_already)
+            }
+            _ => None,
+        },
+        // e.g., torch.zeros(x.shape[int])
+        Expr::Subscript(ExprSubscript { value, slice, .. }) => {
+            if let (Expr::Attribute(attr), Expr::Constant(c)) = (value.as_ref(), slice.as_ref())
+                && let Expr::Name(name) = attr.value.as_ref()
+                && let Constant::Int(i) = &c.value
+                && let Ok(idx) = usize::try_from(i)
+                && attr.attr.as_str() == "shape"
+            {
+                vars.get(&name.id)
+                    .and_then(|v| v.annotated.as_ref().or_else(|| v.inferred.as_ref()))
+                    .and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())))
+            } else {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(x), source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Dim was not understood from this argument".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                None
+            }
+        }
+        // e.g., torch.zeros(x.size(int))
+        Expr::Call(ExprCall {
+            func,
+            args,
+            keywords,
+            ..
+        }) => {
+            if let (true, [arg0], Expr::Attribute(attr)) =
+                (keywords.is_empty(), args.as_slice(), func.as_ref())
+                && attr.attr.as_str() == "size"
+                && let Expr::Name(name) = attr.value.as_ref()
+                && let Expr::Constant(c) = arg0
+                && let Constant::Int(i) = &c.value
+                && let Ok(idx) = usize::try_from(i)
+            {
+                vars.get(&name.id)
+                    .and_then(|v| v.annotated.as_ref().or_else(|| v.inferred.as_ref()))
+                    .and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())))
+            } else {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(x), source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Dim was not understood from this argument".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                None
+            }
+        }
+        expr => {
+            if !*diag_already {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(expr), source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Dim was not understood from this expression".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                *diag_already = true;
+            }
+            None
+        }
+    }
 }
 
 /// `torch.Tensor.to` changes the dtype.
@@ -1486,7 +1490,10 @@ pub fn infer_range_size(
 
             let arg_tuple: [Option<String>; 3] = std::array::from_fn(|i| {
                 get_arg(call, names[i], i)
-                    .and_then(expr_to_dim_token)
+                    .and_then(|expr| {
+                        expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
+                            .map(Cow::into_owned)
+                    })
                     .or_else(|| defaults[i].clone())
             });
             if let [Some(start), Some(end), Some(step)] = arg_tuple {
@@ -1521,7 +1528,7 @@ pub fn infer_range_size(
         }
     }
     .as_deref()
-    .and_then(expr_to_dim_token)
+    .and_then(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut false))
     .or_else(|| {
         push_diag(
             diagnostics,
@@ -1553,10 +1560,8 @@ pub fn infer_range_size(
             };
             attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
         });
-        Some(Shape {
-            dtype,
-            dims: vec![dim],
-        })
+        let dims = vec![dim.into_owned()];
+        Some(Shape { dtype, dims })
     } else {
         None
     }
