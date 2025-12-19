@@ -43,3 +43,22 @@ fn module_as_fn_arg_with_tensor_as_union_arg_is_resolved_to_its_forward_function
     assert!(is_hover_expected(&src, &analysis, "output =", "B X O"));
     assert!(is_hover_expected(&src, &analysis, "alias_x =", "B X R"));
 }
+
+#[test]
+fn module_improper_is_resolved_to_its_forward_type_hints() {
+    let src = extract_test_case(PY_DATA, 6);
+    let analysis = analyze_source(&src);
+    // 1 diagnostic inside the callee class, but not at the caller!
+    assert_eq!(analysis.diagnostics.len(), 1);
+    assert!(is_hover_expected(&src, &analysis, "output =", "B X O"));
+}
+
+#[test]
+fn module_improper_is_resolved_to_its_forward_tuple_type_hints() {
+    let src = extract_test_case(PY_DATA, 7);
+    let analysis = analyze_source(&src);
+    // 1 diagnostic inside the callee class, but not at the caller!
+    assert_eq!(analysis.diagnostics.len(), 1);
+    assert!(is_hover_expected(&src, &analysis, "output,", "B X O"));
+    assert!(is_hover_expected(&src, &analysis, "output2 =", "B O O"));
+}

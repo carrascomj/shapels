@@ -2029,15 +2029,52 @@ fn shape_or_class_from_union(
 ) -> (Option<Shape>, Option<ClassRef>) {
     let mut members = Vec::new();
     union_members(ann, &mut members);
-    for member in members {
-        if let Some(shape) = parse_shape_annotation(member) {
-            return (Some(shape), None);
+    members
+        .into_iter()
+        .find_map(|member| {
+            parse_shape_annotation(member)
+                .map(|shape| (Some(shape), None))
+                .or_else(|| {
+                    class_ref_from_annotation(member, imports, class_map)
+                        .map(|class_ref| (None, Some(class_ref)))
+                })
+        })
+        .unwrap_or((None, None))
+}
+
+fn tuple_shapes_from_annotation(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> Option<Vec<Option<Shape>>> {
+    let elements: Vec<&Expr> = match ann {
+        Expr::Tuple(t) => t.elts.iter().collect(),
+        Expr::Subscript(sub) => {
+            let is_tuple = name_like(&sub.value)
+                .map(|n| n.eq_ignore_ascii_case("tuple"))
+                .unwrap_or(false);
+            if !is_tuple {
+                return None;
+            }
+            match &*sub.slice {
+                Expr::Tuple(t) => t.elts.iter().collect(),
+                other => vec![other],
+            }
         }
-        if let Some(class_ref) = class_ref_from_annotation(member, imports, class_map) {
-            return (None, Some(class_ref));
-        }
+        _ => return None,
+    };
+    let tuple_shapes: Vec<Option<Shape>> = elements
+        .iter()
+        .map(|elt| {
+            parse_shape_annotation(elt)
+                .or_else(|| shape_or_class_from_union(elt, imports, class_map).0)
+        })
+        .collect();
+    if tuple_shapes.iter().any(|s| s.is_some()) {
+        Some(tuple_shapes)
+    } else {
+        None
     }
-    (None, None)
 }
 
 fn infer_call_return_from_info(
@@ -2130,12 +2167,17 @@ fn infer_call_return_from_info(
             }
         }
     }
-    if let Some(ret_shape) = callee_info
-        .returns
-        .as_deref()
-        .and_then(parse_shape_annotation)
-    {
-        return Some(ReturnValue::from_shape(Some(ret_shape)));
+    if let Some(ret_ann) = callee_info.returns.as_deref() {
+        if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
+            return Some(ReturnValue::from_shape(Some(ret_shape)));
+        }
+        if let Some(tuple_shapes) = tuple_shapes_from_annotation(ret_ann, imports, class_map) {
+            return Some(ReturnValue::from_tuple(tuple_shapes));
+        }
+        let (shape_union, _) = shape_or_class_from_union(ret_ann, imports, class_map);
+        if shape_union.is_some() {
+            return Some(ReturnValue::from_shape(shape_union));
+        }
     }
     call_stack.push(callee_name.clone());
     let (mut diag, mut hovers, ret_value) = simulate_function(

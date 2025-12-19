@@ -81,3 +81,43 @@ def function_with_union_tensor_arg(linear: UserLinearAsArg, x: None | F[T, "B X 
     bad_y = torch.ones(U, W)
     output = linear(alias_x, y)
     output2 = linear(alias_x, bad_y)
+
+
+# test 6
+import torch
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+class UserLinearWrongButAnn(torch.nn.Module):
+    """The forward function is wrong but shapels will resolve to `B X O` at the caller site."""
+    def forward(x: F[T, "B X R"], y: F[T, "R O"]) -> F[T, "B X O"] | None:
+        z = x @ y.T
+        return z
+
+
+def call_type_hinted_but_wrong_forward(linear: UserLinearWrongButAnn, x: F[T, "B X R"]):
+    R, O, U, W = 27, 81, 243, 729
+    y = torch.ones(R, O)
+    # output should have shape [B, X, O]: F nonetheless
+    output = linear(x, y)
+
+
+
+# test 7
+import torch
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+class UserLinearWrongButAnnTuple(torch.nn.Module):
+    """The forward function is wrong but shapels will resolve to (`B X O`, `B O O`) at the caller site."""
+    def forward(x: F[T, "B X R"], y: F[T, "R O"]) -> tuple[F[T, "B X O"] | None, F[T, "B O O"]]:
+        z = x @ y.T
+        return z, z
+
+
+def call_type_hinted_but_wrong_forward(linear: UserLinearWrongButAnnTuple, x: F[T, "B X R"]):
+    R, O, U, W = 27, 81, 243, 729
+    y = torch.ones(R, O)
+    # output should have shape [B, X, O]: F nonetheless
+    # output2 should have shape [B, O, O]: F nonetheless
+    output, output2 = linear(x, y)
