@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 mod infer;
 pub mod op_groups;
 use crate::infer::{
-    ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_creation_size, infer_index,
-    infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_squeeze, infer_to,
-    infer_unsqueeze, infer_view_like, shape_dims_equal,
+    ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_conv, infer_creation_size,
+    infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_squeeze,
+    infer_to, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
@@ -174,6 +174,8 @@ type ClassMap = HashMap<Identifier, ClassInfo>;
 #[derive(Default, Clone)]
 struct Imports {
     torch_aliases: HashSet<Identifier>,
+    // e.g., `import torch.nn.functional as F`
+    torch_nn_functional_aliases: HashSet<Identifier>,
     /// Maps simple function name (e.g., "mm") to all aliases in scope.
     func_aliases: HashMap<&'static str, HashSet<Identifier>>,
     /// Module alias mapping for `import foo as bar` style.
@@ -1854,6 +1856,10 @@ fn torch_op_to_shape(
                 module_path,
             )
         }
+        (TorchOp::Conv(d), Some(base), _, Function) => {
+            let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;
+            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_conv(shape, kernel.dims, call, d, diagnostics, source))
+        }
         (TorchOp::Unknown, _, _, Function) => {
             // TODO(carrascomj): check if emitting diagnostics here
             // is not too annoying
@@ -2476,7 +2482,11 @@ enum TorchOpKind {
 
 fn function_or_method<R>(expr: &Expr<R>, imports: &Imports) -> TorchOpKind {
     match expr {
-        Expr::Name(n) if n.id.as_str() == "torch" || imports.torch_aliases.contains(&n.id) => {
+        Expr::Name(n)
+            if n.id.as_str() == "torch"
+                || imports.torch_aliases.contains(&n.id)
+                || imports.torch_nn_functional_aliases.contains(&n.id) =>
+        {
             TorchOpKind::Function
         }
         _ => TorchOpKind::Method,
@@ -2510,7 +2520,7 @@ fn collect_imports(
     // seed known function names
     for fname in [
         "mm", "view", "reshape", "sum", "permute", "t", "softmax", "Tensor", "randperm",
-        "linspace", "logspace", "arange", "range", "to",
+        "linspace", "logspace", "arange", "range", "to", "conv1d", "conv2d", "conv3d",
     ] {
         imports
             .func_aliases
@@ -2520,6 +2530,9 @@ fn collect_imports(
     imports
         .torch_aliases
         .insert(Identifier::from("torch".to_string()));
+    imports
+        .torch_nn_functional_aliases
+        .insert(Identifier::from("torch.nn.functional".to_string()));
 
     for stmt in module {
         match stmt {
@@ -2535,6 +2548,8 @@ fn collect_imports(
                         .insert(as_id.clone(), name.to_string());
                     if name == "torch" {
                         imports.torch_aliases.insert(as_id.clone());
+                    } else if name == "torch.nn.functional" {
+                        imports.torch_nn_functional_aliases.insert(as_id.clone());
                     }
                     if let Some(val) = imports.func_aliases.get_mut(name) {
                         val.insert(as_id);
@@ -2546,7 +2561,7 @@ fn collect_imports(
             Stmt::ImportFrom(f) => {
                 let resolved_module = resolve_from_module(f, module_path, project_root);
                 if let Some(module) = &resolved_module
-                    && module == "torch"
+                    && (module == "torch" || module == "torch.nn.functional")
                 {
                     for alias in &f.names {
                         let name = alias.name.as_str();

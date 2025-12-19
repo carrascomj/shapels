@@ -35,6 +35,8 @@ pub enum TorchOp {
     Squeeze,
     /// `torch.Tensor.expand`
     Expand,
+    /// Conv1d, Conv2d, Conv3d
+    Conv(usize),
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -58,6 +60,12 @@ impl TorchOp {
             Self::Squeeze
         } else if attr_name == "expand" {
             Self::Expand
+        } else if attr_name == "conv1d" {
+            Self::Conv(1)
+        } else if attr_name == "conv2d" {
+            Self::Conv(2)
+        } else if attr_name == "conv3d" {
+            Self::Conv(3)
         } else if AGGR_ALIASES.contains(attr_name) {
             Self::Aggr
         } else if NOOP_DIM_ALIASES.contains(attr_name) {
@@ -104,6 +112,12 @@ impl TorchOp {
             Self::Squeeze
         } else if is_alias_of("sum", func_name_id, imports) {
             Self::Aggr
+        } else if is_alias_of("conv1d", func_name_id, imports) {
+            Self::Conv(1)
+        } else if is_alias_of("conv2d", func_name_id, imports) {
+            Self::Conv(2)
+        } else if is_alias_of("conv3d", func_name_id, imports) {
+            Self::Conv(3)
         } else if is_alias_of("softmax", func_name_id, imports) {
             Self::NoopDim
         } else if is_alias_of("noop", func_name_id, imports) {

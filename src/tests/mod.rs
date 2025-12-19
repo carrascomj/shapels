@@ -8,6 +8,7 @@ use shapels::Analysis;
 mod test_aggr;
 mod test_branch;
 mod test_class;
+mod test_conv;
 mod test_dtype;
 mod test_index;
 mod test_multifile;

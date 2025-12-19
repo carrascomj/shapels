@@ -1610,3 +1610,154 @@ pub fn infer_range_size(
         None
     }
 }
+
+pub fn infer_conv(
+    base: Shape,
+    kernel: Vec<String>,
+    call: &ExprCall,
+    conv_dim: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    let n_dims = base.dims.len();
+    let n_k_dims = kernel.len();
+    let incorrect_input = n_dims - conv_dim > 2 || n_dims - conv_dim < 1;
+    let incorrect_kernel = n_k_dims - conv_dim > 2 || n_k_dims - conv_dim < 1;
+    if incorrect_input || incorrect_kernel {
+        let (incorrect_dims, tensor_msg) = if !incorrect_input {
+            (n_dims, "Input tensor")
+        } else {
+            (n_k_dims, "Kernel")
+        };
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(call.range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!(
+                "{tensor_msg} has incorrect dims for conv{conv_dim}d: {} ∉ {{{},{}}}",
+                incorrect_dims,
+                conv_dim + 1,
+                conv_dim + 2
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    } else if (n_k_dims - n_dims) > 1 {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(call.range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!(
+                "Input and kernel dimensions do not match: {n_k_dims} - {n_dims} > 1",
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+    let out_channels = &kernel[0];
+    let stride = get_arg(call, "stride", 3)
+        .and_then(expr_to_tuple)
+        .unwrap_or(vec!["1".to_string(); conv_dim]);
+    let padding = get_arg(call, "padding", 4)
+        .and_then(expr_to_tuple)
+        .unwrap_or(vec!["0".to_string(); conv_dim]);
+    let dilation = get_arg(call, "dilation", 5)
+        .and_then(expr_to_tuple)
+        .unwrap_or(vec!["1".to_string(); conv_dim]);
+    let pos = n_dims - conv_dim;
+    Some(Shape {
+        dtype: base.dtype,
+        dims: base
+            .dims
+            .into_iter()
+            .enumerate()
+            .map(|(i, dim)| {
+                if i == (pos - 1) {
+                    out_channels.clone()
+                } else if i >= pos {
+                    let spatial_i = i - pos;
+                    let kernel_size = &kernel[2 + spatial_i];
+                    let stride = stride.get(spatial_i).unwrap_or(&stride[0]);
+                    let padding = padding.get(spatial_i).unwrap_or(&padding[0]);
+                    let dilation = dilation.get(spatial_i).unwrap_or(&dilation[0]);
+                    match (
+                        dim.parse::<i32>(),
+                        kernel_size.parse::<i32>(),
+                        stride.parse::<i32>(),
+                        padding.parse::<i32>(),
+                        dilation.parse::<i32>(),
+                    ) {
+                        (Ok(n), Ok(k), Ok(s), Ok(p), Ok(d)) => {
+                            (((n + 2 * p - d * (k - 1) - 1) / s) + 1).to_string()
+                        }
+                        (Err(_), Ok(k), Ok(s), Ok(p), Ok(d)) => {
+                            format!("({dim}+{})/{s}+1", 2 * p - d * (k - 1) - 1)
+                        }
+                        (Ok(n), Ok(k), Err(_), Ok(p), Ok(d)) => {
+                            format!("{}/{stride}+1", (n + 2 * p - d * (k - 1) - 1))
+                        }
+                        (Err(_), Ok(k), Err(_), Ok(p), Ok(d)) => {
+                            let num = 2 * p - d * (k - 1) - 1;
+                            format!("({dim}+{})/{stride}+1", num)
+                        }
+                        (_, Ok(k), Err(_), Err(_), Ok(d)) => {
+                            // can't compute the numerator fully, but still keep it grouped
+                            format!("({dim}+2*{padding}-{})/{stride}+1", d * (k - 1) - 1)
+                        }
+                        (Ok(n), Err(_), _, Err(_), Err(_)) => {
+                            // can't compute the numerator fully, but still keep it grouped
+                            format!(
+                                "({}+2*{padding}-{dilation}*({kernel_size}-1))/{stride}+1",
+                                n - 1
+                            )
+                        }
+                        (Ok(n), Ok(k), _, Err(_), Err(_)) => {
+                            // can't compute the numerator fully, but still keep it grouped
+                            format!("({}+2*{padding}-{dilation}*{})/{stride}+1", n - 1, k - 1)
+                        }
+                        _ => {
+                            format!(
+                                "(({dim}+2*{padding}-{dilation}*({kernel_size}-1)-1)/{stride})+1"
+                            )
+                        }
+                    }
+                } else {
+                    dim
+                }
+            })
+            .collect(),
+    })
+}
+
+// TODO(carrascomj): make this more robust by piggybacking on expr_to_dim_token
+fn expr_to_tuple(expr: &Expr) -> Option<Vec<String>> {
+    match expr {
+        Expr::Name(n) => Some(vec![n.id.to_string()]),
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::Int(i) => Some(vec![i.to_string()]),
+            _ => None,
+        },
+        Expr::Tuple(tup) => Some(
+            tup.elts
+                .iter()
+                .map(|x| match x {
+                    Expr::Constant(c) => match &c.value {
+                        ast::Constant::Int(i) => i.to_string(),
+                        _ => "".to_string(),
+                    },
+                    Expr::Name(n) => n.id.to_string(),
+                    _ => "".to_string(),
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
