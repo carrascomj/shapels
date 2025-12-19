@@ -22,7 +22,7 @@ pub enum TorchOp {
     /// Tensor initialization from a range: `tensor.arange`, `tensor.linspace`, etc.
     RangeOp(RangeOps),
     /// Only change the dtype.
-    NoArg { can_be_function: bool },
+    NoArg { predef_dtype: Option<&'static str> },
     /// Element-wise, broadcastable operations: `torch.mul`, `torch.eq`, etc..
     Broadcastable(BroadcastOp),
     /// `torch.view` and `torch.reshape`
@@ -72,7 +72,10 @@ impl TorchOp {
             Self::RangeOp(op)
         } else if TO_NOARG_ALIASES.contains(attr_name) {
             Self::NoArg {
-                can_be_function: attr_name == "to",
+                predef_dtype: match attr_name {
+                    "to" => None,
+                    key => TO_NOARG_ALIASES.get_key(key).copied(),
+                },
             }
         } else if let Some(op) = BroadcastOp::try_from_attr(attr_name) {
             Self::Broadcastable(op)
@@ -109,6 +112,8 @@ impl TorchOp {
             Self::Creation { is_size: true }
         } else if is_alias_of("like", func_name_id, imports) {
             Self::Creation { is_size: false }
+        } else if is_alias_of("to", func_name_id, imports) {
+            Self::NoArg { predef_dtype: None }
         } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
             .iter()
             .filter(|x| is_alias_of(x, func_name_id, imports))
@@ -366,6 +371,9 @@ pub static EQ_BROADCAST_ALIASES: Set<&'static str> = phf_set![
     "logical_and",
     "logical_xor",
 ];
+
+/// Aliases for [transpose](https://docs.pytorch.org/docs/stable/generated/torch.transpose.html#torch.transpose).
+pub static TRANSPOSE_ALIASES: Set<&'static str> = phf_set!["transpose", "swapaxes", "swapdims"];
 
 /// Broadcastable operations.
 pub enum BroadcastOp {

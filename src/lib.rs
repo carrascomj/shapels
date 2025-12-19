@@ -21,7 +21,7 @@ pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
     BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_LIKE_ALIASES,
     CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TORCH_DTYPES,
-    TorchOp,
+    TRANSPOSE_ALIASES, TorchOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1711,8 +1711,9 @@ fn torch_op_to_shape(
             module_cache.as_deref_mut(),
             module_path,
         ),
-        (TorchOp::NoArg { can_be_function }, Some(base), _, _)
-            if can_be_function || matches!(op_kind, Method) =>
+        (TorchOp::NoArg { predef_dtype }, Some(base), _, _)
+            // only `.to` (no predef type) is allowed as Function
+            if predef_dtype.is_none() || matches!(op_kind, Method) =>
         {
             let base_expr = infer_expr_shape(
                 base,
@@ -1728,10 +1729,10 @@ fn torch_op_to_shape(
                 module_cache.as_deref_mut(),
                 module_path,
             );
-            let dtype_expr = if !can_be_function {
+            let dtype_expr = if let Some(dtype) = predef_dtype {
                 Some(&Expr::Constant(ast::ExprConstant {
                     range: expr_text_range(base),
-                    value: Constant::Str(attr_name.to_string()),
+                    value: Constant::Str(dtype.to_string()),
                     kind: None,
                 }))
             } else {
@@ -2508,20 +2509,8 @@ fn collect_imports(
     let mut imports = Imports::default();
     // seed known function names
     for fname in [
-        "mm",
-        "view",
-        "reshape",
-        "sum",
-        "permute",
-        "transpose",
-        "t",
-        "softmax",
-        "Tensor",
-        "randperm",
-        "linspace",
-        "logspace",
-        "arange",
-        "range",
+        "mm", "view", "reshape", "sum", "permute", "t", "softmax", "Tensor", "randperm",
+        "linspace", "logspace", "arange", "range", "to",
     ] {
         imports
             .func_aliases
@@ -2577,6 +2566,7 @@ fn collect_imports(
                                 (&BITWISE_ALIASES, "bitwise"),
                                 (&EQ_BROADCAST_ALIASES, "broadcast_eq"),
                                 (&CREATION_LIKE_ALIASES, "like"),
+                                (&TRANSPOSE_ALIASES, "transpose"),
                             ] {
                                 if container.contains(name) {
                                     let id = alias
