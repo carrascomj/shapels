@@ -33,6 +33,8 @@ pub enum TorchOp {
     Unsqueeze,
     /// `torch.squeeze`.
     Squeeze,
+    /// `torch.Tensor.expand`
+    Expand,
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -54,6 +56,8 @@ impl TorchOp {
             Self::Unsqueeze
         } else if attr_name == "squeeze" {
             Self::Squeeze
+        } else if attr_name == "expand" {
+            Self::Expand
         } else if AGGR_ALIASES.contains(attr_name) {
             Self::Aggr
         } else if NOOP_DIM_ALIASES.contains(attr_name) {

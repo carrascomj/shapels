@@ -1758,7 +1758,9 @@ fn torch_op_to_shape(
                 broadcast_op,
             )
         }
-        (TorchOp::View, Some(base), _, _) => {
+        (op @ (TorchOp::View | TorchOp::Expand), Some(base), _, kind)
+            if matches!(kind, Method) || matches!(op, TorchOp::View) =>
+        {
             let base_hint =
                 lookup_shape(base, vars, hover_entries, record_hovers, source).or_else(|| {
                     infer_expr_shape(
@@ -1779,6 +1781,7 @@ fn torch_op_to_shape(
             infer_view_like(
                 base,
                 &call.args.iter().collect::<Vec<_>>(),
+                &op,
                 base_hint,
                 vars,
                 diagnostics,

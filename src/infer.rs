@@ -7,7 +7,7 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
-use crate::op_groups::{BroadcastOp, RangeOps};
+use crate::op_groups::{BroadcastOp, RangeOps, TorchOp};
 use crate::{
     ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg,
     get_dtype,
@@ -712,6 +712,7 @@ fn normalize_dim_index_unsqueeze(idx: i16, len: usize) -> Option<usize> {
 pub fn infer_view_like(
     base_expr: &Expr,
     args: &[&Expr],
+    torch_op: &TorchOp,
     base_hint: Option<Shape>,
     vars: &HashMap<Identifier, VarState>,
     diagnostics: &mut Vec<Diagnostic>,
@@ -729,7 +730,11 @@ pub fn infer_view_like(
     if target_tokens.is_empty() {
         return None;
     }
-    let res = reshape_dims(base_shape.as_ref(), target_tokens.as_slice());
+    let res = match torch_op {
+        TorchOp::View => reshape_dims(base_shape, target_tokens.as_slice()),
+        TorchOp::Expand => expand_dims(base_shape, target_tokens.as_slice()),
+        _ => unreachable!(),
+    };
     match res {
         Ok(shape) => Some(shape),
         Err(msg) => {
@@ -749,7 +754,7 @@ pub fn infer_view_like(
     }
 }
 
-fn reshape_dims(base: Option<&Shape>, target: &[Cow<str>]) -> Result<Shape, String> {
+fn reshape_dims(base: Option<Shape>, target: &[Cow<str>]) -> Result<Shape, String> {
     let mut tokens = target.to_vec();
     let mut minus_one_idx = None;
     for (i, t) in tokens.iter().enumerate() {
@@ -798,6 +803,45 @@ fn reshape_dims(base: Option<&Shape>, target: &[Cow<str>]) -> Result<Shape, Stri
         dtype: None,
         dims: tokens.into_iter().map(|c| c.into_owned()).collect(),
     })
+}
+
+fn expand_dims(base: Option<Shape>, target: &[Cow<str>]) -> Result<Shape, String> {
+    if let Some(Shape { dtype, dims }) = base {
+        let d = dims.len();
+        let t = target.len();
+        if dims.len() != target.len() {
+            return Err(format!("Incorrect number of dimensions: {d} vs. {t}"));
+        }
+        let new_dims = dims
+            .iter()
+            .zip(target.iter())
+            .map(
+                |(left, right)| match (left.parse::<i32>(), right.parse::<i32>()) {
+                    (Ok(_), Ok(_)) | (Err(_), Err(_)) if left.as_str() == right => {
+                        Some(Cow::Borrowed(left.as_str()))
+                    }
+                    (_, Ok(-1)) => Some(Cow::Borrowed(left.as_str())),
+                    (Ok(1), _) => Some(right.clone()),
+                    _ => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        if let Some(invalid_idx) = new_dims.iter().position(|x| x.is_none()) {
+            return Err(format!(
+                "Invalid dimension at non-singleton position {invalid_idx}"
+            ));
+        }
+        Ok(Shape {
+            dims: new_dims
+                .into_iter()
+                // we can unwrap here since we have checked for any None just before
+                .map(|c| c.unwrap().into_owned())
+                .collect(),
+            dtype,
+        })
+    } else {
+        Err("Could not infer shape of base tensor".to_string())
+    }
 }
 
 fn flatten_dims(dims: &[String]) -> Vec<String> {

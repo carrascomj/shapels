@@ -111,3 +111,19 @@ fn test_unsqueeze_hover_dim0_arg() {
     let (pat, expected) = ("z_arg", "1 R");
     assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
+
+#[test]
+fn expand_with_proper_args() {
+    let src = extract_test_case(VIEW_PY_DATA, 8);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "y =", "A Ex B C"));
+}
+
+#[test]
+fn expand_with_improper_args() {
+    let src = extract_test_case(VIEW_PY_DATA, 9);
+    let analysis = analyze_source(&src);
+    // only one since expand inference returns early at the first wrong dimension
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

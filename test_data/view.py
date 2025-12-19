@@ -76,3 +76,22 @@ def unsqueeze_first_is_correct():
     z_pos = torch.unsqueeze(x.to(torch.int32), 0)
     z_arg = y.unsqueeze(dim=0)
     z_as_x = x
+
+
+# test 8
+import torch
+
+def expand_is_proper():
+    A, B, C, Ex = 2, 8, 16, 32
+    x = torch.Tensor(A, B, C)
+    y = x.unsqueeze(1).expand(-1, Ex, B, C)
+
+
+# test 9
+import torch
+
+def expand_is_proper():
+    A, B, C, Ex = 2, 8, 16, 32
+    x = torch.Tensor(A, 1, B, C)
+    y = x.expand(-1, Ex, C, B)
+
