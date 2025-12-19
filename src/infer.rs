@@ -1376,7 +1376,7 @@ fn expr_to_dim_token<'a>(
                 && attr.attr.as_str() == "shape"
             {
                 vars.get(&name.id)
-                    .and_then(|v| v.annotated.as_ref().or_else(|| v.inferred.as_ref()))
+                    .and_then(|v| v.annotated.as_ref().or(v.inferred.as_ref()))
                     .and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())))
             } else {
                 diagnostics.push(Diagnostic {
@@ -1409,7 +1409,7 @@ fn expr_to_dim_token<'a>(
                 && let Ok(idx) = usize::try_from(i)
             {
                 vars.get(&name.id)
-                    .and_then(|v| v.annotated.as_ref().or_else(|| v.inferred.as_ref()))
+                    .and_then(|v| v.annotated.as_ref().or(v.inferred.as_ref()))
                     .and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())))
             } else {
                 diagnostics.push(Diagnostic {
