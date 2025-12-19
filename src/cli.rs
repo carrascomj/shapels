@@ -26,6 +26,12 @@ pub struct CliArgs {
     pub hover: Option<PathBuf>,
 }
 
+#[derive(Debug)]
+pub enum CliError {
+    FoundDiagnostics,
+    IoError(io::Error),
+}
+
 /// Extract and parse the CLI args into [`CliArgs`].
 pub fn parse_args() -> CliArgs {
     let mut args = env::args().skip(1);
@@ -83,7 +89,7 @@ fn pretty_print_analysis(
     analysis: &Analysis,
     path: Option<&Path>,
     hover: Option<&Path>,
-) -> io::Result<()> {
+) -> Result<(), CliError> {
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
 
@@ -96,7 +102,8 @@ fn pretty_print_analysis(
                 severity_label(diag.severity),
                 location,
                 diag.message.trim()
-            )?;
+            )
+            .map_err(CliError::IoError)?;
         }
     }
 
@@ -108,11 +115,16 @@ fn pretty_print_analysis(
                 .as_ref()
                 .map(|s| s.render())
                 .unwrap_or_default();
-            writeln!(out, "[HOVER] {} {}", location, rendered.trim())?;
+            writeln!(out, "[HOVER] {} {}", location, rendered.trim()).map_err(CliError::IoError)?;
         }
     }
 
-    out.flush()
+    out.flush().map_err(CliError::IoError)?;
+    if analysis.diagnostics.is_empty() {
+        Err(CliError::FoundDiagnostics)
+    } else {
+        Ok(())
+    }
 }
 
 fn analyze_or_exit(path: &Path) -> Analysis {
@@ -125,18 +137,15 @@ fn analyze_or_exit(path: &Path) -> Analysis {
     }
 }
 
-fn exit_code(analysis: &Analysis) -> i32 {
-    if analysis.diagnostics.is_empty() {
-        0
-    } else {
-        -1
-    }
-}
-
-fn print_or_exit(result: io::Result<()>) {
-    if let Err(err) = result {
-        eprintln!("Failed to write output: {err}");
-        exit(1);
+fn with_exit_code(result: Result<(), CliError>) -> i32 {
+    match result {
+        Err(err) => {
+            if let CliError::IoError(msg) = err {
+                eprintln!("Failed to write output: {msg}");
+            }
+            -1
+        }
+        Ok(_) => 0,
     }
 }
 
@@ -147,35 +156,18 @@ fn print_or_exit(result: io::Result<()>) {
 /// file(s) and exit, with -1 if any diagnostics were emitted and 0 otherwise;
 /// always 0 if `cli_args.path` is `None`.
 pub fn run_analysis_if_args(cli_args: CliArgs) {
-    let diag_path = cli_args.path.as_deref();
-    let hover_path = cli_args.hover.as_deref();
-    if diag_path.is_none() && hover_path.is_none() {
-        return;
-    }
-
-    match (diag_path, hover_path) {
-        (Some(path), Some(hover)) if path == hover => {
+    match (cli_args.path.as_deref(), cli_args.hover.as_deref()) {
+        (Some(path), Some(hover)) if path != hover => {
             let analysis = analyze_or_exit(path);
-            print_or_exit(pretty_print_analysis(&analysis, Some(path), Some(path)));
-            exit(exit_code(&analysis));
-        }
-        (Some(path), Some(hover)) => {
-            let analysis = analyze_or_exit(path);
-            print_or_exit(pretty_print_analysis(&analysis, Some(path), None));
+            let exit_code = with_exit_code(pretty_print_analysis(&analysis, Some(path), None));
             let hover_analysis = analyze_or_exit(hover);
-            print_or_exit(pretty_print_analysis(&hover_analysis, None, Some(hover)));
-            exit(exit_code(&analysis));
+            with_exit_code(pretty_print_analysis(&hover_analysis, None, Some(hover)));
+            exit(exit_code)
         }
-        (Some(path), None) => {
+        (a @ Some(path), b @ None) | (a @ None, b @ Some(path)) | (a @ Some(path), b @ Some(_)) => {
             let analysis = analyze_or_exit(path);
-            print_or_exit(pretty_print_analysis(&analysis, Some(path), None));
-            exit(exit_code(&analysis));
+            exit(with_exit_code(pretty_print_analysis(&analysis, a, b)));
         }
-        (None, Some(hover)) => {
-            let analysis = analyze_or_exit(hover);
-            print_or_exit(pretty_print_analysis(&analysis, None, Some(hover)));
-            exit(0);
-        }
-        (None, None) => unreachable!(),
+        (None, None) => return,
     };
 }
