@@ -2132,8 +2132,16 @@ fn infer_call_return_from_info(
                     .as_deref()
                     .and_then(parse_shape_annotation)
                 {
-                    let dims_match =
-                        ann.dims.len() == shape.dims.len() && shape_dims_equal(&ann, &shape);
+                    let dims_match = ann.dims.len() == shape.dims.len()
+                        && ann.dims.iter().zip(shape.dims.iter()).all(|(left, right)| {
+                            // less stringent equality (alpha-equivalence):
+                            // behaves as a annotated aliasing; only concrete
+                            // dimensions at both sides must match
+                            match (left.parse::<i32>().is_ok(), right.parse::<i32>().is_ok()) {
+                                (true, true) => left == right,
+                                _ => true,
+                            }
+                        });
                     if !dims_match {
                         diagnostics.push(Diagnostic {
                             range: text_range_to_lsp(expr_text_range(arg_expr), source),

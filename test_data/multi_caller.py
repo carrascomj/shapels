@@ -20,11 +20,9 @@ from multi_callee import from_zeros_fully_annotated
 def arg_hint_returns_diagnostic_on_mismatch():
     J, K, L = 3, 27, 81
     arg = torch.zeros(J, K, L)
-    # arg should be [B T O]
+    # arg is annotated as [B T O], but [J K L] is compatible as
+    # it has the same ndim (behaves as annotated aliasing)
     arg_shape_is_wrong = from_zeros_fully_annotated(arg)
-    # this is added here so that there are enough lines
-    # when the test extracted to show the diagnostic if wrongly
-    # placed as in the callee
     return (
         arg,
         J + K + L,
@@ -77,3 +75,23 @@ def int_return_tint_return_type_hint_is_returned_as_hoverype_hint_is_returned_as
     z, (val1, val2) = from_zeros_to_tuple((1, 2))
     linear = UserLinear()
     b = linear(z, z[0].T)
+
+
+# test 9
+from multi_callee import from_zeros_fully_annotated
+
+def arg_hint_returns_diagnostic_on_mismatch():
+    B, T, O, K, L = 3, 27, 81, 243
+    arg_too_long = torch.zeros(B, T, O, K)
+    arg_too_short = torch.zeros(B, T)
+    # arg should be [B T O]
+    arg_shape_is_wrong = from_zeros_fully_annotated(arg_too_long)
+    arg_shape_is_wrong = from_zeros_fully_annotated(arg_too_short)
+    # this is added here so that there are enough lines
+    # when the test extracted to show the diagnostic if wrongly
+    # placed as in the callee
+    return (
+        arg,
+        J + K + L,
+        arg_shape_is_wrong
+    )

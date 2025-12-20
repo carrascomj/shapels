@@ -23,7 +23,7 @@ fn module_is_resolved_to_its_forward_function() {
 fn module_as_fn_arg_is_resolved_to_its_forward_function() {
     let src = extract_test_case(PY_DATA, 3);
     let analysis = analyze_source(&src);
-    assert_eq!(analysis.diagnostics.len(), 1);
+    assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "output =", "B X O"));
 }
 
@@ -31,7 +31,7 @@ fn module_as_fn_arg_is_resolved_to_its_forward_function() {
 fn module_as_fn_union_arg_is_resolved_to_its_forward_function() {
     let src = extract_test_case(PY_DATA, 4);
     let analysis = analyze_source(&src);
-    assert_eq!(analysis.diagnostics.len(), 1);
+    assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "output =", "B X O"));
 }
 

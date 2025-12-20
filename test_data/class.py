@@ -22,7 +22,7 @@ def function():
     B, X, R, S, U, W = 3, 9, 27, 81, 243, 729
     x = torch.zeros(B, X, R)
     y = torch.ones(R, S)
-    bad_y = torch.ones(U, W)
+    bad_y = torch.ones(U, W, R)
     output = linear(x, y)
     output2 = linear(x, bad_y)
 
@@ -40,9 +40,9 @@ def function_with_arg(linear: UserLinearAsArg):
     B, X, R, O, U, W = 3, 9, 27, 81, 243, 729
     x = torch.zeros(B, X, R)
     y = torch.ones(R, O)
-    bad_y = torch.ones(U, W)
+    ok_alpha_y = torch.ones(U, W)
     output = linear(x, y)
-    output2 = linear(x, bad_y)
+    output2 = linear(x, ok_alpha_y)
 
 
 # test 4
@@ -58,9 +58,9 @@ def function_with_union_arg(linear: UserLinearAsArg | DataParallel[UserLinearAsA
     B, X, R, O, U, W = 3, 9, 27, 81, 243, 729
     x = torch.zeros(B, X, R)
     y = torch.ones(R, O)
-    bad_y = torch.ones(U, W)
+    alpha_y = torch.ones(U, W)
     output = linear(x, y)
-    output2 = linear(x, bad_y)
+    output2 = linear(x, alpha_y)
 
 
 # test 5
@@ -76,9 +76,9 @@ class UserLinearAsArg(torch.nn.Module):
 
 def function_with_union_tensor_arg(linear: UserLinearAsArg, x: None | F[T, "B X R"]):
     alias_x = x
-    R, O, U, W = 27, 81, 243, 729
+    R, O, U = 27, 81, 243
     y = torch.ones(R, O)
-    bad_y = torch.ones(U, W)
+    bad_y = torch.ones(U)
     output = linear(alias_x, y)
     output2 = linear(alias_x, bad_y)
 
