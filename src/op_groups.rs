@@ -37,6 +37,8 @@ pub enum TorchOp {
     Expand,
     /// Conv1d, Conv2d, Conv3d
     Conv(usize),
+    /// `torch.repeat`
+    Repeat,
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -66,6 +68,8 @@ impl TorchOp {
             Self::Conv(2)
         } else if attr_name == "conv3d" {
             Self::Conv(3)
+        } else if attr_name == "repeat" {
+            Self::Repeat
         } else if AGGR_ALIASES.contains(attr_name) {
             Self::Aggr
         } else if NOOP_DIM_ALIASES.contains(attr_name) {

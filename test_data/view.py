@@ -90,8 +90,32 @@ def expand_is_proper():
 # test 9
 import torch
 
-def expand_is_proper():
+def expand_improper():
     A, B, C, Ex = 2, 8, 16, 32
     x = torch.Tensor(A, 1, B, C)
     y = x.expand(-1, Ex, C, B)
+
+
+# test 10
+import torch
+
+def repeat_is_proper():
+    """Example adapter from torch docs: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.repeat.html#torch.Tensor.repeat"""
+    x = torch.Tensor(3)
+    # [4 6]
+    repeated_2d = x.repeat(4, 2)
+    # [4 2 3]
+    repeated_3d = x.repeat(4, 2, 1)
+
+
+# test 11
+import torch
+
+def repeat_improper(x: F[T, "A B"]):
+    C = 32
+    # 0 dimensions are allowed
+    repeated_2d = x.repeat(0, C)
+    # negative dimensions are not allowed
+    # "Trying to create tensor with negative dimension -1: [C, -1, 3]"
+    repeated_3d = x.repeat(C, -1, 3)
 

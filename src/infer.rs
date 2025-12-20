@@ -1279,7 +1279,6 @@ pub fn infer_creation_size(
     };
     let mut diag_already = false;
 
-    // TODO(carrascomj): refactor into function
     let vec_dims: Vec<Option<Cow<_>>> = list
         .iter()
         .map(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut diag_already))
@@ -1338,7 +1337,7 @@ fn expr_to_dim_token<'a>(
                         code: None,
                         code_description: None,
                         source: Some("shapels".into()),
-                        message: "Shape could not be understand this dim".into(),
+                        message: "Dim could be inferred".into(),
                         related_information: None,
                         tags: None,
                         data: None,
@@ -1760,4 +1759,87 @@ fn expr_to_tuple(expr: &Expr) -> Option<Vec<String>> {
         ),
         _ => None,
     }
+}
+
+pub fn infer_repeat(
+    base: Shape,
+    call: &ExprCall,
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    let list = match call.args.as_slice() {
+        [Expr::List(list), ..] => list.elts.as_slice(),
+        [Expr::Tuple(seq), ..] => seq.elts.as_slice(),
+        rest => rest,
+    };
+    let mut diag_already = false;
+
+    let factors: Vec<Option<Cow<_>>> = list
+        .iter()
+        .map(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut diag_already))
+        .collect();
+    if factors.is_empty() || factors.iter().any(|x| x.is_none()) {
+        // this diagnostic is left for a generalist language server
+        return None;
+    }
+    // we can unwrap since we have checked for any None just before
+    let factors: Vec<_> = factors.into_iter().map(|dim| dim.unwrap()).collect();
+
+    // check for negative dimensions
+    if factors
+        .iter()
+        .any(|f| f.parse::<i64>().map(|x| x < 0).unwrap_or(false))
+    {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(call.range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: "Trying to create tensor with negative dimensions".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+
+    let base_len = base.dims.len();
+    let factors_len = factors.len();
+    if factors_len < base_len {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(call.range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!("Number of dimensions of repeat dims ({factors_len}) can not be smaller than number of dimensions of tensor ({base_len})"),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+    let mut out_dims = Vec::with_capacity(factors_len);
+    let leading = factors_len.saturating_sub(base_len);
+    for (idx, f) in factors.into_iter().enumerate() {
+        if idx < leading {
+            out_dims.push(f.into_owned());
+        } else {
+            let base_dim = &base.dims[idx - leading];
+            let prod = match (f.parse::<i64>(), base_dim.parse::<i64>()) {
+                (Ok(a), _) if a == 0 => "0".to_string(),
+                (Ok(a), Ok(b)) => (a * b).to_string(),
+                _ if f == "1" => base_dim.clone(),
+                _ if base_dim == "1" => f.into_owned(),
+                _ => format!("{f}*{base_dim}"),
+            };
+            out_dims.push(prod);
+        }
+    }
+    Some(Shape {
+        dtype: base.dtype,
+        dims: out_dims,
+    })
 }

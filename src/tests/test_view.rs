@@ -127,3 +127,20 @@ fn expand_with_improper_args() {
     // only one since expand inference returns early at the first wrong dimension
     assert_eq!(analysis.diagnostics.len(), 1);
 }
+
+#[test]
+fn repeat_with_proper_args() {
+    let src = extract_test_case(VIEW_PY_DATA, 10);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "repeated_2d =", "4 6"));
+    assert!(is_hover_expected(&src, &analysis, "repeated_3d =", "4 2 3"));
+}
+
+#[test]
+fn repeat_with_negative_dims() {
+    let src = extract_test_case(VIEW_PY_DATA, 11);
+    let analysis = analyze_source(&src);
+    // only one, at repeated_3d
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

@@ -14,8 +14,8 @@ mod infer;
 pub mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_conv, infer_creation_size,
-    infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_squeeze,
-    infer_to, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_repeat,
+    infer_squeeze, infer_to, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
@@ -1859,6 +1859,9 @@ fn torch_op_to_shape(
         (TorchOp::Conv(d), Some(base), _, Function) => {
             let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_conv(shape, kernel.dims, call, d, diagnostics, source))
+        }
+        (TorchOp::Repeat, Some(base), _, Method) => {
+            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))
         }
         (TorchOp::Unknown, _, _, Function) => {
             // TODO(carrascomj): check if emitting diagnostics here
