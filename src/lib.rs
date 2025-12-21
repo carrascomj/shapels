@@ -1632,7 +1632,7 @@ fn torch_op_to_shape(
                 diagnostics,
                 source,
                 call.range,
-                attr_name != "argsort", // dim optional for argsort
+                attr_name.contains("soft"), // HACK: dim not optional for softmax
             )
         }
         (TorchOp::Noop, Some(base), _, _) => infer_expr_shape(

@@ -188,6 +188,8 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
     "argsort",
     "bitwise_not",
     "logical_not",
+    "flip",
+    "rot90",
 ];
 
 // TODO: Tensor should be separated from the rest
@@ -316,6 +318,8 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     "erf",
     "erfc",
     "erfinv",
+    "fliplr",
+    "flipud",
     // torch.Tensor only
     "cpu",
     "cuda",
