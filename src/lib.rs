@@ -14,14 +14,14 @@ mod infer;
 pub mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_conv, infer_creation_size,
-    infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_repeat,
-    infer_squeeze, infer_to, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_flatten, infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size,
+    infer_repeat, infer_squeeze, infer_to, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
     BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_LIKE_ALIASES,
-    CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES, TORCH_DTYPES,
-    TRANSPOSE_ALIASES, TorchOp,
+    CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, FLATTEN_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES,
+    TORCH_DTYPES, TRANSPOSE_ALIASES, TorchOp,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1863,6 +1863,10 @@ fn torch_op_to_shape(
         (TorchOp::Repeat, Some(base), _, Method) => {
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))
         }
+        (TorchOp::Flatten, Some(base), _, _) => {
+            // TODO(carrascomj): ravel is function-only
+            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_flatten(shape, offset, call, vars, diagnostics, source))
+        }
         (TorchOp::Unknown, _, _, Function) => {
             // TODO(carrascomj): check if emitting diagnostics here
             // is not too annoying
@@ -2593,6 +2597,7 @@ fn collect_imports(
                                 (&EQ_BROADCAST_ALIASES, "broadcast_eq"),
                                 (&CREATION_LIKE_ALIASES, "like"),
                                 (&TRANSPOSE_ALIASES, "transpose"),
+                                (&FLATTEN_ALIASES, "flatten"),
                             ] {
                                 if container.contains(name) {
                                     let id = alias

@@ -39,6 +39,8 @@ pub enum TorchOp {
     Conv(usize),
     /// `torch.repeat`
     Repeat,
+    /// `torch.flatten`, `torch.ravel`
+    Flatten,
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -82,6 +84,8 @@ impl TorchOp {
             Self::Creation { is_size: false }
         } else if let Ok(op) = RangeOps::try_from(attr_name) {
             Self::RangeOp(op)
+        } else if FLATTEN_ALIASES.contains(attr_name) {
+            Self::Flatten
         } else if TO_NOARG_ALIASES.contains(attr_name) {
             Self::NoArg {
                 predef_dtype: match attr_name {
@@ -132,6 +136,8 @@ impl TorchOp {
             Self::Creation { is_size: false }
         } else if is_alias_of("to", func_name_id, imports) {
             Self::NoArg { predef_dtype: None }
+        } else if is_alias_of("flatten", func_name_id, imports) {
+            Self::Flatten
         } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
             .iter()
             .filter(|x| is_alias_of(x, func_name_id, imports))
@@ -328,6 +334,9 @@ pub static TO_NOARG_ALIASES: Set<&'static str> = phf_set! {
     "bool",
     "neg",
 };
+
+/// Flatten, product of dimensions is preserved.
+pub static FLATTEN_ALIASES: Set<&'static str> = phf_set!["flatten", "ravel"];
 
 pub static TORCH_DTYPES: Set<&'static str> = phf_set![
     "float32",

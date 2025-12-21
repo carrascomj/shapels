@@ -1829,7 +1829,7 @@ pub fn infer_repeat(
         } else {
             let base_dim = &base.dims[idx - leading];
             let prod = match (f.parse::<i64>(), base_dim.parse::<i64>()) {
-                (Ok(a), _) if a == 0 => "0".to_string(),
+                (Ok(0), _) => "0".to_string(),
                 (Ok(a), Ok(b)) => (a * b).to_string(),
                 _ if f == "1" => base_dim.clone(),
                 _ if base_dim == "1" => f.into_owned(),
@@ -1842,4 +1842,94 @@ pub fn infer_repeat(
         dtype: base.dtype,
         dims: out_dims,
     })
+}
+
+pub fn infer_flatten(
+    base: Shape,
+    offset: usize,
+    call: &ExprCall,
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    let base_len = base.dims.len();
+    let start_dim = get_arg(call, "start_dim", offset)
+        .and_then(|e| expr_to_dim_token(e, vars, diagnostics, source, &mut false))
+        .unwrap_or(Cow::Borrowed("0"));
+    let end_dim = get_arg(call, "end_dim", offset + 1)
+        .and_then(|e| expr_to_dim_token(e, vars, diagnostics, source, &mut false))
+        .unwrap_or(Cow::Owned((base_len - 1).to_string()));
+    if let (Ok(start), Ok(end)) = (start_dim.parse::<i32>(), end_dim.parse::<i32>()) {
+        let start = resolve_dim_in_bounds(start, base_len, diagnostics, source, &call.range)?;
+        let end = resolve_dim_in_bounds(end, base_len, diagnostics, source, &call.range)?;
+        let mut out_dims = vec![String::new(); base_len - (end - start) as usize];
+        // fill in left and right of [start, end) interval
+        let mut out_oft = 0;
+        for i in 0..base_len {
+            if i >= start && i < end {
+                out_oft += 1;
+            } else {
+                out_dims[i - out_oft] = base.dims[i].clone();
+            }
+        }
+        // accumulate symbolic and concrete dims separately
+        let (sym_dim, conc_dim) = (start..(end + 1)).fold((String::new(), 1), |(sym, conc), i| {
+            let dim = &base.dims[i];
+            match dim.parse::<usize>() {
+                Ok(d) => (sym, conc * d),
+                Err(_) if sym.is_empty() => (dim.to_string(), conc),
+                _ => (sym + "*" + dim, conc),
+            }
+        });
+        out_dims[start] = if sym_dim.is_empty() {
+            conc_dim.to_string()
+        } else if conc_dim > 1 {
+            sym_dim + &format!("*{conc_dim}")
+        } else {
+            sym_dim
+        };
+        Some(Shape {
+            dtype: base.dtype,
+            dims: out_dims,
+        })
+    } else {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(call.range, source),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: "Shape of flatten cannot be computed statically from non-concrete dims."
+                .to_string(),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        None
+    }
+}
+
+fn resolve_dim_in_bounds(
+    dim: i32,
+    base_len: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+    range: &TextRange,
+) -> Option<usize> {
+    let dim = if dim < 0 { base_len as i32 + dim } else { dim } as usize;
+    if dim >= base_len {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(*range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!("Dim {dim} is out of bounds for tensor with ndims {base_len}"),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+    Some(dim)
 }

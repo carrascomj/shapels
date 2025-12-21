@@ -119,3 +119,37 @@ def repeat_improper(x: F[T, "A B"]):
     # "Trying to create tensor with negative dimension -1: [C, -1, 3]"
     repeated_3d = x.repeat(C, -1, 3)
 
+
+# test 12
+import torch
+
+def flatten_proper_symbolic(x):
+    A, B, C, D, E, F = x.shape
+    # flat is [A B*C*D E F]
+    flat = torch.flatten(x, start_dim=1, end_dim=3)  
+
+
+# test 13
+import torch
+
+def flatten_proper_concrete():
+    x = torch.zeros(32, 64, 128)
+    # flat is [32, 8192]
+    flat = x.flatten(start_dim=1)
+
+
+# test 14
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch
+
+def flatten_improper(x: F[T, "A B"]):
+    wrong = x.flatten(start_dim=3)
+    
+
+# test 15
+from jaxtyping import Float as F
+from torch import Tensor as T, ravel
+
+def flatten_improper(x: F[T, "A B C D"]):
+    flat = ravel(x)

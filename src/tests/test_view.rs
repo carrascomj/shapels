@@ -144,3 +144,36 @@ fn repeat_with_negative_dims() {
     // only one, at repeated_3d
     assert_eq!(analysis.diagnostics.len(), 1);
 }
+
+#[test]
+fn flatten_symbolic_shape_checks() {
+    let src = extract_test_case(VIEW_PY_DATA, 12);
+    let analysis = analyze_source(&src);
+    assert!(is_hover_expected(&src, &analysis, "flat =", "A B*C*D E F"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+}
+
+#[test]
+fn flatten_concrete_shape_checks() {
+    let src = extract_test_case(VIEW_PY_DATA, 13);
+    let analysis = analyze_source(&src);
+    assert!(is_hover_expected(&src, &analysis, "flat =", "32 8192"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+}
+
+#[test]
+fn flatten_improper_emit_diagnostics() {
+    let src = extract_test_case(VIEW_PY_DATA, 14);
+    let analysis = analyze_source(&src);
+    // start_dim is higher than the base shape
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
+fn ravel_proper_symbolic() {
+    let src = extract_test_case(VIEW_PY_DATA, 15);
+    let analysis = analyze_source(&src);
+    // start_dim is higher than the base shape
+    assert!(is_hover_expected(&src, &analysis, "flat =", "A*B*C*D"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+}
