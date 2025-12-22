@@ -1001,9 +1001,6 @@ fn broadcastable_poswise(
         (Some(s), None) => Ok(Some((*s).clone())),
         (None, Some(s)) => Ok(Some(s)),
         (Some(l), Some(r)) => {
-            if l.dims.is_empty() || r.dims.is_empty() {
-                return Err("Broadcasting requires operands with at least one dimension".into());
-            }
             let dims = broadcast_dims(&l.dims, &r.dims)
                 .map_err(|msg| format!("Broadcasting incompatible shapes: {msg}"))?;
             Ok(Some(Shape {
@@ -1015,8 +1012,12 @@ fn broadcastable_poswise(
 }
 
 fn broadcast_dims(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
-    if a.is_empty() || b.is_empty() {
-        return Err("tensor has zero dimensions".into());
+    if a.is_empty() && b.is_empty() {
+        return Ok(vec!["".to_string()]);
+    } else if a.is_empty() {
+        return Ok(b.into());
+    } else if b.is_empty() {
+        return Ok(a.into());
     }
     let mut out = Vec::new();
     let mut idx = 0usize;
