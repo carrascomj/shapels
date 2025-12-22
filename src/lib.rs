@@ -2935,14 +2935,32 @@ fn text_range_to_lsp(range: TextRange, source: &str) -> Range {
 fn expr_text_range(expr: &Expr) -> TextRange {
     match expr {
         Expr::Name(n) => n.range,
+        Expr::BoolOp(b) => b.range,
+        Expr::NamedExpr(n) => n.range,
         Expr::BinOp(b) => b.range,
+        Expr::UnaryOp(u) => u.range,
+        Expr::Lambda(l) => l.range,
+        Expr::IfExp(i) => i.range,
+        Expr::Dict(d) => d.range,
+        Expr::Set(s) => s.range,
+        Expr::ListComp(l) => l.range,
+        Expr::SetComp(s) => s.range,
+        Expr::DictComp(d) => d.range,
+        Expr::GeneratorExp(g) => g.range,
+        Expr::Await(a) => a.range,
+        Expr::Yield(y) => y.range,
+        Expr::YieldFrom(y) => y.range,
+        Expr::Compare(c) => c.range,
         Expr::Call(c) => c.range,
+        Expr::FormattedValue(f) => f.range,
         Expr::Subscript(s) => s.range,
         Expr::Attribute(a) => a.range,
+        Expr::Starred(s) => s.range,
         Expr::Constant(c) => c.range,
         Expr::JoinedStr(j) => j.range,
+        Expr::List(l) => l.range,
         Expr::Tuple(t) => t.range,
-        _ => TextRange::new(TextSize::from(0), TextSize::from(0)),
+        Expr::Slice(s) => s.range,
     }
 }
 

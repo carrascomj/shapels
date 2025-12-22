@@ -72,7 +72,8 @@ import torch
 def slice_half_symbolic():
     A, B, C, D = 256, 32, 224, 16
     tensor = torch.Tensor(A, B, C, D)
-    z = tensor[:, (D + 1):]
+    z1 = tensor[:, (D + 1):]
+    z2 = tensor[:, :, (B + 3):]
 
 # test 10
 import torch

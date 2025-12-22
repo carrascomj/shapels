@@ -150,23 +150,24 @@ pub fn infer_index(
                             } else if stop.is_none() {
                                 let base_tok = base_shape
                                     .dims
-                                    .iter()
-                                    .find(|d| d.parse::<i64>().is_err())
+                                    .get(base_idx)
                                     .cloned()
-                                    .or_else(|| base_shape.dims.get(base_idx).cloned())
                                     .unwrap_or_else(|| dim.clone());
                                 let start_tok = start.clone().unwrap();
-                                let primary = start_tok
-                                    .split(|c| c == '+' || c == '-')
-                                    .next()
-                                    .unwrap_or(&start_tok);
                                 let new_dim = match (
                                     base_tok.parse::<i64>().ok(),
                                     start_tok.parse::<i64>().ok(),
                                 ) {
                                     (Some(b), Some(s)) => (b - s).to_string(),
                                     (Some(b), None) => format!("{b}-{start_tok}"),
-                                    _ => format!("{base_tok}-{primary}+1"),
+                                    _ => {
+                                        let (primary, offset) = split_primary_offset(&start_tok);
+                                        if let Some(offset) = offset {
+                                            format!("{base_tok}-{primary}{offset}")
+                                        } else {
+                                            format!("{base_tok}-{primary}")
+                                        }
+                                    }
                                 };
                                 output_dims.push(new_dim);
                             } else {
@@ -256,14 +257,25 @@ fn expr_to_int(expr: &Expr) -> Option<i64> {
 }
 
 fn bound_token(expr: &Expr, source: &str) -> String {
+    if let Expr::Call(call) = expr
+        && let Expr::Name(fname) = call.func.as_ref()
+        && fname.id.as_str() == "int"
+        && let Some(arg0) = call.args.first()
+    {
+        return bound_token(arg0, source);
+    }
     if let Some(tok) = slice_dim_token(expr) {
         tok
     } else {
         let range = expr_text_range(expr);
-        source
+        let mut raw = source
             .get(range.start().to_usize()..range.end().to_usize())
             .unwrap_or("")
-            .replace(' ', "")
+            .replace(' ', "");
+        while raw.starts_with('(') && raw.ends_with(')') && raw.len() >= 2 {
+            raw = raw[1..raw.len() - 1].to_string();
+        }
+        raw
     }
 }
 
@@ -283,10 +295,21 @@ fn slice_dim_token(expr: &Expr) -> Option<String> {
             }
             None
         }
-        Expr::BinOp(bin) if matches!(bin.op, Operator::Add | Operator::Sub) => {
-            slice_dim_token(&bin.left)
-        }
         _ => None,
+    }
+}
+
+fn split_primary_offset(tok: &str) -> (String, Option<String>) {
+    if let Some(idx) = tok
+        .char_indices()
+        .skip(1)
+        .find(|&(_, c)| c == '+' || c == '-')
+        .map(|(idx, _)| idx)
+    {
+        let (primary, offset) = tok.split_at(idx);
+        (primary.to_string(), Some(offset.to_string()))
+    } else {
+        (tok.to_string(), None)
     }
 }
 
@@ -582,10 +605,16 @@ pub fn infer_squeeze(
             });
             continue;
         }
-        if enforce_one && dims.get(idx).map(|d| d != "1").unwrap_or(false) {
+        if let Some(d) = dims.get(idx)
+            && enforce_one
+            && d != "1"
+        {
             diagnostics.push(Diagnostic {
                 range: text_range_to_lsp(whole_range, source),
-                severity: Some(DiagnosticSeverity::ERROR),
+                severity: Some(
+                    d.parse::<i32>()
+                        .map_or(DiagnosticSeverity::WARNING, |_| DiagnosticSeverity::ERROR),
+                ),
                 code: None,
                 code_description: None,
                 source: Some("shapels".into()),

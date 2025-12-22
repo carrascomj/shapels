@@ -74,7 +74,8 @@ fn infer_slice_half_symbolic() {
     let src = extract_test_case(INDEX_PY_DATA, 9);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 0);
-    assert!(is_hover_expected(&src, &analysis, "z =", "A A-D+1 C D"));
+    assert!(is_hover_expected(&src, &analysis, "z1 =", "A B-D+1 C D"));
+    assert!(is_hover_expected(&src, &analysis, "z2 =", "A B C-B+3 D"));
 }
 
 #[test]
