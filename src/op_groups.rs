@@ -332,6 +332,8 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     "cpu",
     "cuda",
     "detach",
+    // TODO(carrascomj): this should get its own inference to shape check broadcastable args
+    "masked_fill",
 };
 
 /// Shape-wise NoOp, changes dtype, do not accept arguments.
