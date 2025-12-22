@@ -15,7 +15,8 @@ pub mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_conv, infer_creation_size,
     infer_flatten, infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size,
-    infer_repeat, infer_squeeze, infer_to, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_repeat, infer_repeat_interleave, infer_squeeze, infer_to, infer_unsqueeze,
+    infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{
@@ -1863,6 +1864,11 @@ fn torch_op_to_shape(
         (TorchOp::Repeat, Some(base), _, Method) => {
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))
         }
+        (TorchOp::RepeatInterleave, Some(base), _, _) => {
+            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| {
+                infer_repeat_interleave(shape, call, offset, diagnostics, source)
+            })
+        }
         (TorchOp::Flatten, Some(base), _, _) => {
             // TODO(carrascomj): ravel is function-only
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_flatten(shape, offset, call, vars, diagnostics, source))
@@ -2534,8 +2540,24 @@ fn collect_imports(
     let mut imports = Imports::default();
     // seed known function names
     for fname in [
-        "mm", "view", "reshape", "sum", "permute", "t", "softmax", "Tensor", "randperm",
-        "linspace", "logspace", "arange", "range", "to", "conv1d", "conv2d", "conv3d",
+        "mm",
+        "view",
+        "reshape",
+        "sum",
+        "permute",
+        "t",
+        "softmax",
+        "Tensor",
+        "randperm",
+        "linspace",
+        "logspace",
+        "arange",
+        "range",
+        "to",
+        "conv1d",
+        "conv2d",
+        "conv3d",
+        "repeat_interleave",
     ] {
         imports
             .func_aliases

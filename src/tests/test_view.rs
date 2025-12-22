@@ -177,3 +177,30 @@ fn ravel_proper_symbolic() {
     assert!(is_hover_expected(&src, &analysis, "flat =", "A*B*C*D"));
     assert_eq!(analysis.diagnostics.len(), 0);
 }
+
+#[test]
+fn repeat_interlave_proper_concrete() {
+    let src = extract_test_case(VIEW_PY_DATA, 16);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "rep =", "6"));
+    assert!(is_hover_expected(&src, &analysis, "rep2 =", "8"));
+    assert!(is_hover_expected(&src, &analysis, "rep3 =", "2 6"));
+    assert!(is_hover_expected(&src, &analysis, "rep_tensor_0 =", "3 2"));
+}
+
+#[test]
+fn repeat_interlave_proper_symbolic() {
+    let src = extract_test_case(VIEW_PY_DATA, 17);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "rep1 =", "A B*C"));
+}
+
+#[test]
+fn repeat_interleave_improper() {
+    let src = extract_test_case(VIEW_PY_DATA, 18);
+    let analysis = analyze_source(&src);
+    // dim is higher than the base shape
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

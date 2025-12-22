@@ -39,6 +39,8 @@ pub enum TorchOp {
     Conv(usize),
     /// `torch.repeat`
     Repeat,
+    /// `torch.repeat_interleave`
+    RepeatInterleave,
     /// `torch.flatten`, `torch.ravel`
     Flatten,
     /// The operation is not supported or not properly indicated by the user.
@@ -72,6 +74,8 @@ impl TorchOp {
             Self::Conv(3)
         } else if attr_name == "repeat" {
             Self::Repeat
+        } else if attr_name == "repeat_interleave" {
+            Self::RepeatInterleave
         } else if AGGR_ALIASES.contains(attr_name) {
             Self::Aggr
         } else if NOOP_DIM_ALIASES.contains(attr_name) {
@@ -138,6 +142,10 @@ impl TorchOp {
             Self::NoArg { predef_dtype: None }
         } else if is_alias_of("flatten", func_name_id, imports) {
             Self::Flatten
+        } else if is_alias_of("repeat", func_name_id, imports) {
+            Self::Repeat
+        } else if is_alias_of("repeat_interleave", func_name_id, imports) {
+            Self::RepeatInterleave
         } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
             .iter()
             .filter(|x| is_alias_of(x, func_name_id, imports))

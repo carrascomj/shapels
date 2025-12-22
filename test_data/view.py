@@ -153,3 +153,47 @@ from torch import Tensor as T, ravel
 
 def flatten_improper(x: F[T, "A B C D"]):
     flat = ravel(x)
+
+# test 16
+import torch
+
+def repeat_interleave_concrete():
+    """Adapted rom torch docs."""
+    x = torch.zeros(3)
+    # [6]
+    rep = x.repeat_interleave(2)
+    y = torch.ones(2, 2)
+    # [8]
+    rep2 = torch.repeat_interleave(y, 2)
+    # tensor([1, 1, 2, 2, 3, 3, 4, 4])
+
+    # [2, 6]
+    rep3 = torch.repeat_interleave(y, 3, dim=1)
+    # tensor([[1, 1, 1, 2, 2, 2],
+    #        [3, 3, 3, 4, 4, 4]])
+    
+    # [3, 2]
+    rep_tensor_0 = torch.repeat_interleave(y, torch.tensor([1, 2]), dim=0)
+    # tensor([[1, 2],
+    #         [3, 4],
+    #         [3, 4]])
+
+
+# test 17
+import torch
+
+def repeat_interleave_symbolic():
+    A, B, C = 2, 4, 8
+    y = torch.ones(A, B)
+    # [A, B*C]
+    rep1 = torch.repeat_interleave(y, C, dim=1)
+
+
+# test 18
+import torch
+
+def repeat_interleave_improper():
+    A, B, C = 2, 4, 8
+    y = torch.ones(A, B)
+    # Dimension out of range (expected to be in range of [-2, 1], but got 4)
+    wrong = torch.repeat_interleave(y, C, dim=4)
