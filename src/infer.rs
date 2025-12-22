@@ -22,13 +22,17 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{infer_expr_shape, lookup_shape, text_range_to_lsp};
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum IndexKind<'a> {
     NewAxis,
     Ellipsis,
     Keep, // inserted from an expanded ellipsis
     Int,
-    Slice(Option<i64>),
+    Slice {
+        start: Option<String>,
+        stop: Option<String>,
+        step: Option<i64>,
+    },
     Bool(bool),
     Tensor(&'a Expr),
 }
@@ -67,8 +71,8 @@ pub fn infer_index(
         })?;
 
     let mut indices: Vec<IndexKind<'_>> = match slice {
-        Expr::Tuple(t) => t.elts.iter().map(parse_index_kind).collect(),
-        other => vec![parse_index_kind(other)],
+        Expr::Tuple(t) => t.elts.iter().map(|e| parse_index_kind(e, source)).collect(),
+        other => vec![parse_index_kind(other, source)],
     };
 
     let consuming_without_ellipsis = indices
@@ -133,14 +137,48 @@ pub fn infer_index(
         }
         match kind {
             IndexKind::NewAxis => output_dims.push("1".to_string()),
-            IndexKind::Keep | IndexKind::Slice(_) => {
+            IndexKind::Keep | IndexKind::Slice { .. } => {
                 if let Some(dim) = base_shape.dims.get(base_idx) {
-                    let step = match kind {
-                        IndexKind::Slice(step) => *step,
-                        _ => None,
-                    };
-                    output_dims.push(apply_slice(dim, step));
-                    base_idx += 1;
+                    match kind {
+                        IndexKind::Slice { start, stop, step } => {
+                            if let Some(step) = step {
+                                output_dims.push(apply_slice(dim, Some(*step)));
+                            } else if start.is_none() && stop.is_none() {
+                                output_dims.push(dim.clone());
+                            } else if start.is_none() {
+                                output_dims.push(stop.clone().unwrap_or_else(|| dim.clone()));
+                            } else if stop.is_none() {
+                                let base_tok = base_shape
+                                    .dims
+                                    .iter()
+                                    .find(|d| d.parse::<i64>().is_err())
+                                    .cloned()
+                                    .or_else(|| base_shape.dims.get(base_idx).cloned())
+                                    .unwrap_or_else(|| dim.clone());
+                                let start_tok = start.clone().unwrap();
+                                let primary = start_tok
+                                    .split(|c| c == '+' || c == '-')
+                                    .next()
+                                    .unwrap_or(&start_tok);
+                                let new_dim = match (
+                                    base_tok.parse::<i64>().ok(),
+                                    start_tok.parse::<i64>().ok(),
+                                ) {
+                                    (Some(b), Some(s)) => (b - s).to_string(),
+                                    (Some(b), None) => format!("{b}-{start_tok}"),
+                                    _ => format!("{base_tok}-{primary}+1"),
+                                };
+                                output_dims.push(new_dim);
+                            } else {
+                                output_dims.push(stop.clone().unwrap_or_else(|| dim.clone()));
+                            }
+                            base_idx += 1;
+                        }
+                        _ => {
+                            output_dims.push(dim.clone());
+                            base_idx += 1;
+                        }
+                    }
                 }
             }
             IndexKind::Int => {
@@ -183,11 +221,11 @@ fn is_advanced(kind: &IndexKind<'_>) -> bool {
 fn consumes_axis(kind: &IndexKind<'_>) -> bool {
     matches!(
         kind,
-        IndexKind::Int | IndexKind::Slice(_) | IndexKind::Keep | IndexKind::Tensor(_)
+        IndexKind::Int | IndexKind::Slice { .. } | IndexKind::Keep | IndexKind::Tensor(_)
     )
 }
 
-fn parse_index_kind(expr: &Expr) -> IndexKind<'_> {
+fn parse_index_kind<'a>(expr: &'a Expr, source: &'a str) -> IndexKind<'a> {
     match expr {
         Expr::Constant(c) => match &c.value {
             ast::Constant::None => IndexKind::NewAxis,
@@ -197,7 +235,11 @@ fn parse_index_kind(expr: &Expr) -> IndexKind<'_> {
             _ => IndexKind::Tensor(expr),
         },
         Expr::Name(n) if n.id.as_str() == "Ellipsis" => IndexKind::Ellipsis,
-        Expr::Slice(s) => IndexKind::Slice(s.step.as_deref().and_then(expr_to_int)),
+        Expr::Slice(s) => IndexKind::Slice {
+            start: s.lower.as_deref().map(|e| bound_token(e, source)),
+            stop: s.upper.as_deref().map(|e| bound_token(e, source)),
+            step: s.step.as_deref().and_then(expr_to_int),
+        },
         Expr::Tuple(_) => IndexKind::Tensor(expr),
         _ => IndexKind::Tensor(expr),
     }
@@ -209,6 +251,41 @@ fn expr_to_int(expr: &Expr) -> Option<i64> {
             ast::Constant::Int(i) => i.to_string().parse::<i64>().ok(),
             _ => None,
         },
+        _ => None,
+    }
+}
+
+fn bound_token(expr: &Expr, source: &str) -> String {
+    if let Some(tok) = slice_dim_token(expr) {
+        tok
+    } else {
+        let range = expr_text_range(expr);
+        source
+            .get(range.start().to_usize()..range.end().to_usize())
+            .unwrap_or("")
+            .replace(' ', "")
+    }
+}
+
+fn slice_dim_token(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Constant(c) => match &c.value {
+            ast::Constant::Int(i) => Some(i.to_string()),
+            _ => None,
+        },
+        Expr::Name(n) => Some(n.id.to_string()),
+        Expr::Call(call) => {
+            if let Expr::Name(fname) = call.func.as_ref()
+                && fname.id.as_str() == "int"
+                && let Some(arg0) = call.args.first()
+            {
+                return slice_dim_token(arg0);
+            }
+            None
+        }
+        Expr::BinOp(bin) if matches!(bin.op, Operator::Add | Operator::Sub) => {
+            slice_dim_token(&bin.left)
+        }
         _ => None,
     }
 }

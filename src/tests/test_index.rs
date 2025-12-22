@@ -60,3 +60,35 @@ fn multi_indices() {
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z =", "2 A C/2"));
 }
+
+#[test]
+fn infer_half_slice_symbolic() {
+    let src = extract_test_case(INDEX_PY_DATA, 8);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "A D C D"));
+}
+
+#[test]
+fn infer_slice_half_symbolic() {
+    let src = extract_test_case(INDEX_PY_DATA, 9);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "A A-D+1 C D"));
+}
+
+#[test]
+fn infer_half_slice_concrete() {
+    let src = extract_test_case(INDEX_PY_DATA, 10);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "128 32 224 16"));
+}
+
+#[test]
+fn infer_slice_half_concrete() {
+    let src = extract_test_case(INDEX_PY_DATA, 11);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "128 32 224 16"));
+}
