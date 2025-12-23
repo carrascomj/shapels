@@ -121,3 +121,41 @@ def call_type_hinted_but_wrong_forward(linear: UserLinearWrongButAnnTuple, x: F[
     # output should have shape [B, X, O]: F nonetheless
     # output2 should have shape [B, O, O]: F nonetheless
     output, output2 = linear(x, y)
+
+
+
+# test 8
+import torch
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+class UserLinearWithAnotherMethod(torch.nn.Module):
+    """The forward function is wrong but we only care about the other method."""
+    def ones_from_input(self, x):
+        return torch.ones_like(x)
+
+    def forward(self, x: F[T, "B X R"], y: F[T, "R O"]) -> tuple[F[T, "B X O"] | None, F[T, "B O O"]]:
+        z = x @ y.T
+        return z, z
+
+
+def inference_runs_through_method_callee(linear: UserLinearWithAnotherMethod, x: F[T, "B X R"]):
+    out = linear.ones_from_input(x)
+
+# test 9
+import torch
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+class UserLinearWithWrongMethod(torch.nn.Module):
+
+    """The forward function is wrong but shapels will resolve to the type hint at the caller site."""
+    def ones_from_input(self, x: F[T, "B X R"]) -> F[T, "B X R"], F[T, "B O T"]:
+        return torch.ones(25, 72)
+
+
+def inference_shorcircuits_through_method_callee_type_hints():
+    B, O = 3, 9
+    x: F[T, "B X R"] = torch.ones(B, X, R)
+    linear = UserLinearWithWrongMethod()
+    output, output2 = linear.ones_from_input(x)

@@ -4,6 +4,9 @@ from torch import Tensor as T
 
 
 class UserLinear(torch.nn.Module):
+    def zeros_from_x(self, x):
+        return torch.ones_like(x)
+
     def forward(x, y):
         z = x @ y
         return z

@@ -95,3 +95,14 @@ def arg_hint_returns_diagnostic_on_mismatch():
         J + K + L,
         arg_shape_is_wrong
     )
+
+
+# test 10
+from multi_callee import UserLinear
+
+def arg_hint_returns_diagnostic_on_mismatch():
+    B, T, O, K = 3, 27, 81, 243
+    x = torch.zeros(B, T, O, K)
+    # arg should be [B T O]
+    user_module = UserLinear()
+    out = user_module.zeros_from_x(x)

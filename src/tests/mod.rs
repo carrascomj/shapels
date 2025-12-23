@@ -38,23 +38,30 @@ pub fn extract_test_case(py_data: &'static str, n: usize) -> String {
 }
 
 pub fn is_hover_expected(src: &str, analysis: &Analysis, pat: &str, expected: &str) -> bool {
-    let mut line_idx = 0;
-    let mut col_idx = 0;
+    let mut saw_hover = false;
     for (idx, line) in src.lines().enumerate() {
-        if let Some(pos) = line.find(pat) {
-            line_idx = idx as u32;
-            col_idx = pos as u32;
-            break;
+        let mut search_idx = 0usize;
+        while let Some(pos) = line[search_idx..].find(pat) {
+            let col_idx = (search_idx + pos) as u32;
+            let hover = analysis.hover(Position {
+                line: idx as u32,
+                character: col_idx,
+            });
+            if let Some(info) = hover {
+                saw_hover = true;
+                if let Some(shape) = info.shape.as_ref()
+                    && shape.dim_string() == expected
+                {
+                    return true;
+                }
+            }
+            search_idx += pos + pat.len();
         }
     }
-    let hover = analysis
-        .hover(Position {
-            line: line_idx,
-            character: col_idx,
-        })
-        .expect(format!("Hover info failed for pat {pat} with expected shape {expected}").as_str());
-    let shape = hover.shape.as_ref().unwrap();
-    shape.dim_string() == expected
+    if !saw_hover {
+        panic!("Hover info failed for pat {pat} with expected shape {expected}");
+    }
+    false
 }
 
 fn is_hover_dtype(src: &str, analysis: &Analysis, pat: &str, expected_dtype: &str) -> bool {

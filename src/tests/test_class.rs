@@ -62,3 +62,19 @@ fn module_improper_is_resolved_to_its_forward_tuple_type_hints() {
     assert!(is_hover_expected(&src, &analysis, "output,", "B X O"));
     assert!(is_hover_expected(&src, &analysis, "output2 =", "B O O"));
 }
+
+#[test]
+fn inference_propages_through_method() {
+    let src = extract_test_case(PY_DATA, 8);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+    assert!(is_hover_expected(&src, &analysis, "out", "B X R"));
+}
+
+#[test]
+fn method_improper_is_resolved_to_its_forward_tuple_type_hints() {
+    let src = extract_test_case(PY_DATA, 9);
+    let analysis = analyze_source(&src);
+    assert!(is_hover_expected(&src, &analysis, "output,", "B X R"));
+    assert!(is_hover_expected(&src, &analysis, "output2 =", "B O T"));
+}

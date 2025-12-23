@@ -118,3 +118,13 @@ fn multi_file_alpha_equivalence_shape_arg_shape_checks() {
     let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
     assert!(analysis.diagnostics.is_empty());
 }
+
+#[test]
+fn multi_file_runs_inference_on_torch_module_method() {
+    // analyze entire caller file from disk so relative module resolution works
+    let src = extract_test_case(PY_MULTI_CALLER, 10);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    // no diagnostics expected
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "out =", "B T O K"));
+}
