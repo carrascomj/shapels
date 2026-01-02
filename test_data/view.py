@@ -26,7 +26,7 @@ from jaxtyping import Float as F
 from torch import Tensor as T
 
 def squeeze_unsqueeze_after_multiply_works():
-    B, X, Watch = 4, 2, 32
+    B, X, R = 4, 2, 32
     x: F[T, "B X R"] = torch.Tensor(B, X, R)
     y: F[T, " R"] = torch.Tensor(R,)
     y = y.unsqueeze(1)

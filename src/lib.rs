@@ -1,4 +1,4 @@
-#![allow(clippy::needless_option_as_deref, clippy::too_many_arguments)]
+#![allow(clippy::too_many_arguments)]
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustpython_parser::Parse;
@@ -8,7 +8,7 @@ use rustpython_parser::ast::{
 };
 use rustpython_parser::text_size::{TextRange, TextSize};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 mod infer;
@@ -20,11 +20,7 @@ use crate::infer::{
     infer_view_like, shape_dims_equal,
 };
 pub use crate::op_groups::AGGR_ALIASES;
-use crate::op_groups::{
-    BITWISE_ALIASES, BROADCASTABLE_ALIASES, BroadcastOp, CREATION_LIKE_ALIASES,
-    CREATION_SIZE_ALIASES, EQ_BROADCAST_ALIASES, FLATTEN_ALIASES, NOOP_ALIASES, NOOP_DIM_ALIASES,
-    TORCH_DTYPES, TRANSPOSE_ALIASES, TorchOp,
-};
+use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -173,19 +169,6 @@ struct ClassInfo {
 }
 
 type ClassMap = HashMap<Identifier, ClassInfo>;
-
-#[derive(Default, Clone)]
-struct Imports {
-    torch_aliases: HashSet<Identifier>,
-    // e.g., `import torch.nn.functional as F`
-    torch_nn_functional_aliases: HashSet<Identifier>,
-    /// Maps simple function name (e.g., "mm") to all aliases in scope.
-    func_aliases: HashMap<&'static str, HashSet<Identifier>>,
-    /// Module alias mapping for `import foo as bar` style.
-    module_aliases: HashMap<Identifier, String>,
-    /// Symbol imports mapping alias -> (module, original name).
-    from_imports: HashMap<Identifier, (String, Identifier)>,
-}
 
 #[derive(Clone)]
 pub(crate) struct CachedModule {
@@ -541,7 +524,7 @@ fn analyze_source_internal<'a>(
                 &imports,
                 &class_map,
                 &mut analysis,
-                module_cache.as_deref_mut(),
+                module_cache,
                 current_path,
             );
         }
@@ -775,7 +758,7 @@ fn simulate_function(
     call_stack: &mut Vec<Identifier>,
     mut initial_vars: HashMap<Identifier, VarState>,
     record_hovers: bool,
-    mut module_cache: Option<&mut ModuleCache>,
+    module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> (Vec<Diagnostic>, Vec<(Range, HoverInfo)>, ReturnValue) {
     let mut diagnostics = Vec::new();
@@ -807,7 +790,7 @@ fn simulate_function(
         class_map,
         call_stack,
         record_hovers,
-        module_cache.as_deref_mut(),
+        module_cache,
         module_path,
         false,
     );
@@ -1655,7 +1638,7 @@ fn infer_expr_shape(
                             hover_entries,
                             false,
                             source,
-                            module_cache.as_deref_mut(),
+                            module_cache,
                             module_path,
                         )
                     });
@@ -2059,7 +2042,7 @@ fn infer_tuple_elements(
             hover_entries,
             record_hovers,
             source,
-            module_cache.as_deref_mut(),
+            module_cache,
             module_path,
         )
         .and_then(|ret| ret.tuple().map(|tuple| tuple.to_vec())),
@@ -2110,7 +2093,7 @@ fn class_ref_from_constructor_call(
                 && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
                 && module_name != "torch"
                 && !module_name.starts_with("torch.")
-                && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
+                && let (Some(cache), Some(cur_path)) = (module_cache, module_path)
                 && let Some(module) = cache.get_module(module_name, cur_path)
                 && module.class_map.contains_key(&attr.attr)
             {
@@ -2361,7 +2344,7 @@ fn infer_call_return_from_info(
         call_stack,
         arg_shapes,
         false,
-        module_cache.as_deref_mut(),
+        module_cache,
         module_path,
     );
     diagnostics.append(&mut diag);
@@ -2626,7 +2609,7 @@ fn infer_defined_call_return(
             hover_entries,
             record_hovers,
             source,
-            module_cache.as_deref_mut(),
+            module_cache,
             Some(module.path.as_path()),
             0,
             false,
@@ -2737,163 +2720,6 @@ fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
         .unwrap_or(false)
 }
 
-/// Map all known operations to their importing aliases, for instance:
-///
-/// ```python
-/// import torch as t
-/// from torch import sum as torch_sum
-/// ```
-///
-/// In that example, shapels has to keep track that `torch_sum` is
-/// an alias to `torch.sum` and `t` of `torch` to identify this
-/// functions in the scope and perform shape inference.
-fn collect_imports(
-    module: &[Stmt],
-    module_path: Option<&Path>,
-    project_root: Option<&Path>,
-) -> Imports {
-    let mut imports = Imports::default();
-    // seed known function names
-    for fname in [
-        "mm",
-        "view",
-        "reshape",
-        "sum",
-        "permute",
-        "t",
-        "softmax",
-        "Tensor",
-        "randperm",
-        "linspace",
-        "logspace",
-        "arange",
-        "range",
-        "to",
-        "conv1d",
-        "conv2d",
-        "conv3d",
-        "repeat_interleave",
-    ] {
-        imports
-            .func_aliases
-            .entry(fname)
-            .or_insert_with(HashSet::new);
-    }
-    imports
-        .torch_aliases
-        .insert(Identifier::from("torch".to_string()));
-    imports
-        .torch_nn_functional_aliases
-        .insert(Identifier::from("torch.nn.functional".to_string()));
-
-    for stmt in module {
-        match stmt {
-            Stmt::Import(import) => {
-                for alias in &import.names {
-                    let name = alias.name.as_str();
-                    let as_id = alias
-                        .asname
-                        .clone()
-                        .unwrap_or_else(|| Identifier::from(name));
-                    imports
-                        .module_aliases
-                        .insert(as_id.clone(), name.to_string());
-                    if name == "torch" {
-                        imports.torch_aliases.insert(as_id.clone());
-                    } else if name == "torch.nn.functional" {
-                        imports.torch_nn_functional_aliases.insert(as_id.clone());
-                    }
-                    if let Some(val) = imports.func_aliases.get_mut(name) {
-                        val.insert(as_id);
-                    } else if AGGR_ALIASES.contains(name) {
-                        imports.func_aliases.entry("sum").or_default().insert(as_id);
-                    }
-                }
-            }
-            Stmt::ImportFrom(f) => {
-                let resolved_module = resolve_from_module(f, module_path, project_root);
-                if let Some(module) = &resolved_module
-                    && (module == "torch" || module == "torch.nn.functional")
-                {
-                    for alias in &f.names {
-                        let name = alias.name.as_str();
-                        if let Some(val) = imports.func_aliases.get_mut(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            val.insert(id);
-                        } else {
-                            for (container, key) in [
-                                (&AGGR_ALIASES, "sum"),
-                                (&NOOP_DIM_ALIASES, "softmax"),
-                                (&NOOP_ALIASES, "noop"),
-                                (&CREATION_SIZE_ALIASES, "Tensor"),
-                                (&BROADCASTABLE_ALIASES, "broadcast"),
-                                (&BITWISE_ALIASES, "bitwise"),
-                                (&EQ_BROADCAST_ALIASES, "broadcast_eq"),
-                                (&CREATION_LIKE_ALIASES, "like"),
-                                (&TRANSPOSE_ALIASES, "transpose"),
-                                (&FLATTEN_ALIASES, "flatten"),
-                            ] {
-                                if container.contains(name) {
-                                    let id = alias
-                                        .asname
-                                        .clone()
-                                        .unwrap_or_else(|| Identifier::from(name));
-                                    imports.func_aliases.entry(key).or_default().insert(id);
-                                }
-                            }
-                        }
-                    }
-                } else if let Some(module) = &resolved_module {
-                    for alias in &f.names {
-                        let id = alias
-                            .asname
-                            .clone()
-                            .unwrap_or_else(|| Identifier::from(alias.name.as_str()));
-                        imports
-                            .from_imports
-                            .insert(id, (module.to_string(), alias.name.clone()));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    imports
-}
-
-fn module_name_from_path(path: &Path, project_root: Option<&Path>) -> Option<String> {
-    let mut dir = path.parent()?;
-    let mut parts = Vec::new();
-    loop {
-        if dir.join("__init__.py").exists() {
-            if let Some(name) = dir.file_name().and_then(|s| s.to_str()) {
-                parts.push(name.to_string());
-            }
-        } else {
-            break;
-        }
-        if let Some(root) = project_root
-            && dir == root
-        {
-            break;
-        }
-        if let Some(parent) = dir.parent() {
-            dir = parent;
-        } else {
-            break;
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        parts.reverse();
-        Some(parts.join("."))
-    }
-}
-
 fn assignment_shape_checks(
     target: &Expr,
     value: &Expr,
@@ -2982,43 +2808,6 @@ fn assignment_shape_checks(
         }
     }
     true
-}
-
-fn resolve_from_module(
-    f: &ast::StmtImportFrom,
-    module_path: Option<&Path>,
-    project_root: Option<&Path>,
-) -> Option<String> {
-    // Absolute import
-    let level_val = f.level.map(|i| i.to_usize()).unwrap_or(0);
-    if level_val == 0 {
-        return f.module.as_ref().map(|m| m.to_string());
-    }
-    let base_pkg = module_path
-        .and_then(|p| module_name_from_path(p, project_root))
-        .unwrap_or_default();
-    if base_pkg.is_empty() {
-        return f.module.as_ref().map(|m| m.to_string());
-    }
-    let mut parts: Vec<String> = base_pkg.split('.').map(|s| s.to_string()).collect();
-    if level_val > 0 {
-        let pops = level_val.saturating_sub(1);
-        for _ in 0..pops {
-            if parts.pop().is_none() {
-                break;
-            }
-        }
-    }
-    if let Some(mod_name) = &f.module {
-        for p in mod_name.as_str().split('.') {
-            parts.push(p.to_string());
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("."))
-    }
 }
 
 fn parse_shape_annotation(expr: &Expr) -> Option<Shape> {
