@@ -1,7 +1,5 @@
 # shapels
 
-jaxtyping + LSP.
-
 **shapels** provides _shape inference_ for torch tensors inside your editor.
 
 ![showcase of shapels inside helix](./assets/readme_showcase.png)
@@ -21,7 +19,7 @@ but before running any code, in your editor of choice.
 
 ## Installation
 
-If you are not using VSCode, go to [the latest release
+If you are not using VSCode or Zed, go to [the latest release
 page](https://github.com/carrascomj/shapels/releases/latest), download the
 binary for your platform, unzip it and put it in your path.
 
@@ -51,6 +49,13 @@ cargo install --path .
 
 Just install it from the extensions marketplace, it comes with the `shapels` binary
 prebundled for your platform.
+
+But why don't you try Zed?
+
+* [Zed](https://zed.dev)
+
+Install it from the extensions tab. The extension will try to use the **shapels**
+binary present in the `$PATH` (configurable) and, if not found, download it.
 
 But why don't you try neovim?
 
