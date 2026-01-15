@@ -37,7 +37,6 @@ jobs:
         run: |
           mkdir linux
           cp target/x86_64-unknown-linux-gnu/release/${{ env.binary }} linux/
-          cp -r assets linux/
 
       - name: Package as a zip
         working-directory: ./linux
@@ -80,7 +79,6 @@ jobs:
         run: |
           mkdir windows
           cp target/x86_64-pc-windows-msvc/release/${{ env.binary }}.exe windows/
-          cp -r assets windows/
 
       - name: Package as a zip
         run: |
@@ -123,17 +121,20 @@ jobs:
         run: |
           cargo build --release --target x86_64-apple-darwin
 
-      - name: Prepare Package
+      - name: Prepare package
         run: |
-          mkdir -p ${{ env.binary }}.app/Contents/MacOS
-          cp target/x86_64-apple-darwin/release/${{ env.binary }} ${{ env.binary }}.app/Contents/MacOS/
-          cp -r assets ${{ env.binary }}.app/Contents/MacOS/
-          hdiutil create -fs HFS+ -volname "${{ env.binary }}" -srcfolder ${{ env.binary }}.app ${{ env.binary }}.dmg
+          mkdir macos
+          cp target/x86_64-apple-darwin/release/${{ env.binary }} macos/
+
+      - name: Package as a zip
+        working-directory: ./macos
+        run: |
+          zip --recurse-paths ../${{ env.binary }}.zip .
 
       - name: Upload binaries to artifacts
         uses: actions/upload-artifact@v4
         with:
-          path: ${{ env.binary }}.dmg
+          path: ${{ env.binary }}.zip
           name: mac
 
       - name: Upload binaries to release
@@ -141,7 +142,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ${{ env.binary }}.dmg
-          asset_name: ${{ env.binary }}-macos-${{ steps.get_version.outputs.tag }}.dmg
+          file: ${{ env.binary }}.zip
+          asset_name: ${{ env.binary }}-macos-${{ steps.get_version.outputs.tag }}.zip
           tag: ${{ github.ref }}
           overwrite: true
