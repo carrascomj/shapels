@@ -49,10 +49,14 @@ pub fn is_hover_expected(src: &str, analysis: &Analysis, pat: &str, expected: &s
             });
             if let Some(info) = hover {
                 saw_hover = true;
-                if let Some(shape) = info.shape.as_ref()
-                    && shape.dim_string() == expected
-                {
-                    return true;
+                if let Some(shape) = info.shape.as_ref() {
+                    let found_shape = shape.dim_string();
+                    if found_shape == expected {
+                        return true;
+                    } else {
+                        eprintln!("Found hover [{found_shape}] vs. [{expected}] expected");
+                        return false;
+                    }
                 }
             }
             search_idx += pos + pat.len();
