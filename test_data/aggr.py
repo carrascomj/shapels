@@ -37,3 +37,10 @@ def sum_all():
     x: F[T, "B X R"] = torch.Tensor(B, X, R)
     aggr = aggr_op(x)
     return aggr
+
+
+# test 4
+def keepdim_is_not_understood(img):
+    a, b, cropped_h, cropped_w = img.shape
+    # expand wrongly receives a base of 2 dims instead of 4
+    img = img.amin(dim=(2, 3), keepdim=True).expand(-1, -1, cropped_h, cropped_w)

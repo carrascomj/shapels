@@ -1721,6 +1721,7 @@ fn torch_op_to_shape(
             module_cache.as_deref_mut(),
             module_path,
             matches!(op, TorchOp::Squeeze),
+            get_arg(call, "keepdim", offset + 1),
         ),
         (TorchOp::NoopDim, Some(base), _, _) => {
             let base_hint = infer_expr_shape(

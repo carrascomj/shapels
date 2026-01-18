@@ -41,3 +41,16 @@ fn sum_all() {
         assert!(is_hover_expected(&src, &analysis, "aggr =", ""));
     }
 }
+
+#[test]
+fn keepdim_transforms_to_1() {
+    let src = extract_test_case(VIEW_PY_DATA, 4);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "img =",
+        "a b cropped_h cropped_w"
+    ));
+}

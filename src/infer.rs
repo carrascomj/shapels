@@ -14,7 +14,7 @@ use crate::{
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{
-    self, Constant, Expr, ExprBinOp, ExprCall, ExprSubscript, Identifier, Operator,
+    self, Constant, Expr, ExprBinOp, ExprCall, ExprConstant, ExprSubscript, Identifier, Operator,
 };
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
@@ -537,6 +537,7 @@ pub fn infer_squeeze(
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
     enforce_one: bool,
+    keepdim: Option<&Expr>,
 ) -> Option<Shape> {
     let diag_before = diagnostics.len();
     let base_shape = infer_expr_shape(
@@ -589,6 +590,30 @@ pub fn infer_squeeze(
         });
     };
 
+    let keepdim = keepdim
+        .map(|expr| {
+            if let Expr::Constant(ExprConstant {
+                value: Constant::Bool(b),
+                ..
+            }) = expr
+            {
+                *b
+            } else {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "keepdim argument was not understood; only constant False/True are supported.".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                false
+            }
+        })
+        .unwrap_or(false);
     let mut dims = base_shape.dims.clone();
     for idx in dims_to_remove.into_iter().rev() {
         if idx >= dims.len() {
@@ -605,25 +630,27 @@ pub fn infer_squeeze(
             });
             continue;
         }
-        if let Some(d) = dims.get(idx)
-            && enforce_one
-            && d != "1"
-        {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
-                severity: Some(
-                    d.parse::<i32>()
-                        .map_or(DiagnosticSeverity::WARNING, |_| DiagnosticSeverity::ERROR),
-                ),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: "Cannot squeeze dimension not equal to 1".into(),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
-            continue;
+        if let Some(d) = dims.get(idx) {
+            if enforce_one && d != "1" {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(whole_range, source),
+                    severity: Some(
+                        d.parse::<i32>()
+                            .map_or(DiagnosticSeverity::WARNING, |_| DiagnosticSeverity::ERROR),
+                    ),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Cannot squeeze dimension not equal to 1".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                continue;
+            } else if keepdim {
+                dims[idx] = String::from("1");
+                continue;
+            }
         }
         dims.remove(idx);
     }
