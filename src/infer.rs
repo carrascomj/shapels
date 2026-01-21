@@ -14,7 +14,8 @@ use crate::{
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{
-    self, Constant, Expr, ExprBinOp, ExprCall, ExprConstant, ExprSubscript, Identifier, Operator,
+    self, Constant, Expr, ExprBinOp, ExprCall, ExprConstant, ExprName, ExprSubscript, Identifier,
+    Operator,
 };
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
@@ -858,8 +859,9 @@ pub fn infer_view_like(
         base_hint.or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source));
     let target_tokens = args
         .iter()
-        .filter_map(|e| expr_to_dim_token(e, vars, diagnostics, source, &mut false))
-        .collect::<Vec<_>>();
+        .map(|e| expr_to_dim_token(e, vars, diagnostics, source, &mut false))
+        .collect::<Option<Vec<_>>>()?;
+
     if target_tokens.is_empty() {
         return None;
     }
@@ -1508,9 +1510,7 @@ fn expr_to_dim_token<'a>(
                 && let Ok(idx) = usize::try_from(i)
                 && attr.attr.as_str() == "shape"
             {
-                vars.get(&name.id)
-                    .and_then(|v| v.annotated.as_ref().or(v.inferred.as_ref()))
-                    .and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())))
+                size_to_dim(vars, name, idx, x, source, diagnostics, true)
             } else {
                 diagnostics.push(Diagnostic {
                     range: text_range_to_lsp(expr_text_range(x), source),
@@ -1541,9 +1541,7 @@ fn expr_to_dim_token<'a>(
                 && let Constant::Int(i) = &c.value
                 && let Ok(idx) = usize::try_from(i)
             {
-                vars.get(&name.id)
-                    .and_then(|v| v.annotated.as_ref().or(v.inferred.as_ref()))
-                    .and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())))
+                size_to_dim(vars, name, idx, x, source, diagnostics, true)
             } else {
                 diagnostics.push(Diagnostic {
                     range: text_range_to_lsp(expr_text_range(x), source),
@@ -1577,6 +1575,54 @@ fn expr_to_dim_token<'a>(
             None
         }
     }
+}
+
+fn size_to_dim<'a>(
+    vars: &'a HashMap<Identifier, VarState>,
+    name: &ExprName,
+    idx: usize,
+    x: &Expr,
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+    // could be a .shape[] attr index or a .size() method call
+    is_size: bool,
+) -> Option<Cow<'a, str>> {
+    let shape = vars
+        .get(&name.id)
+        .and_then(|v| v.annotated.as_ref().or(v.inferred.as_ref()));
+
+    let out = shape.and_then(|sh| sh.dims.get(idx).map(|dim| Cow::Borrowed(dim.as_str())));
+
+    if out.is_none() {
+        let (severity, message) = if shape.is_none() {
+            (
+                DiagnosticSeverity::WARNING,
+                "This tensor shape is unknown at this point".to_string(),
+            )
+        } else {
+            (
+                DiagnosticSeverity::ERROR,
+                format!(
+                    "No dim found at .{} `{idx}`",
+                    if is_size { "size" } else { "shape" }
+                ),
+            )
+        };
+
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(x), source),
+            severity: Some(severity),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message,
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+
+    out
 }
 
 /// `torch.Tensor.to` changes the dtype.
