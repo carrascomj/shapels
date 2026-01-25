@@ -7,6 +7,7 @@ use crate::analyze_source_at_path;
 use crate::tests::{extract_test_case, is_hover_dtype, is_hover_expected};
 
 const PY_MULTI_CALLER: &str = include_str!("../../test_data/multi_caller.py");
+const PY_REPRO: &str = include_str!("../../test_data/import_callee.py");
 
 #[test]
 fn multifile_hover_follows_imported_function() {
@@ -127,4 +128,14 @@ fn multi_file_runs_inference_on_torch_module_method() {
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "out =", "B T O K"));
+}
+
+#[test]
+fn imported_function_does_not_show_diagnostic_on_callee() {
+    // analyze entire caller file from disk so relative module resolution works
+    let src = extract_test_case(PY_REPRO, 1);
+    let analysis = analyze_source_at_path(&src, &Path::new("test_data/import_repro.py"));
+    // no diagnostics expected
+    println!("{:?}", analysis.diagnostics);
+    assert_eq!(analysis.diagnostics.len(), 0);
 }

@@ -2348,9 +2348,11 @@ fn infer_call_return_from_info(
         module_cache,
         module_path,
     );
-    diagnostics.append(&mut diag);
-    if record_hovers {
-        hover_entries.append(&mut hovers);
+    if emit_body_diagnostics {
+        diagnostics.append(&mut diag);
+        if record_hovers {
+            hover_entries.append(&mut hovers);
+        }
     }
     call_stack.pop();
     Some(ret_value)

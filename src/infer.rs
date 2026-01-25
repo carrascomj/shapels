@@ -1473,7 +1473,7 @@ fn expr_to_dim_token<'a>(
                         code: None,
                         code_description: None,
                         source: Some("shapels".into()),
-                        message: "Dim could be inferred".into(),
+                        message: "Dim was not understood from this argument".into(),
                         related_information: None,
                         tags: None,
                         data: None,
@@ -1523,6 +1523,7 @@ fn expr_to_dim_token<'a>(
                     tags: None,
                     data: None,
                 });
+                *diag_already = true;
                 None
             }
         }
@@ -1554,13 +1555,14 @@ fn expr_to_dim_token<'a>(
                     tags: None,
                     data: None,
                 });
+                *diag_already = true;
                 None
             }
         }
-        expr => {
+        _ => {
             if !*diag_already {
                 diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(expr_text_range(expr), source),
+                    range: text_range_to_lsp(expr_text_range(x), source),
                     severity: Some(DiagnosticSeverity::INFORMATION),
                     code: None,
                     code_description: None,
