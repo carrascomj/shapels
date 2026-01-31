@@ -57,6 +57,15 @@ But why don't you try Zed?
 Install it from the extensions tab. The extension will try to use the **shapels**
 binary present in the `$PATH` (configurable) and, if not found, download it.
 
+But why don't you try PyCharm?
+
+* [PyCharm](https://jetbrains.com/pycharm)
+
+1. Install the [LSP4Ij plugin](https://github.com/redhat-developer/lsp4ij): `Settings` > `Plugins` > Search "LSP4Ij".
+2. Once installed, go to `Settings` > `Languages & Frameworks` > `Language Servers` and click on `+` for adding a new language server.
+3. Call it **shapels**, the `Command` should be just **shapels** (if it's already in your `$PATH`.) Additionally, go to `Mappings` > `+` and add "Python" as the language.
+4. Go to [the latest release page](https://github.com/carrascomj/shapels/releases/latest), download the binary for your platform, unpack it and put it on your `$PATH`.
+
 But why don't you try neovim?
 
 * [neovim](https://neovim.io/)
