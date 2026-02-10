@@ -1181,6 +1181,24 @@ fn simulate_block(
                     return body_flow;
                 }
             }
+            Stmt::With(with_stmt) => {
+                let _ = simulate_block(
+                    &with_stmt.body,
+                    vars,
+                    diagnostics,
+                    hover_entries,
+                    return_value,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    record_hovers,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                    in_loop,
+                );
+            }
             Stmt::Break(_) => {
                 if in_loop {
                     return BlockFlow::Break;

@@ -62,3 +62,18 @@ fn if_inference_on_wrong_ops() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 1);
 }
+
+#[test]
+fn with_inference_on_proper_ops() {
+    let src = extract_test_case(BRANCH_DATA, 8);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X U"));
+}
+
+#[test]
+fn with_inference_on_wrong_ops() {
+    let src = extract_test_case(BRANCH_DATA, 9);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

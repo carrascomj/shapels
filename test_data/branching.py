@@ -57,3 +57,22 @@ def wrong_multiply_if_produces_diagnostics(x: F[T, "B X R"], y: F[T, "R S"]) -> 
     return z
 
 
+# test 8
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def proper_multiply_with_not_produce_diagnostics(x: F[T, "B X R"], y: F[T, "R U"]):
+    with open("file.txt") as _f:
+        z = x @ y
+    u = z
+
+
+# test 9
+import torch
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def wrong_multiply_with_produces_diagnostics(x: F[T, "B X R"], y: F[T, "R S"]) -> F[T, "B X S"]:
+    with torch.no_grad():
+        z = x.T @ y
+    return z
