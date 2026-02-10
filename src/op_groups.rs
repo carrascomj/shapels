@@ -394,6 +394,7 @@ pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
     "fmod",
     "pow",
     "positive",
+    "logaddexp",
 ];
 
 /// Functional equivalent to bitwise broadcastable operators (&, >>, etc.).
