@@ -14,8 +14,8 @@ use crate::{
 };
 use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
 use rustpython_parser::ast::{
-    self, Constant, Expr, ExprBinOp, ExprCall, ExprConstant, ExprName, ExprSubscript, Identifier,
-    Operator,
+    self, Constant, Expr, ExprBinOp, ExprCall, ExprConstant, ExprName, ExprSubscript, ExprUnaryOp,
+    Identifier, Operator,
 };
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
@@ -1200,6 +1200,7 @@ pub fn infer_permute(
 ) -> Option<Shape> {
     let base_shape = base_hint
         .or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source))?;
+    let dims_len = base_shape.dims.len();
     let mut order = Vec::new();
     match transpose {
         Transpose::Explicit => {
@@ -1219,12 +1220,8 @@ pub fn infer_permute(
             }
             let mut dims = Vec::with_capacity(2);
             for expr in order_args {
-                if let Expr::Constant(c) = expr
-                    && let ast::Constant::Int(i) = &c.value
-                    && let Ok(val) = i.to_string().parse::<isize>()
-                    && val >= 0
-                {
-                    dims.push(val as usize);
+                if let Some(val) = expr_to_usize(expr, dims_len) {
+                    dims.push(val);
                     continue;
                 }
                 diagnostics.push(Diagnostic {
@@ -1267,12 +1264,8 @@ pub fn infer_permute(
         Transpose::Permute => {
             order.reserve(order_args.len());
             for expr in order_args {
-                if let Expr::Constant(c) = expr
-                    && let ast::Constant::Int(i) = &c.value
-                    && let Ok(val) = i.to_string().parse::<isize>()
-                    && val >= 0
-                {
-                    order.push(val as usize);
+                if let Some(val) = expr_to_usize(expr, dims_len) {
+                    order.push(val);
                     continue;
                 }
                 diagnostics.push(Diagnostic {
@@ -1327,6 +1320,25 @@ pub fn infer_permute(
         dtype: base_shape.dtype.clone(),
         dims,
     })
+}
+
+fn expr_to_usize(expr: &Expr, dims_len: usize) -> Option<usize> {
+    if let Expr::Constant(c) = expr
+        && let ast::Constant::Int(i) = &c.value
+        && let Ok(val) = i.to_string().parse::<usize>()
+    {
+        Some(val)
+    } else if let Expr::UnaryOp(ExprUnaryOp { op, operand, .. }) = expr
+        && let Some(val) = expr_to_usize(operand, dims_len)
+    {
+        match op {
+            ast::UnaryOp::UAdd => Some(val),
+            ast::UnaryOp::USub if val <= dims_len => Some(dims_len - val),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 
 /// Infer softmax-like: no-op shapewise, but need to report diagnositcs

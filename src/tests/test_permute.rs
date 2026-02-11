@@ -42,3 +42,12 @@ fn torch_t_hover_oneliner() {
     let expected = "B";
     is_hover_expected(&src, &analysis, var, expected);
 }
+
+#[test]
+fn negative_indices_are_permuted() {
+    let src = extract_test_case(PERMUTE_PY_DATA, 5);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 2);
+    is_hover_expected(&src, &analysis, "transposed =", "n_crops H rgb B W");
+    is_hover_expected(&src, &analysis, "permuted =", "H rgb B n_crops W");
+}

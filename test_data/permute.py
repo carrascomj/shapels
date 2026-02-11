@@ -37,7 +37,6 @@ def torch_t():
     w = x.t()
 
 
-
 # test 4
 import torch
 from jaxtyping import F
@@ -48,3 +47,16 @@ def torch_t_oneliner():
     x: F[Tensor, "B X R"] = torch.Tensor(B, X, R)
     # torch.t for 0-dim and 1-dim returns the tensors as is
     z = x.sum(dim=(1, 2)).t()
+
+
+# test 5
+import torch
+
+def transpose_negative(images: torch.Tensor):
+    n_crops, B, rgb, H, W = images.shape
+    transposed = images.transpose(-2, 1)
+    permuted = transposed.permute(-4, 2, 3, 0, -1)
+    # wrong; -6 is out of range
+    transposed_wrong = images.transpose(-6, 1)
+    # wrong; -1 and 4 are the same dimension
+    permuted_wrong = transposed.permute(4, 2, 3, 0, -1)
