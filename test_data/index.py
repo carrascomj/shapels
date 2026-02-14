@@ -90,3 +90,35 @@ def slice_half_concrete():
     tensor = torch.Tensor(256, 32, 224, 16)
     z = tensor[128:]
 
+
+# test 12
+import torch
+
+def slice_half_concrete_and_wrong():
+    tensor = torch.Tensor(256, 32, 224, 16)
+    # this should emit a diagnostic
+    z = tensor[128:, 32]
+
+
+# test 13
+import torch
+
+def slice_half_concrete_and_wrong_negative():
+    tensor = torch.Tensor(256, 32, 224, 16)
+    # this should emit a diagnostic
+    z = tensor[128:, -33]
+
+# test 14
+import torch
+
+def slice_half_concrete_and_negative():
+    tensor = torch.Tensor(256, 32, 224, 16)
+    z = tensor[128:, -2, 1:-4]
+
+# test 15
+import torch
+
+def slice_half_concrete_and_negative():
+    tensor = torch.Tensor(256, 32, 224, 16)
+    # this should emit, step cannot be negative
+    z = tensor[128:, -2, 1:-2:-1]

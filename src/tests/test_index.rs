@@ -93,3 +93,32 @@ fn infer_slice_half_concrete() {
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z =", "128 32 224 16"));
 }
+
+#[test]
+fn infer_slice_half_concrete_wrong() {
+    let src = extract_test_case(INDEX_PY_DATA, 12);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
+fn infer_slice_half_concrete_neg_wrong() {
+    let src = extract_test_case(INDEX_PY_DATA, 13);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
+fn infer_slice_half_concrete_neg_right() {
+    let src = extract_test_case(INDEX_PY_DATA, 14);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "128 219 16"));
+}
+
+#[test]
+fn step_should_be_greater_than_0() {
+    let src = extract_test_case(INDEX_PY_DATA, 15);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

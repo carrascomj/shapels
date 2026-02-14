@@ -28,11 +28,15 @@ enum IndexKind<'a> {
     NewAxis,
     Ellipsis,
     Keep, // inserted from an expanded ellipsis
-    Int,
+    Int {
+        value: i64,
+        range: TextRange,
+    },
     Slice {
         start: Option<String>,
         stop: Option<String>,
         step: Option<i64>,
+        range: TextRange,
     },
     Bool(bool),
     Tensor(&'a Expr),
@@ -141,7 +145,39 @@ pub fn infer_index(
             IndexKind::Keep | IndexKind::Slice { .. } => {
                 if let Some(dim) = base_shape.dims.get(base_idx) {
                     match kind {
-                        IndexKind::Slice { start, stop, step } => {
+                        IndexKind::Slice {
+                            start,
+                            stop,
+                            step,
+                            range,
+                        } => {
+                            if let Some(step_val) = step
+                                && *step_val <= 0
+                            {
+                                diagnostics.push(Diagnostic {
+                                    range: text_range_to_lsp(*range, source),
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    code: None,
+                                    code_description: None,
+                                    source: Some("shapels".into()),
+                                    message: "Slice step must be greater than 0".into(),
+                                    related_information: None,
+                                    tags: None,
+                                    data: None,
+                                });
+                            }
+                            if let Some(base_len) = dim.parse::<i64>().ok() {
+                                let start_num = start.as_ref().and_then(|s| s.parse::<i64>().ok());
+                                let stop_num = stop.as_ref().and_then(|s| s.parse::<i64>().ok());
+                                let step_num = step.filter(|s| *s > 0);
+                                if let Some(len) =
+                                    slice_len_from_bounds(base_len, start_num, stop_num, step_num)
+                                {
+                                    output_dims.push(len.to_string());
+                                    base_idx += 1;
+                                    continue;
+                                }
+                            }
                             if let Some(step) = step {
                                 output_dims.push(apply_slice(dim, Some(*step)));
                             } else if start.is_none() && stop.is_none() {
@@ -183,7 +219,31 @@ pub fn infer_index(
                     }
                 }
             }
-            IndexKind::Int => {
+            IndexKind::Int { value, range } => {
+                if let Some(dim) = base_shape.dims.get(base_idx)
+                    && let Ok(base_len) = dim.parse::<i64>()
+                {
+                    let mut idx = *value;
+                    if idx < 0 {
+                        idx = base_len + idx;
+                    }
+                    if idx < 0 || idx >= base_len {
+                        diagnostics.push(Diagnostic {
+                            range: text_range_to_lsp(*range, source),
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: None,
+                            code_description: None,
+                            source: Some("shapels".into()),
+                            message: format!(
+                                "Index {} out of bounds for dimension size {}",
+                                value, base_len
+                            ),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        });
+                    }
+                }
                 base_idx += 1;
             }
             IndexKind::Ellipsis | IndexKind::Bool(_) | IndexKind::Tensor(_) => {}
@@ -223,7 +283,7 @@ fn is_advanced(kind: &IndexKind<'_>) -> bool {
 fn consumes_axis(kind: &IndexKind<'_>) -> bool {
     matches!(
         kind,
-        IndexKind::Int | IndexKind::Slice { .. } | IndexKind::Keep | IndexKind::Tensor(_)
+        IndexKind::Int { .. } | IndexKind::Slice { .. } | IndexKind::Keep | IndexKind::Tensor(_)
     )
 }
 
@@ -233,26 +293,46 @@ fn parse_index_kind<'a>(expr: &'a Expr, source: &'a str) -> IndexKind<'a> {
             ast::Constant::None => IndexKind::NewAxis,
             ast::Constant::Ellipsis => IndexKind::Ellipsis,
             ast::Constant::Bool(b) => IndexKind::Bool(*b),
-            ast::Constant::Int(_) => IndexKind::Int,
+            ast::Constant::Int(_) => {
+                expr_to_int(expr, None).map_or(IndexKind::Tensor(expr), |value| IndexKind::Int {
+                    value,
+                    range: expr_text_range(expr),
+                })
+            }
             _ => IndexKind::Tensor(expr),
         },
         Expr::Name(n) if n.id.as_str() == "Ellipsis" => IndexKind::Ellipsis,
         Expr::Slice(s) => IndexKind::Slice {
             start: s.lower.as_deref().map(|e| bound_token(e, source)),
             stop: s.upper.as_deref().map(|e| bound_token(e, source)),
-            step: s.step.as_deref().and_then(expr_to_int),
+            step: s.step.as_deref().and_then(|x| expr_to_int(x, None)),
+            range: expr_text_range(expr),
         },
         Expr::Tuple(_) => IndexKind::Tensor(expr),
+        Expr::UnaryOp(_) => {
+            expr_to_int(expr, None).map_or(IndexKind::Tensor(expr), |value| IndexKind::Int {
+                value,
+                range: expr_text_range(expr),
+            })
+        }
         _ => IndexKind::Tensor(expr),
     }
 }
 
-fn expr_to_int(expr: &Expr) -> Option<i64> {
+fn expr_to_int(expr: &Expr, dims_len: Option<usize>) -> Option<i64> {
     match expr {
-        Expr::Constant(c) => match &c.value {
-            ast::Constant::Int(i) => i.to_string().parse::<i64>().ok(),
-            _ => None,
-        },
+        Expr::Constant(ExprConstant {
+            value: ast::Constant::Int(i),
+            ..
+        }) => i.to_string().parse::<i64>().ok(),
+        Expr::UnaryOp(ExprUnaryOp { op, operand, .. }) => {
+            expr_to_int(operand, dims_len).and_then(|val| match (op, dims_len) {
+                (ast::UnaryOp::UAdd, _) => Some(val),
+                (ast::UnaryOp::USub, Some(n)) if val <= n as i64 => Some(n as i64 - val),
+                (ast::UnaryOp::USub, None) => Some(-val),
+                _ => None,
+            })
+        }
         _ => None,
     }
 }
@@ -282,10 +362,7 @@ fn bound_token(expr: &Expr, source: &str) -> String {
 
 fn slice_dim_token(expr: &Expr) -> Option<String> {
     match expr {
-        Expr::Constant(c) => match &c.value {
-            ast::Constant::Int(i) => Some(i.to_string()),
-            _ => None,
-        },
+        Expr::Constant(_) | Expr::UnaryOp(_) => expr_to_int(expr, None).map(|x| x.to_string()),
         Expr::Name(n) => Some(n.id.to_string()),
         Expr::Call(call) => {
             if let Expr::Name(fname) = call.func.as_ref()
@@ -319,6 +396,36 @@ fn apply_slice(dim: &str, step: Option<i64>) -> String {
         Some(s) if s > 1 => format!("{dim}/{s}"),
         Some(s) if s < -1 => format!("{dim}/{}", s.abs()),
         _ => dim.to_string(),
+    }
+}
+
+fn normalize_slice_bound(value: i64, len: i64) -> i64 {
+    let mut idx = if value < 0 { len + value } else { value };
+    if idx < 0 {
+        idx = 0;
+    } else if idx > len {
+        idx = len;
+    }
+    idx
+}
+
+fn slice_len_from_bounds(
+    len: i64,
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
+) -> Option<i64> {
+    let start_idx = start.map(|v| normalize_slice_bound(v, len)).unwrap_or(0);
+    let stop_idx = stop.map(|v| normalize_slice_bound(v, len)).unwrap_or(len);
+    let mut span = stop_idx - start_idx;
+    if span < 0 {
+        span = 0;
+    }
+    match step {
+        Some(step) if step > 1 => Some((span + step - 1) / step),
+        Some(step) if step == 1 => Some(span),
+        Some(_) => None,
+        None => Some(span),
     }
 }
 
@@ -1220,8 +1327,8 @@ pub fn infer_permute(
             }
             let mut dims = Vec::with_capacity(2);
             for expr in order_args {
-                if let Some(val) = expr_to_usize(expr, dims_len) {
-                    dims.push(val);
+                if let Some(val) = expr_to_int(expr, Some(dims_len)) {
+                    dims.push(val as usize);
                     continue;
                 }
                 diagnostics.push(Diagnostic {
@@ -1264,8 +1371,8 @@ pub fn infer_permute(
         Transpose::Permute => {
             order.reserve(order_args.len());
             for expr in order_args {
-                if let Some(val) = expr_to_usize(expr, dims_len) {
-                    order.push(val);
+                if let Some(val) = expr_to_int(expr, Some(dims_len)) {
+                    order.push(val as usize);
                     continue;
                 }
                 diagnostics.push(Diagnostic {
@@ -1320,25 +1427,6 @@ pub fn infer_permute(
         dtype: base_shape.dtype.clone(),
         dims,
     })
-}
-
-fn expr_to_usize(expr: &Expr, dims_len: usize) -> Option<usize> {
-    if let Expr::Constant(c) = expr
-        && let ast::Constant::Int(i) = &c.value
-        && let Ok(val) = i.to_string().parse::<usize>()
-    {
-        Some(val)
-    } else if let Expr::UnaryOp(ExprUnaryOp { op, operand, .. }) = expr
-        && let Some(val) = expr_to_usize(operand, dims_len)
-    {
-        match op {
-            ast::UnaryOp::UAdd => Some(val),
-            ast::UnaryOp::USub if val <= dims_len => Some(dims_len - val),
-            _ => None,
-        }
-    } else {
-        None
-    }
 }
 
 /// Infer softmax-like: no-op shapewise, but need to report diagnositcs
