@@ -116,8 +116,8 @@ fn range_from_all_numbers() {
     let src = extract_test_case(PY_DATA, 9);
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
-    assert!(is_hover_expected(&src, &analysis, "some_range =", "100"));
-    assert!(is_hover_expected(&src, &analysis, "some_arange =", "101"));
+    assert!(is_hover_expected(&src, &analysis, "some_range =", "101"));
+    assert!(is_hover_expected(&src, &analysis, "some_arange =", "100"));
 }
 
 #[test]
@@ -129,13 +129,13 @@ fn range_from_denom_numbers() {
         &src,
         &analysis,
         "some_range_n =",
-        "10/n_instances"
+        "10/n_instances+1"
     ));
     assert!(is_hover_expected(
         &src,
         &analysis,
         "some_arange_n =",
-        "10/n_instances+1"
+        "10/n_instances"
     ));
 }
 
@@ -173,4 +173,39 @@ fn creation_size_op_from_index_on_shape() {
         "bag_max_size =",
         "num_bags Batch"
     ));
+}
+
+#[test]
+fn arange_single_arg_symbolic() {
+    let src = extract_test_case(PY_DATA, 12);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+}
+
+#[test]
+fn range_single_arg_concrete() {
+    let src = extract_test_case(PY_DATA, 13);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "bag_indices =", "32"));
+}
+
+#[test]
+fn only_one_arg_is_wrong_for_range() {
+    let src = extract_test_case(PY_DATA, 14);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
+fn range_arange_concrete_shapes() {
+    let src = extract_test_case(PY_DATA, 15);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "arange_single =", "10"));
+    assert!(is_hover_expected(&src, &analysis, "arange_step_one =", "10"));
+    assert!(is_hover_expected(&src, &analysis, "arange_step_point =", "34"));
+    assert!(is_hover_expected(&src, &analysis, "range_two_args =", "11"));
+    assert!(is_hover_expected(&src, &analysis, "range_point_one =", "101"));
+    assert!(is_hover_expected(&src, &analysis, "range_step_one_val =", "11"));
 }

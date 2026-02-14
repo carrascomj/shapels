@@ -109,3 +109,37 @@ def zeros_from_shape_indexed():
     bag_max_shape = torch.zeros(num_bags, bag_indices.shape[1], device=bag_indices.device, dtype=bag_indices.dtype)
     # should be [num_bags, Batch]
     bag_max_size = torch.zeros(num_bags, bag_indices.size(0), device=bag_indices.device, dtype=bag_indices.dtype)
+
+
+# test 12
+import torch
+
+def single_arange_symbolic():
+    Batch, Feat = 32, 64
+    bag_indices = torch.arange(Batch)
+
+
+# test 13
+import torch
+
+def single_arange_concrete():
+    bag_indices = torch.arange(32)
+
+# test 14
+import torch
+
+def single_arange_concrete():
+    # missing one argument
+    bag_indices = torch.range(32)
+
+
+# test 15
+import torch
+
+def range_arange_concrete_shapes():
+    arange_single = torch.arange(10)
+    arange_step_one = torch.arange(0, 10, 1)
+    arange_step_point = torch.arange(0, 10, 0.3)
+    range_two_args = torch.range(0, 10)
+    range_point_one = torch.range(0, 10, 0.1)
+    range_step_one_val = torch.range(0, 10, 1)

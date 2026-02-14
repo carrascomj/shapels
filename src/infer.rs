@@ -1810,35 +1810,63 @@ pub fn infer_range_size(
             })
         }
         RangeOps::Range | RangeOps::Arange => {
-            let names = ["start", "end", "step"];
-            let defaults: [Option<String>; 3] = [Some("0".into()), None, Some("1".into())];
-
-            let arg_tuple: [Option<String>; 3] = std::array::from_fn(|i| {
-                get_arg(call, names[i], i)
-                    .and_then(|expr| {
-                        expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
-                            .map(Cow::into_owned)
-                    })
-                    .or_else(|| defaults[i].clone())
+            let mut start_expr = get_arg(call, "start", 0);
+            let mut end_expr = get_arg(call, "end", 1);
+            let step_expr = get_arg(call, "step", 2);
+            let has_kw_start = call
+                .keywords
+                .iter()
+                .any(|kw| kw.arg.as_deref() == Some("start"));
+            let has_kw_end = call
+                .keywords
+                .iter()
+                .any(|kw| kw.arg.as_deref() == Some("end"));
+            let implicit_end = range_op == RangeOps::Arange
+                && call.args.len() == 1
+                && !has_kw_start
+                && !has_kw_end;
+            if implicit_end {
+                end_expr = start_expr;
+                start_expr = None;
+            }
+            let start = start_expr
+                .and_then(|expr| {
+                    expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
+                        .map(Cow::into_owned)
+                })
+                .unwrap_or_else(|| "0".to_string());
+            let end = end_expr.and_then(|expr| {
+                expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
+                    .map(Cow::into_owned)
             });
-            if let [Some(start), Some(end), Some(step)] = arg_tuple {
-                let plus_one = if range_op == RangeOps::Arange {
-                    1.0
-                } else {
-                    0.0
-                };
+            let step = step_expr
+                .and_then(|expr| {
+                    expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
+                        .map(Cow::into_owned)
+                })
+                .unwrap_or_else(|| "1".to_string());
+            if let Some(end) = end {
+                let is_range = range_op == RangeOps::Range;
                 let ident = match (
                     start.parse::<f32>(),
                     end.parse::<f32>(),
                     step.parse::<f32>(),
                 ) {
-                    (Ok(s), Ok(e), Ok(ste)) => ((e - s) / ste + plus_one).to_string(),
+                    (Ok(s), Ok(e), Ok(ste)) => {
+                        let raw = (e - s) / ste;
+                        let count = if is_range {
+                            raw.floor() + 1.0
+                        } else {
+                            raw.ceil()
+                        };
+                        (count as i64).to_string()
+                    }
                     (Ok(s), Ok(e), Err(_)) => {
-                        let plus_one = if plus_one == 0.0 { "" } else { "+1" };
+                        let plus_one = if is_range { "+1" } else { "" };
                         (e - s).to_string() + format!("/{step}{plus_one}").as_str()
                     }
                     _ => {
-                        let plus_one = if plus_one == 0.0 { "" } else { "+1" };
+                        let plus_one = if is_range { "+1" } else { "" };
                         format!("{end}-{start}/{step}{plus_one}")
                     }
                 };
