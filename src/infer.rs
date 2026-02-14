@@ -166,7 +166,7 @@ pub fn infer_index(
                                     data: None,
                                 });
                             }
-                            if let Some(base_len) = dim.parse::<i64>().ok() {
+                            if let Ok(base_len) = dim.parse::<i64>() {
                                 let start_num = start.as_ref().and_then(|s| s.parse::<i64>().ok());
                                 let stop_num = stop.as_ref().and_then(|s| s.parse::<i64>().ok());
                                 let step_num = step.filter(|s| *s > 0);
@@ -225,7 +225,7 @@ pub fn infer_index(
                 {
                     let mut idx = *value;
                     if idx < 0 {
-                        idx = base_len + idx;
+                        idx += base_len;
                     }
                     if idx < 0 || idx >= base_len {
                         diagnostics.push(Diagnostic {
@@ -423,7 +423,7 @@ fn slice_len_from_bounds(
     }
     match step {
         Some(step) if step > 1 => Some((span + step - 1) / step),
-        Some(step) if step == 1 => Some(span),
+        Some(1) => Some(span),
         Some(_) => None,
         None => Some(span),
     }
@@ -1836,8 +1836,7 @@ pub fn infer_range_size(
                 })
                 .unwrap_or_else(|| "0".to_string());
             let end = end_expr.and_then(|expr| {
-                expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
-                    .map(Cow::into_owned)
+                expr_to_dim_token(expr, vars, diagnostics, source, &mut false).map(Cow::into_owned)
             });
             let step = step_expr
                 .and_then(|expr| {

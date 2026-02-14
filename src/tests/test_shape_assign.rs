@@ -203,9 +203,29 @@ fn range_arange_concrete_shapes() {
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
     assert!(is_hover_expected(&src, &analysis, "arange_single =", "10"));
-    assert!(is_hover_expected(&src, &analysis, "arange_step_one =", "10"));
-    assert!(is_hover_expected(&src, &analysis, "arange_step_point =", "34"));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "arange_step_one =",
+        "10"
+    ));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "arange_step_point =",
+        "34"
+    ));
     assert!(is_hover_expected(&src, &analysis, "range_two_args =", "11"));
-    assert!(is_hover_expected(&src, &analysis, "range_point_one =", "101"));
-    assert!(is_hover_expected(&src, &analysis, "range_step_one_val =", "11"));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "range_point_one =",
+        "101"
+    ));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "range_step_one_val =",
+        "11"
+    ));
 }
