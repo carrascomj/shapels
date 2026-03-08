@@ -13,7 +13,7 @@ const PY_REPRO: &str = include_str!("../../test_data/import_callee.py");
 fn multifile_hover_follows_imported_function() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 1);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z =", "B X O"));
@@ -22,7 +22,7 @@ fn multifile_hover_follows_imported_function() {
 #[test]
 fn multi_file_wrong_shape_arg_is_reported_on_caller() {
     let src = extract_test_case(PY_MULTI_CALLER, 9);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     if let Some(diag) = analysis.diagnostics.first() {
         // TODO: check if it is 0 or 1 indexed
         assert!(diag.range.start.line == 7 || diag.range.start.line == 8);
@@ -35,7 +35,7 @@ fn multi_file_wrong_shape_arg_is_reported_on_caller() {
 fn multi_file_runs_inference_on_callee() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 3);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z =", "B A X"));
@@ -45,7 +45,7 @@ fn multi_file_runs_inference_on_callee() {
 fn multi_file_reads_callee_float_type_hint() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 4);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_dtype(&src, &analysis, "z =", "F"));
@@ -55,7 +55,7 @@ fn multi_file_reads_callee_float_type_hint() {
 fn multi_file_reads_callee_int_type_hint() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 5);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_dtype(&src, &analysis, "z =", "Int"));
@@ -65,7 +65,7 @@ fn multi_file_reads_callee_int_type_hint() {
 fn multi_file_runs_inference_on_callee_with_tuple_return() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 6);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z, ", "B A X"));
@@ -75,7 +75,7 @@ fn multi_file_runs_inference_on_callee_with_tuple_return() {
 fn multi_file_runs_inference_on_callee_with_complex_tuple_return() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 7);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z, ", "B A X"));
@@ -85,7 +85,7 @@ fn multi_file_runs_inference_on_callee_with_complex_tuple_return() {
 fn multi_file_runs_inference_on_torch_module_instances() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 8);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "b =", "B A A"));
@@ -116,7 +116,7 @@ fn venv_site_packages_module_resolves() {
 #[test]
 fn multi_file_alpha_equivalence_shape_arg_shape_checks() {
     let src = extract_test_case(PY_MULTI_CALLER, 2);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     assert!(analysis.diagnostics.is_empty());
 }
 
@@ -124,7 +124,7 @@ fn multi_file_alpha_equivalence_shape_arg_shape_checks() {
 fn multi_file_runs_inference_on_torch_module_method() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_MULTI_CALLER, 10);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/multi_caller.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
     // no diagnostics expected
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "out =", "B T O K"));
@@ -134,7 +134,7 @@ fn multi_file_runs_inference_on_torch_module_method() {
 fn imported_function_does_not_show_diagnostic_on_callee() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_REPRO, 1);
-    let analysis = analyze_source_at_path(&src, &Path::new("test_data/import_repro.py"));
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/import_repro.py"));
     // no diagnostics expected
     println!("{:?}", analysis.diagnostics);
     assert_eq!(analysis.diagnostics.len(), 0);

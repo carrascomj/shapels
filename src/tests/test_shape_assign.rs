@@ -1,4 +1,4 @@
-///! Tests for assignments of shapes by hints or special methods.
+//! Tests for assignments of shapes by hints or special methods.
 use lsp_types::Position;
 use shapels::analyze_source;
 
@@ -79,7 +79,7 @@ fn test_zeros_creation_size() {
             line: line_idx,
             character: col_idx,
         })
-        .expect(format!("Hover info failed for pat {pat} with expected shape {expected}").as_str());
+        .unwrap_or_else(|| panic!("Hover info failed for pat {pat} with expected shape {expected}"));
     let shape = hover.shape.as_ref().unwrap();
     assert_eq!(shape.dim_string(), expected);
     assert_eq!(shape.dtype, Some(String::from("bool")));

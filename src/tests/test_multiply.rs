@@ -251,12 +251,9 @@ fn equality_operators_always_return_bool() {
                 line: line_idx,
                 character: col_idx,
             })
-            .expect(
-                format!("Hover info failed for pat {pattern} with expected shape {expected}")
-                    .as_str(),
-            );
+            .unwrap_or_else(|| panic!("Hover info failed for pat {pattern} with expected shape {expected}"));
         let shape = hover.shape.as_ref().unwrap();
         assert_eq!(shape.dim_string(), "A B C 1");
-        assert_eq!(shape.dtype.as_ref().map(|x| x.as_str()), Some("bool"));
+        assert_eq!(shape.dtype.as_deref(), Some("bool"));
     }
 }
