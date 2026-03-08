@@ -48,6 +48,8 @@ pub enum TorchOp {
     RepeatInterleave,
     /// `torch.flatten`, `torch.ravel`
     Flatten,
+    /// `torch.quantile`,`torch.nan_quantile`
+    Quantile,
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -83,6 +85,8 @@ impl TorchOp {
             Self::RepeatInterleave
         } else if AGGR_ALIASES.contains(attr_name) {
             Self::Aggr
+        } else if QUANTILE_ALIASES.contains(attr_name) {
+            Self::Quantile
         } else if NOOP_DIM_ALIASES.contains(attr_name) {
             Self::NoopDim
         } else if NOOP_ALIASES.contains(attr_name) {
@@ -139,6 +143,8 @@ impl TorchOp {
             Self::NoopDim
         } else if is_alias_of("noop", func_name_id, imports) {
             Self::Noop
+        } else if is_alias_of("quantile", func_name_id, imports) {
+            Self::Quantile
         } else if is_alias_of("Tensor", func_name_id, imports) {
             Self::Creation { is_size: true }
         } else if is_alias_of("like", func_name_id, imports) {
@@ -180,10 +186,6 @@ pub static AGGR_ALIASES: Set<&'static str> = phf_set![
     "nanprod",
     "nanstd",
     "nanvar",
-    // FIXME: quantile and nanquantile only apply iff
-    // the q argument is a scalar
-    "quantile",
-    "nanquantile",
     "argmax",
     "argmin",
     "all",
@@ -192,6 +194,10 @@ pub static AGGR_ALIASES: Set<&'static str> = phf_set![
     "logsumexp",
     "norm",
 ];
+
+/// Quantiles: q is a scalar, dim is at position 2.
+/// https://docs.pytorch.org/docs/stable/generated/torch.quantile.html
+pub static QUANTILE_ALIASES: Set<&'static str> = phf_set!["quantile", "nanquantile",];
 
 /// Shape-wise NoOp, must have dim dimension
 pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
@@ -220,6 +226,7 @@ pub static CREATION_SIZE_ALIASES: Set<&'static str> =
 
 /// `*_like`, accepting a tensor as input.
 pub static CREATION_LIKE_ALIASES: Set<&'static str> = phf_set![
+    "tensor",
     "empty_like",
     "zeros_like",
     "ones_like",
@@ -507,6 +514,7 @@ pub fn collect_imports(
         "conv2d",
         "conv3d",
         "repeat_interleave",
+        "quantile",
     ] {
         imports
             .func_aliases
@@ -569,6 +577,7 @@ pub fn collect_imports(
                                 (&CREATION_LIKE_ALIASES, "like"),
                                 (&TRANSPOSE_ALIASES, "transpose"),
                                 (&FLATTEN_ALIASES, "flatten"),
+                                (&QUANTILE_ALIASES, "quantile"),
                             ] {
                                 if container.contains(name) {
                                     let id = alias

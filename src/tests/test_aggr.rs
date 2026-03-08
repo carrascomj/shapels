@@ -54,3 +54,21 @@ fn keepdim_transforms_to_1() {
         "a b cropped_h cropped_w"
     ));
 }
+
+#[test]
+fn test_quantile_after_unsqueeze_multiply() {
+    let src = extract_test_case(VIEW_PY_DATA, 5);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    let (pat, expected) = ("z =", "B 1");
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
+}
+
+#[test]
+fn test_quantile_multi_q() {
+    let src = extract_test_case(VIEW_PY_DATA, 6);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    let (pat, expected) = ("z =", "3 2 1");
+    assert!(is_hover_expected(&src, &analysis, pat, expected));
+}

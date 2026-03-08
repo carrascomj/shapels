@@ -40,7 +40,34 @@ def sum_all():
 
 
 # test 4
-def keepdim_is_not_understood(img):
+def keepdim_is_understood(img):
     a, b, cropped_h, cropped_w = img.shape
     # expand wrongly receives a base of 2 dims instead of 4
     img = img.amin(dim=(2, 3), keepdim=True).expand(-1, -1, cropped_h, cropped_w)
+
+
+# test 5
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def quantile_single_q():
+    B, X, Watch = 4, 2, 32
+    x: F[T, "B X R"] = torch.Tensor(B, X, R)
+    y: F[T, " R"] = torch.Tensor(R,)
+    y = y.unsqueeze(1)
+    matmul_out = x @ y
+    z = matmul_out.quantile(0.9, 1)
+    return z
+
+
+# test 6
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def quantile_multi_q():
+    """Example from https://docs.pytorch.org/docs/stable/generated/torch.quantile.html."""
+    B, X, Watch = 4, 2, 32
+    a = torch.randn(2, 3)
+    q = torch.tensor([0.25, 0.5, 0.75])
+    z = torch.quantile(a, q, dim=1, keepdim=1)
+    return z

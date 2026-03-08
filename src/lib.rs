@@ -984,9 +984,7 @@ fn simulate_block(
                         module_path,
                     )
                 {
-                    for (target_expr, shape_opt) in
-                        target_tuple.elts.iter().zip(tuple_shapes.into_iter())
-                    {
+                    for (target_expr, shape_opt) in target_tuple.elts.iter().zip(tuple_shapes) {
                         if let (Some(name), Some(shape)) = (name_from_expr(target_expr), shape_opt)
                         {
                             vars.insert(
@@ -1199,15 +1197,11 @@ fn simulate_block(
                     in_loop,
                 );
             }
-            Stmt::Break(_) => {
-                if in_loop {
-                    return BlockFlow::Break;
-                }
+            Stmt::Break(_) if in_loop => {
+                return BlockFlow::Break;
             }
-            Stmt::Continue(_) => {
-                if in_loop {
-                    return BlockFlow::Continue;
-                }
+            Stmt::Continue(_) if in_loop => {
+                return BlockFlow::Continue;
             }
             Stmt::Return(ret) => {
                 if let Some(val) = &ret.value {
@@ -1723,24 +1717,28 @@ fn torch_op_to_shape(
             module_cache.as_deref_mut(),
             module_path,
         ),
-        (op @ (TorchOp::Squeeze | TorchOp::Aggr), Some(arg0), _, _) => infer_squeeze(
-            arg0,
-            get_arg(call, "dim", offset),
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            record_hovers,
-            source,
-            call.range,
-            module_cache.as_deref_mut(),
-            module_path,
-            matches!(op, TorchOp::Squeeze),
-            get_arg(call, "keepdim", offset + 1),
-        ),
+        (op @ (TorchOp::Squeeze | TorchOp::Aggr | TorchOp::Quantile), Some(arg0), _, _) => {
+            let (offset, q_arg) = if matches!(op, TorchOp::Quantile) {(offset + 1, get_arg(call, "q", offset))} else {(offset, None)};
+            infer_squeeze(
+                arg0,
+                get_arg(call, "dim", offset),
+                q_arg,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                call.range,
+                module_cache.as_deref_mut(),
+                module_path,
+                matches!(op, TorchOp::Squeeze),
+                get_arg(call, "keepdim", offset + 1),
+            )
+        }
         (TorchOp::NoopDim, Some(base), _, _) => {
             let base_hint = infer_expr_shape(
                 base,

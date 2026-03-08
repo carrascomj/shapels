@@ -632,6 +632,7 @@ fn matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
 pub fn infer_squeeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
+    q_arg: Option<&Expr>,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
@@ -679,6 +680,19 @@ pub fn infer_squeeze(
         )
     })?;
 
+    let q_arg_dims = q_arg.map(|q_expr| {
+        // Scalar q keeps the same reduction behavior as regular aggregations.
+        if expr_to_dim_token(q_expr, vars, diagnostics, source, &mut false)
+            .is_some_and(|token| token.parse::<f64>().is_ok())
+        {
+            Vec::new()
+        } else if let Some(shape) = lookup_shape(q_expr, vars, hover_entries, record_hovers, source)
+        {
+            shape.dims
+        } else {
+            vec!["q".to_string()]
+        }
+    });
     let dims_to_remove = if let Some(dim) = dim_arg {
         match parse_dims(dim, base_shape.dims.len(), vars, diagnostics, source) {
             Ok(v) => v,
@@ -692,6 +706,10 @@ pub fn infer_squeeze(
         } else {
             dims.clear();
         }
+        if let Some(mut q_dims) = q_arg_dims {
+            q_dims.extend(dims);
+            dims = q_dims;
+        }
         return Some(Shape {
             dtype: base_shape.dtype.clone(),
             dims,
@@ -700,12 +718,25 @@ pub fn infer_squeeze(
 
     let keepdim = keepdim
         .map(|expr| {
-            if let Expr::Constant(ExprConstant {
-                value: Constant::Bool(b),
-                ..
-            }) = expr
-            {
-                *b
+            if let Expr::Constant(ExprConstant { value, .. }) = expr {
+                match value {
+                    Constant::Bool(b) => *b,
+                    Constant::Int(i) => i.to_string() != "0",
+                    _ => {
+                        diagnostics.push(Diagnostic {
+                            range: text_range_to_lsp(whole_range, source),
+                            severity: Some(DiagnosticSeverity::INFORMATION),
+                            code: None,
+                            code_description: None,
+                            source: Some("shapels".into()),
+                            message: "keepdim argument was not understood; only constant False/True or 0/1 are supported.".into(),
+                            related_information: None,
+                            tags: None,
+                            data: None,
+                        });
+                        false
+                    }
+                }
             } else {
                 diagnostics.push(Diagnostic {
                     range: text_range_to_lsp(whole_range, source),
@@ -713,7 +744,7 @@ pub fn infer_squeeze(
                     code: None,
                     code_description: None,
                     source: Some("shapels".into()),
-                    message: "keepdim argument was not understood; only constant False/True are supported.".into(),
+                    message: "keepdim argument was not understood; only constant False/True or 0/1 are supported.".into(),
                     related_information: None,
                     tags: None,
                     data: None,
@@ -761,6 +792,10 @@ pub fn infer_squeeze(
             }
         }
         dims.remove(idx);
+    }
+    if let Some(mut q_dims) = q_arg_dims {
+        q_dims.extend(dims);
+        dims = q_dims;
     }
     Some(Shape {
         dtype: base_shape.dtype.clone(),
@@ -1507,6 +1542,21 @@ pub fn infer_creation_size(
             dims: shape.dims,
             dtype,
         });
+    }
+    // lists and tuples are parsed their lengths (assumend non-nested)
+    if !not_tensor {
+        if let [Expr::List(list), ..] = call.args.as_slice() {
+            return Some(Shape {
+                dtype,
+                dims: vec![list.elts.len().to_string()],
+            });
+        }
+        if let [Expr::Tuple(seq), ..] = call.args.as_slice() {
+            return Some(Shape {
+                dtype,
+                dims: vec![seq.elts.len().to_string()],
+            });
+        }
     }
     let list = match call.args.as_slice() {
         [Expr::List(list), ..] if not_tensor => list.elts.as_slice(),
@@ -2384,7 +2434,7 @@ pub fn infer_flatten(
     if let (Ok(start), Ok(end)) = (start_dim.parse::<i32>(), end_dim.parse::<i32>()) {
         let start = resolve_dim_in_bounds(start, base_len, diagnostics, source, &call.range)?;
         let end = resolve_dim_in_bounds(end, base_len, diagnostics, source, &call.range)?;
-        let mut out_dims = vec![String::new(); base_len - (end - start) as usize];
+        let mut out_dims = vec![String::new(); base_len - (end - start)];
         // fill in left and right of [start, end) interval
         let mut out_oft = 0;
         for i in 0..base_len {
