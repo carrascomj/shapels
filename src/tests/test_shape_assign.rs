@@ -79,7 +79,9 @@ fn test_zeros_creation_size() {
             line: line_idx,
             character: col_idx,
         })
-        .unwrap_or_else(|| panic!("Hover info failed for pat {pat} with expected shape {expected}"));
+        .unwrap_or_else(|| {
+            panic!("Hover info failed for pat {pat} with expected shape {expected}")
+        });
     let shape = hover.shape.as_ref().unwrap();
     assert_eq!(shape.dim_string(), expected);
     assert_eq!(shape.dtype, Some(String::from("bool")));

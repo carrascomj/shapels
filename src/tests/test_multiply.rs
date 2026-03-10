@@ -251,7 +251,9 @@ fn equality_operators_always_return_bool() {
                 line: line_idx,
                 character: col_idx,
             })
-            .unwrap_or_else(|| panic!("Hover info failed for pat {pattern} with expected shape {expected}"));
+            .unwrap_or_else(|| {
+                panic!("Hover info failed for pat {pattern} with expected shape {expected}")
+            });
         let shape = hover.shape.as_ref().unwrap();
         assert_eq!(shape.dim_string(), "A B C 1");
         assert_eq!(shape.dtype.as_deref(), Some("bool"));

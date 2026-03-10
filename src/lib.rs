@@ -10,14 +10,20 @@ use rustpython_parser::text_size::{TextRange, TextSize};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 mod infer;
+mod module_resolution;
 pub mod op_groups;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_conv, infer_creation_size,
     infer_flatten, infer_index, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size,
     infer_repeat, infer_repeat_interleave, infer_squeeze, infer_to, infer_unsqueeze,
     infer_view_like, shape_dims_equal,
+};
+use crate::module_resolution::{
+    ClassMap, ClassRef, FuncMap, FunctionInfo, ModuleCache, class_ref_from_annotation,
+    class_ref_from_expr, collect_class_defs, collect_function_defs, method_param_offset,
+    with_class_info,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
@@ -146,83 +152,6 @@ impl ReturnValue {
     }
 }
 
-#[derive(Clone)]
-struct FunctionInfo {
-    args: Box<Arguments>,
-    body: Vec<Stmt>,
-    returns: Option<Box<Expr>>,
-}
-
-type FuncMap = HashMap<Identifier, FunctionInfo>;
-
-#[derive(Debug, Clone)]
-struct ClassRef {
-    name: Identifier,
-    module: Option<String>,
-}
-
-#[derive(Clone)]
-struct ClassInfo {
-    is_torch_module: bool,
-    forward: Option<FunctionInfo>,
-    methods: HashMap<Identifier, FunctionInfo>,
-}
-
-type ClassMap = HashMap<Identifier, ClassInfo>;
-
-#[derive(Clone)]
-pub(crate) struct CachedModule {
-    path: PathBuf,
-    source: String,
-    func_map: FuncMap,
-    imports: Imports,
-    class_map: ClassMap,
-}
-
-pub(crate) struct ModuleCache {
-    modules: HashMap<String, CachedModule>,
-    project_root: Option<PathBuf>,
-}
-
-impl ModuleCache {
-    fn new(current_file: &Path) -> Self {
-        let project_root = find_project_root(current_file);
-        Self {
-            modules: HashMap::new(),
-            project_root,
-        }
-    }
-
-    fn project_root(&self) -> Option<&Path> {
-        self.project_root.as_deref()
-    }
-
-    /// Return a cloned module entry, loading and parsing it if necessary.
-    fn get_module(&mut self, module_name: &str, current_file: &Path) -> Option<CachedModule> {
-        if let Some(cached) = self.modules.get(module_name) {
-            return Some(cached.clone());
-        }
-        let path = resolve_module_path(module_name, current_file, self.project_root.as_deref())?;
-        let source = fs::read_to_string(&path).ok()?;
-        let normalized = normalize_return_annotations(&source);
-        let source = normalized.into_owned();
-        let module = Suite::parse(&source, module_name).ok()?;
-        let imports = collect_imports(&module, Some(&path), self.project_root());
-        let mut func_map: FuncMap = HashMap::new();
-        collect_function_defs(&module, &mut func_map);
-        let class_map = collect_class_defs(&module, &imports);
-        let cached = CachedModule {
-            path,
-            source,
-            func_map,
-            imports,
-            class_map,
-        };
-        self.modules.insert(module_name.to_string(), cached.clone());
-        Some(cached)
-    }
-}
-
 /// Normalize return annotations so `-> A, B` parses as `-> (A, B)`.
 fn normalize_return_annotations<'a>(source: &'a str) -> Cow<'a, str> {
     let mut changed = false;
@@ -258,182 +187,14 @@ fn normalize_return_annotations<'a>(source: &'a str) -> Cow<'a, str> {
     }
 }
 
-fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut dir = start.parent();
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    while let Some(current) = dir {
-        if current.join(".git").exists()
-            || current.join("pyproject.toml").exists()
-            || current.join("setup.py").exists()
-            || current.join("setup.cfg").exists()
-        {
-            return Some(current.to_path_buf());
-        }
-        if Some(current.to_path_buf()) == home {
-            break;
-        }
-        dir = current.parent();
-    }
-    None
-}
-
-/// Resolve a class reference across local/module context and run a callback with its info.
-fn with_class_info<R, F>(
-    class_ref: &ClassRef,
-    source: &str,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    module_cache: &mut Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-    f: F,
-) -> Option<R>
-where
-    F: FnOnce(
-        &ClassInfo,
-        &str,
-        &FuncMap,
-        &Imports,
-        &ClassMap,
-        Option<&Path>,
-        &mut Option<&mut ModuleCache>,
-    ) -> R,
-{
-    match &class_ref.module {
-        Some(module_name) => {
-            let module = {
-                let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
-                else {
-                    return None;
-                };
-                cache.get_module(module_name, cur_path)?
-            };
-            let class_info = module.class_map.get(&class_ref.name)?;
-            Some(f(
-                class_info,
-                &module.source,
-                &module.func_map,
-                &module.imports,
-                &module.class_map,
-                Some(module.path.as_path()),
-                module_cache,
-            ))
-        }
-        None => {
-            let class_info = class_map.get(&class_ref.name)?;
-            Some(f(
-                class_info,
-                source,
-                func_map,
-                imports,
-                class_map,
-                module_path,
-                module_cache,
-            ))
-        }
-    }
-}
-
-fn resolve_module_path(
-    module: &str,
-    current_file: &Path,
-    project_root: Option<&Path>,
-) -> Option<PathBuf> {
-    let mut search_roots: Vec<PathBuf> = Vec::new();
-
-    if let Some(parent) = current_file.parent() {
-        search_roots.push(parent.to_path_buf());
-    }
-    if let Some(prj) = project_root {
-        search_roots.push(prj.to_path_buf());
-        let src_dir = prj.join("src");
-        if src_dir.exists() {
-            search_roots.push(src_dir);
-        }
-    }
-
-    // Search for virtual environment markers in PATH.
-    if let Ok(path_var) = std::env::var("PATH") {
-        for entry in path_var.split(':') {
-            if !entry.contains(".venv") {
-                continue;
-            }
-            let mut p = PathBuf::from(entry);
-            while let Some(parent) = p.parent() {
-                if let Some(name) = parent.file_name()
-                    && name.to_string_lossy().contains(".venv")
-                {
-                    let venv_dir = parent.to_path_buf();
-                    // parent of .venv might be the project root
-                    if let Some(parent_parent) = venv_dir.parent() {
-                        search_roots.push(parent_parent.to_path_buf());
-                    }
-                    // site-packages paths
-                    let lib_dir = venv_dir.join("lib");
-                    if lib_dir.exists()
-                        && let Ok(entries) = fs::read_dir(&lib_dir)
-                    {
-                        for entry in entries.flatten() {
-                            let fname = entry.file_name();
-                            if fname.to_string_lossy().starts_with("python") {
-                                let sp = entry.path().join("site-packages");
-                                if sp.exists() {
-                                    search_roots.push(sp);
-                                }
-                            }
-                        }
-                    }
-                    break;
-                }
-                p = parent.to_path_buf();
-            }
-        }
-    }
-
-    // Convert module name to path components.
-    let parts: Vec<&str> = module.split('.').collect();
-    for root in search_roots {
-        let mut base = root.clone();
-        for part in &parts {
-            base.push(part);
-        }
-        let file_candidate = base.with_extension("py");
-        if file_candidate.exists() {
-            return Some(file_candidate);
-        }
-        let init_candidate = base.join("__init__.py");
-        if init_candidate.exists() {
-            return Some(init_candidate);
-        }
-        // Heuristic: if root already points at the top-level package (e.g., root ends with parts[0]),
-        // try resolving without repeating the first component to avoid example_python/example_python duplication.
-        if let Some(root_name) = root.file_name()
-            && root_name
-                == parts
-                    .first()
-                    .map(std::ffi::OsStr::new)
-                    .unwrap_or_else(|| std::ffi::OsStr::new(""))
-            && parts.len() > 1
-        {
-            let mut base = root.clone();
-            for part in parts.iter().skip(1) {
-                base.push(part);
-            }
-            let file_candidate = base.with_extension("py");
-            if file_candidate.exists() {
-                return Some(file_candidate);
-            }
-            let init_candidate = base.join("__init__.py");
-            if init_candidate.exists() {
-                return Some(init_candidate);
-            }
-        }
-    }
-    None
-}
-
 pub fn analyze_source(source: &str) -> Analysis {
-    analyze_source_internal(source, None, None)
+    if let Ok(cwd) = std::env::current_dir() {
+        let anchor = cwd.join("__memory__.py");
+        let mut cache = ModuleCache::new(&anchor);
+        analyze_source_internal(source, Some(&anchor), Some(&mut cache))
+    } else {
+        analyze_source_internal(source, None, None)
+    }
 }
 
 /// Analyze in-memory source but anchored at a file path so imports can resolve.
@@ -526,6 +287,7 @@ fn analyze_source_internal<'a>(
                 &mut analysis,
                 module_cache,
                 current_path,
+                None,
             );
         }
         Err(err) => {
@@ -545,128 +307,6 @@ fn analyze_source_internal<'a>(
     analysis
 }
 
-fn collect_function_defs(body: &[Stmt], func_map: &mut FuncMap) {
-    for stmt in body {
-        if let Stmt::FunctionDef(func) = stmt {
-            func_map.insert(
-                func.name.clone(),
-                FunctionInfo {
-                    args: func.args.clone(),
-                    body: func.body.clone(),
-                    returns: func.returns.clone(),
-                },
-            );
-        }
-    }
-}
-
-struct ClassDefInfo {
-    forward: Option<FunctionInfo>,
-    methods: HashMap<Identifier, FunctionInfo>,
-    base_names: Vec<Identifier>,
-    direct_torch: bool,
-}
-
-fn is_torch_nn_module_base(expr: &Expr, imports: &Imports) -> bool {
-    let Expr::Attribute(attr) = expr else {
-        return false;
-    };
-    if attr.attr.as_str() != "Module" {
-        return false;
-    }
-    match attr.value.as_ref() {
-        Expr::Attribute(nn_attr) if nn_attr.attr.as_str() == "nn" => {
-            if let Expr::Name(torch_name) = nn_attr.value.as_ref() {
-                return imports.torch_aliases.contains(&torch_name.id);
-            }
-            false
-        }
-        Expr::Name(nn_name) => imports
-            .module_aliases
-            .get(&nn_name.id)
-            .map(|module| module == "torch.nn")
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
-fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
-    let mut defs: HashMap<Identifier, ClassDefInfo> = HashMap::new();
-    for stmt in body {
-        if let Stmt::ClassDef(class_def) = stmt {
-            let mut methods = HashMap::new();
-            let mut forward = None;
-            for stmt in class_def.body.iter() {
-                if let Stmt::FunctionDef(func) = stmt {
-                    let info = FunctionInfo {
-                        args: func.args.clone(),
-                        body: func.body.clone(),
-                        returns: func.returns.clone(),
-                    };
-                    if func.name.as_str() == "forward" {
-                        forward = Some(info.clone());
-                    }
-                    methods.insert(func.name.clone(), info);
-                }
-            }
-            let base_names = class_def
-                .bases
-                .iter()
-                .filter_map(|base| match base {
-                    Expr::Name(name) => Some(name.id.clone()),
-                    _ => None,
-                })
-                .collect();
-            let direct_torch = class_def
-                .bases
-                .iter()
-                .any(|base| is_torch_nn_module_base(base, imports));
-            defs.insert(
-                class_def.name.clone(),
-                ClassDefInfo {
-                    forward,
-                    methods,
-                    base_names,
-                    direct_torch,
-                },
-            );
-        }
-    }
-
-    let mut is_torch: HashMap<Identifier, bool> = defs
-        .iter()
-        .map(|(name, info)| (name.clone(), info.direct_torch))
-        .collect();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (name, info) in defs.iter() {
-            if !is_torch.get(name).copied().unwrap_or(false)
-                && info
-                    .base_names
-                    .iter()
-                    .any(|base| is_torch.get(base).copied().unwrap_or(false))
-            {
-                is_torch.insert(name.clone(), true);
-                changed = true;
-            }
-        }
-    }
-
-    let mut class_map = HashMap::new();
-    for (name, info) in defs {
-        class_map.insert(
-            name.clone(),
-            ClassInfo {
-                is_torch_module: is_torch.get(&name).copied().unwrap_or(false),
-                forward: info.forward,
-                methods: info.methods,
-            },
-        );
-    }
-    class_map
-}
-
 /// Iterate over the function and classes of a module `body`.
 ///
 /// The base case is a function, where shape inference is run. For classes,
@@ -680,6 +320,7 @@ fn analyze_function_bodies(
     analysis: &mut Analysis,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
+    current_class_ref: Option<ClassRef>,
 ) {
     for stmt in body {
         match stmt {
@@ -694,6 +335,7 @@ fn analyze_function_bodies(
                     &mut Vec::new(),
                     module_cache.as_deref_mut(),
                     module_path,
+                    current_class_ref.as_ref(),
                 );
                 analysis.diagnostics.append(&mut func_analysis.diagnostics);
                 analysis
@@ -709,6 +351,10 @@ fn analyze_function_bodies(
                 analysis,
                 module_cache.as_deref_mut(),
                 module_path,
+                Some(ClassRef {
+                    name: class_def.name.clone(),
+                    module: None,
+                }),
             ),
             _ => {}
         }
@@ -725,7 +371,21 @@ fn analyze_function(
     call_stack: &mut Vec<Identifier>,
     module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
+    current_class_ref: Option<&ClassRef>,
 ) -> Analysis {
+    let mut initial_vars = HashMap::new();
+    if let Some(class_ref) = current_class_ref
+        && method_param_offset(args) == 1
+    {
+        initial_vars.insert(
+            Identifier::from("self"),
+            VarState {
+                annotated: None,
+                inferred: None,
+                class_ref: Some(class_ref.clone()),
+            },
+        );
+    }
     let (diagnostics, hover_entries, _) = simulate_function(
         args,
         body,
@@ -734,7 +394,7 @@ fn analyze_function(
         imports,
         class_map,
         call_stack,
-        HashMap::new(),
+        initial_vars,
         true,
         module_cache,
         module_path,
@@ -744,6 +404,37 @@ fn analyze_function(
         diagnostics,
         hover_entries,
     }
+}
+
+fn expr_has_unbound_self(expr: &Expr, vars: &HashMap<Identifier, VarState>) -> bool {
+    match expr {
+        Expr::Name(name) => name.id.as_str() == "self" && !vars.contains_key(&name.id),
+        Expr::Attribute(attr) => expr_has_unbound_self(attr.value.as_ref(), vars),
+        _ => false,
+    }
+}
+
+fn report_unbound_self_diagnostic(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> bool {
+    if !expr_has_unbound_self(expr, vars) {
+        return false;
+    }
+    diagnostics.push(Diagnostic {
+        range: text_range_to_lsp(expr_text_range(expr), source),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: Some("shapels".into()),
+        message: "Unknown `self`: method must declare `self` as its first parameter".into(),
+        related_information: None,
+        tags: None,
+        data: None,
+    });
+    true
 }
 
 /// Initializes inputs of a function and wraps around [`simulate_block`]
@@ -775,6 +466,9 @@ fn simulate_function(
         imports,
         class_map,
     );
+    for (name, state) in initial_vars {
+        vars.entry(name).or_insert(state);
+    }
 
     let mut return_value = ReturnValue::default();
 
@@ -932,10 +626,13 @@ fn simulate_block(
                             hover_entries.push((range, HoverInfo { shape: Some(shape) }));
                         }
                     } else if let Some(val) = &assign.value
-                        && let Some(class_ref) = class_ref_from_constructor_call(
+                        && let Some(class_ref) = class_ref_from_expr(
                             val,
-                            class_map,
+                            vars,
+                            source,
+                            func_map,
                             imports,
+                            class_map,
                             module_cache.as_deref_mut(),
                             module_path,
                         )
@@ -1033,10 +730,13 @@ fn simulate_block(
                         if record_hovers {
                             hover_entries.push((range, HoverInfo { shape: Some(shape) }));
                         }
-                    } else if let Some(class_ref) = class_ref_from_constructor_call(
+                    } else if let Some(class_ref) = class_ref_from_expr(
                         &assign.value,
-                        class_map,
+                        vars,
+                        source,
+                        func_map,
                         imports,
+                        class_map,
                         module_cache.as_deref_mut(),
                         module_path,
                     ) {
@@ -1398,26 +1098,36 @@ fn infer_expr_shape(
             })
         }
         Expr::Call(call) => {
+            if report_unbound_self_diagnostic(call.func.as_ref(), vars, diagnostics, source) {
+                return None;
+            }
+            if let Some(class_ref) = class_ref_from_expr(
+                call.func.as_ref(),
+                vars,
+                source,
+                func_map,
+                imports,
+                class_map,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) && let Some(ret) = infer_class_call_return(
+                call,
+                &class_ref,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) {
+                return ret.first().cloned();
+            }
             if let Expr::Name(func_name) = call.func.as_ref() {
-                if let Some(class_ref) = vars.get(&func_name.id).and_then(|v| v.class_ref.as_ref())
-                    && let Some(ret) = infer_class_call_return(
-                        call,
-                        class_ref,
-                        vars,
-                        func_map,
-                        imports,
-                        class_map,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                {
-                    return ret.first().cloned();
-                }
                 let torchop_shape = torch_op_to_shape(
                     vars,
                     func_map,
@@ -1464,6 +1174,7 @@ fn infer_expr_shape(
                         source,
                         module_cache.as_deref_mut(),
                         Some(module.path.as_path()),
+                        None,
                         0,
                         false,
                     )
@@ -1490,6 +1201,7 @@ fn infer_expr_shape(
                         source,
                         module_cache.as_deref_mut(),
                         module_path,
+                        None,
                         0,
                         false,
                     )
@@ -1500,26 +1212,31 @@ fn infer_expr_shape(
             // methods are functions with attributes
             if let Expr::Attribute(attr) = call.func.as_ref() {
                 let attr_name: &str = attr.attr.as_ref();
-                if let Expr::Name(base_name) = attr.value.as_ref()
-                    && let Some(class_ref) =
-                        vars.get(&base_name.id).and_then(|v| v.class_ref.as_ref())
-                    && let Some(ret) = infer_class_method_call_return(
-                        call,
-                        class_ref,
-                        &attr.attr,
-                        vars,
-                        func_map,
-                        imports,
-                        class_map,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        record_hovers,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                {
+                if let Some(class_ref) = class_ref_from_expr(
+                    attr.value.as_ref(),
+                    vars,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                ) && let Some(ret) = infer_class_method_call_return(
+                    call,
+                    &class_ref,
+                    &attr.attr,
+                    vars,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                ) {
                     return ret.first().cloned();
                 }
                 if let Expr::Name(module_ident) = attr.value.as_ref()
@@ -1548,6 +1265,7 @@ fn infer_expr_shape(
                         source,
                         module_cache.as_deref_mut(),
                         Some(module.path.as_path()),
+                        None,
                         0,
                         false,
                     )
@@ -1597,6 +1315,9 @@ fn infer_expr_shape(
         ),
         // attributes of a tensor, not a method!
         Expr::Attribute(attr) => {
+            if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
+                return None;
+            }
             let attr_name: &str = attr.attr.as_ref();
             if attr_name == "T" {
                 let base_hint =
@@ -1658,6 +1379,9 @@ fn infer_expr_shape(
             None
         }
         Expr::Name(expr_name) => {
+            if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
+                return None;
+            }
             let shape = vars
                 .get(&expr_name.id)
                 .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
@@ -1678,9 +1402,9 @@ fn infer_expr_shape(
 /// incorrect.
 fn torch_op_to_shape(
     vars: &HashMap<Identifier, VarState>,
-    func_map: &HashMap<Identifier, FunctionInfo>,
+    func_map: &FuncMap,
     imports: &Imports,
-    class_map: &HashMap<Identifier, ClassInfo>,
+    class_map: &ClassMap,
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
@@ -2067,86 +1791,6 @@ fn infer_tuple_elements(
     }
 }
 
-fn method_param_offset(args: &Arguments) -> usize {
-    match args.args.first() {
-        Some(param) if param.def.arg.as_str() == "self" => 1,
-        _ => 0,
-    }
-}
-
-fn class_ref_from_constructor_call(
-    call_expr: &Expr,
-    class_map: &ClassMap,
-    imports: &Imports,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-) -> Option<ClassRef> {
-    let Expr::Call(call) = call_expr else {
-        return None;
-    };
-    match call.func.as_ref() {
-        Expr::Name(name) => {
-            if class_map.contains_key(&name.id) {
-                return Some(ClassRef {
-                    name: name.id.clone(),
-                    module: None,
-                });
-            }
-            if let Some((module_name, original)) = imports.from_imports.get(&name.id)
-                && module_name != "torch"
-                && !module_name.starts_with("torch.")
-                && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
-                && let Some(module) = cache.get_module(module_name, cur_path)
-                && module.class_map.contains_key(original)
-            {
-                return Some(ClassRef {
-                    name: original.clone(),
-                    module: Some(module_name.to_string()),
-                });
-            }
-        }
-        Expr::Attribute(attr) => {
-            if let Expr::Name(module_ident) = attr.value.as_ref()
-                && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
-                && module_name != "torch"
-                && !module_name.starts_with("torch.")
-                && let (Some(cache), Some(cur_path)) = (module_cache, module_path)
-                && let Some(module) = cache.get_module(module_name, cur_path)
-                && module.class_map.contains_key(&attr.attr)
-            {
-                return Some(ClassRef {
-                    name: attr.attr.clone(),
-                    module: Some(module_name.to_string()),
-                });
-            }
-        }
-        _ => {}
-    }
-    None
-}
-
-fn class_ref_from_annotation(
-    ann: &Expr,
-    imports: &Imports,
-    class_map: &ClassMap,
-) -> Option<ClassRef> {
-    if let Expr::Name(name) = ann {
-        if class_map.contains_key(&name.id) {
-            return Some(ClassRef {
-                name: name.id.clone(),
-                module: None,
-            });
-        }
-        if let Some((module_name, original)) = imports.from_imports.get(&name.id) {
-            return Some(ClassRef {
-                name: original.clone(),
-                module: Some(module_name.clone()),
-            });
-        }
-    }
-    None
-}
-
 fn union_members<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
     if let Expr::BinOp(ExprBinOp {
         left, op, right, ..
@@ -2235,6 +1879,7 @@ fn infer_call_return_from_info(
     source: &str,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
+    callee_self_class_ref: Option<&ClassRef>,
     param_offset: usize,
     emit_body_diagnostics: bool,
 ) -> Option<ReturnValue> {
@@ -2301,9 +1946,16 @@ fn infer_call_return_from_info(
                         class_ref: None,
                     },
                 );
-            } else if let Expr::Name(name) = arg_expr
-                && let Some(class_ref) = vars.get(&name.id).and_then(|v| v.class_ref.clone())
-            {
+            } else if let Some(class_ref) = class_ref_from_expr(
+                arg_expr,
+                vars,
+                source,
+                func_map,
+                imports,
+                class_map,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) {
                 arg_shapes.insert(
                     param.def.arg.clone(),
                     VarState {
@@ -2314,6 +1966,16 @@ fn infer_call_return_from_info(
                 );
             }
         }
+    }
+    if let Some(self_class_ref) = callee_self_class_ref {
+        arg_shapes.insert(
+            Identifier::from("self"),
+            VarState {
+                annotated: None,
+                inferred: None,
+                class_ref: Some(self_class_ref.clone()),
+            },
+        );
     }
     if let Some(ret_ann) = callee_info.returns.as_deref() {
         let annotated_return = if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
@@ -2326,7 +1988,7 @@ fn infer_call_return_from_info(
             shape_union.map(|shape| ReturnValue::from_shape(Some(shape)))
         };
         if let Some(ret) = annotated_return {
-            if emit_body_diagnostics {
+            if emit_body_diagnostics || record_hovers {
                 call_stack.push(callee_name.clone());
                 let (mut diag, mut hovers, _) = simulate_function(
                     callee_info.args.as_ref(),
@@ -2341,7 +2003,9 @@ fn infer_call_return_from_info(
                     module_cache.as_deref_mut(),
                     module_path,
                 );
-                diagnostics.append(&mut diag);
+                if emit_body_diagnostics {
+                    diagnostics.append(&mut diag);
+                }
                 if record_hovers {
                     hover_entries.append(&mut hovers);
                 }
@@ -2360,23 +2024,30 @@ fn infer_call_return_from_info(
         callee_class_map,
         call_stack,
         arg_shapes,
-        false,
+        record_hovers,
         module_cache,
         module_path,
     );
     if emit_body_diagnostics {
         diagnostics.append(&mut diag);
-        if record_hovers {
-            hover_entries.append(&mut hovers);
-        }
+    }
+    if record_hovers {
+        hover_entries.append(&mut hovers);
     }
     call_stack.pop();
     Some(ret_value)
 }
 
-fn infer_class_call_return(
+#[derive(Clone, Copy)]
+enum ClassCallable<'a> {
+    Forward,
+    Method(&'a Identifier),
+}
+
+fn infer_class_member_call_return(
     call: &ExprCall<TextRange>,
     class_ref: &ClassRef,
+    callable: ClassCallable<'_>,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
@@ -2389,6 +2060,12 @@ fn infer_class_call_return(
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
+    let callee_name = match callable {
+        ClassCallable::Forward => class_ref.name.clone(),
+        ClassCallable::Method(method_name) => {
+            Identifier::from(format!("{}::{}", class_ref.name, method_name))
+        }
+    };
     with_class_info(
         class_ref,
         source,
@@ -2404,15 +2081,20 @@ fn infer_class_call_return(
          callee_class_map,
          callee_path,
          module_cache| {
-            if !class_info.is_torch_module {
-                return None;
-            }
-            let forward = class_info.forward.as_ref()?;
-            let param_offset = method_param_offset(&forward.args);
+            let callee_info = match callable {
+                ClassCallable::Forward => {
+                    if !class_info.is_torch_module {
+                        return None;
+                    }
+                    class_info.forward.as_ref()?
+                }
+                ClassCallable::Method(method_name) => class_info.methods.get(method_name)?,
+            };
+            let param_offset = method_param_offset(&callee_info.args);
             infer_call_return_from_info(
                 call,
-                &class_ref.name,
-                forward,
+                &callee_name,
+                callee_info,
                 callee_source,
                 callee_func_map,
                 callee_imports,
@@ -2428,12 +2110,46 @@ fn infer_class_call_return(
                 source,
                 module_cache.as_deref_mut(),
                 callee_path,
+                Some(class_ref),
                 param_offset,
                 false,
             )
         },
     )
-    .and_then(|ret| ret)
+    .flatten()
+}
+
+fn infer_class_call_return(
+    call: &ExprCall<TextRange>,
+    class_ref: &ClassRef,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ReturnValue> {
+    infer_class_member_call_return(
+        call,
+        class_ref,
+        ClassCallable::Forward,
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+        module_cache,
+        module_path,
+    )
 }
 
 fn infer_class_method_call_return(
@@ -2449,52 +2165,25 @@ fn infer_class_method_call_return(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
+    module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
-    let callee_name = Identifier::from(format!("{}::{}", class_ref.name, method_name));
-    with_class_info(
+    infer_class_member_call_return(
+        call,
         class_ref,
-        source,
+        ClassCallable::Method(method_name),
+        vars,
         func_map,
         imports,
         class_map,
-        &mut module_cache,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+        module_cache,
         module_path,
-        |class_info,
-         callee_source,
-         callee_func_map,
-         callee_imports,
-         callee_class_map,
-         callee_path,
-         module_cache| {
-            let method_info = class_info.methods.get(method_name)?;
-            let param_offset = method_param_offset(&method_info.args);
-            infer_call_return_from_info(
-                call,
-                &callee_name,
-                method_info,
-                callee_source,
-                callee_func_map,
-                callee_imports,
-                callee_class_map,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                callee_path,
-                param_offset,
-                false,
-            )
-        },
     )
-    .and_then(|ret| ret)
 }
 
 fn infer_defined_call_return(
@@ -2511,24 +2200,36 @@ fn infer_defined_call_return(
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
+    if report_unbound_self_diagnostic(call.func.as_ref(), vars, diagnostics, source) {
+        return None;
+    }
+    if let Some(class_ref) = class_ref_from_expr(
+        call.func.as_ref(),
+        vars,
+        source,
+        func_map,
+        imports,
+        class_map,
+        module_cache.as_deref_mut(),
+        module_path,
+    ) {
+        return infer_class_call_return(
+            call,
+            &class_ref,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        );
+    }
     if let Expr::Name(func_name) = call.func.as_ref() {
-        if let Some(class_ref) = vars.get(&func_name.id).and_then(|v| v.class_ref.as_ref()) {
-            return infer_class_call_return(
-                call,
-                class_ref,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            );
-        }
         if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
             && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
             && let Some(module) = cache.get_module(module_name, cur_path)
@@ -2553,6 +2254,7 @@ fn infer_defined_call_return(
                 source,
                 module_cache.as_deref_mut(),
                 Some(module.path.as_path()),
+                None,
                 0,
                 false,
             );
@@ -2577,18 +2279,27 @@ fn infer_defined_call_return(
                 source,
                 module_cache.as_deref_mut(),
                 module_path,
+                None,
                 0,
                 false,
             );
         }
     }
     if let Expr::Attribute(attr) = call.func.as_ref()
-        && let Expr::Name(base_name) = attr.value.as_ref()
-        && let Some(class_ref) = vars.get(&base_name.id).and_then(|v| v.class_ref.as_ref())
+        && let Some(class_ref) = class_ref_from_expr(
+            attr.value.as_ref(),
+            vars,
+            source,
+            func_map,
+            imports,
+            class_map,
+            module_cache.as_deref_mut(),
+            module_path,
+        )
     {
         return infer_class_method_call_return(
             call,
-            class_ref,
+            &class_ref,
             &attr.attr,
             vars,
             func_map,
@@ -2630,6 +2341,7 @@ fn infer_defined_call_return(
             source,
             module_cache,
             Some(module.path.as_path()),
+            None,
             0,
             false,
         );

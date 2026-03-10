@@ -159,3 +159,94 @@ def inference_shorcircuits_through_method_callee_type_hints():
     x: F[T, "B X R"] = torch.ones(B, X, R)
     linear = UserLinearWithWrongMethod()
     output, output2 = linear.ones_from_input(x)
+
+
+# test 10
+import torch
+from multi_callee import UserLinear
+
+
+class MyModel(torch.nn.Module):
+    def __init__(self):
+        self.proj = UserLinear()
+
+    def forward(self, x, y):
+        B, X, Y = x.shape
+        Y, Z = y.shape
+        z = self.proj(x, y)
+        return z
+
+
+# test 11
+from multi_callee import UserLinear
+
+
+class MyModelNested(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+
+    def forward(self, x, y):
+        z = self.proj(x, y)
+        return z.T
+
+
+class MyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = MyModelNested()
+
+    def forward(self, x, y):
+        B, X, U = x.shape
+        U, L = y.shape
+        z = self.proj(x, y)
+        return z
+
+
+# test 12
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+
+
+class MyModelNested(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+
+    def forward(self, x: F[T, "B A X"], y: F[T, "A X"]) -> tuple[F[T, "B A A"], F[T, "B X A"]]:
+        z = self.proj(x, y.T)
+        return z, y
+
+
+class MyModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = MyModelNested()
+
+    def forward(self, x, y):
+        z, u = self.proj(x, y)
+        return z.T
+
+    def another_method(self, x: F[T, "B A X"], y: F[T, "A X"]):
+        z, u = self.proj(x, y)
+        x = z.view(1, 0, 2)
+        return x
+
+
+# test 13
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+
+
+class MyModelNestedNoSelf(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+
+    def forward(x: F[T, "B A X"], y: F[T, "A X"]) -> tuple[F[T, "B A A"], F[T, "B X A"]]:
+        # should emit a diagnostic, self unknown
+        w = self.proj(x, y.T)
+        return z, y
+

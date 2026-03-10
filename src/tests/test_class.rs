@@ -78,3 +78,32 @@ fn method_improper_is_resolved_to_its_forward_tuple_type_hints() {
     assert!(is_hover_expected(&src, &analysis, "output,", "B X R"));
     assert!(is_hover_expected(&src, &analysis, "output2 =", "B O T"));
 }
+
+#[test]
+fn inference_propagates_to_self() {
+    let src = extract_test_case(PY_DATA, 10);
+    let analysis = analyze_source(&src);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X Z"));
+}
+
+#[test]
+fn inference_propagates_to_nested_self() {
+    let src = extract_test_case(PY_DATA, 11);
+    let analysis = analyze_source(&src);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X L"));
+}
+
+#[test]
+fn inference_propagates_to_annotated_self() {
+    let src = extract_test_case(PY_DATA, 12);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B A A"));
+}
+
+#[test]
+fn inference_emits_diagnostics_on_unknown_self() {
+    let src = extract_test_case(PY_DATA, 13);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.len() > 0);
+}
