@@ -83,7 +83,9 @@ fn is_hover_dtype(src: &str, analysis: &Analysis, pat: &str, expected_dtype: &st
             line: line_idx,
             character: col_idx,
         })
-        .unwrap_or_else(|| panic!("Hover info failed for pat {pat} with expected dtype {expected_dtype}"));
+        .unwrap_or_else(|| {
+            panic!("Hover info failed for pat {pat} with expected dtype {expected_dtype}")
+        });
     let dtype = hover
         .shape
         .as_ref()
