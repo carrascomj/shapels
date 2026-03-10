@@ -108,6 +108,10 @@ struct VarState {
     class_ref: Option<ClassRef>,
 }
 
+fn state_shape(state: &VarState) -> Option<&Shape> {
+    state.annotated.as_ref().or(state.inferred.as_ref())
+}
+
 /// Output of [`simulate_function`], such that return type
 /// can be recorded and matched against tuple destructuring on
 /// assignment.
@@ -565,8 +569,8 @@ fn simulate_block(
                             );
                         }
                     }
-                    if let (Some(ann), Some(inf)) = (ann_shape.clone(), inferred.clone())
-                        && !shape_dims_equal(&ann, &inf)
+                    if let (Some(ann), Some(inf)) = (ann_shape.as_ref(), inferred.as_ref())
+                        && !shape_dims_equal(ann, inf)
                     {
                         // If annotation is a shape-unroll, treat it as a rename rather than mismatch.
                         if let Expr::Subscript(_sub) = &*assign.annotation
@@ -642,7 +646,7 @@ fn simulate_block(
                             VarState {
                                 annotated: ann_shape.clone(),
                                 inferred: None,
-                                class_ref: Some(class_ref),
+                                class_ref: Some(class_ref.into_owned()),
                             },
                         );
                     }
@@ -745,7 +749,7 @@ fn simulate_block(
                             VarState {
                                 annotated: None,
                                 inferred: None,
-                                class_ref: Some(class_ref),
+                                class_ref: Some(class_ref.into_owned()),
                             },
                         );
                     }
@@ -1112,7 +1116,7 @@ fn infer_expr_shape(
                 module_path,
             ) && let Some(ret) = infer_class_call_return(
                 call,
-                &class_ref,
+                class_ref.as_ref(),
                 vars,
                 func_map,
                 imports,
@@ -1223,7 +1227,7 @@ fn infer_expr_shape(
                     module_path,
                 ) && let Some(ret) = infer_class_method_call_return(
                     call,
-                    &class_ref,
+                    class_ref.as_ref(),
                     &attr.attr,
                     vars,
                     func_map,
@@ -1382,9 +1386,7 @@ fn infer_expr_shape(
             if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
                 return None;
             }
-            let shape = vars
-                .get(&expr_name.id)
-                .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
+            let shape = vars.get(&expr_name.id).and_then(state_shape).cloned();
             if record_hovers && let Some(s) = shape.clone() {
                 let range = text_range_to_lsp(expr_text_range(expr), source);
                 hover_entries.push((range, HoverInfo { shape: Some(s) }));
@@ -1961,7 +1963,7 @@ fn infer_call_return_from_info(
                     VarState {
                         annotated: None,
                         inferred: None,
-                        class_ref: Some(class_ref),
+                        class_ref: Some(class_ref.into_owned()),
                     },
                 );
             }
@@ -2086,7 +2088,10 @@ fn infer_class_member_call_return(
                     if !class_info.is_torch_module {
                         return None;
                     }
-                    class_info.forward.as_ref()?
+                    class_info
+                        .forward_name
+                        .as_ref()
+                        .and_then(|name| class_info.methods.get(name))?
                 }
                 ClassCallable::Method(method_name) => class_info.methods.get(method_name)?,
             };
@@ -2215,7 +2220,7 @@ fn infer_defined_call_return(
     ) {
         return infer_class_call_return(
             call,
-            &class_ref,
+            class_ref.as_ref(),
             vars,
             func_map,
             imports,
@@ -2299,7 +2304,7 @@ fn infer_defined_call_return(
     {
         return infer_class_method_call_return(
             call,
-            &class_ref,
+            class_ref.as_ref(),
             &attr.attr,
             vars,
             func_map,
@@ -2408,9 +2413,7 @@ fn lookup_shape(
 ) -> Option<Shape> {
     match expr {
         Expr::Name(expr_name) => {
-            let shape = vars
-                .get(&expr_name.id)
-                .and_then(|v| v.annotated.clone().or_else(|| v.inferred.clone()));
+            let shape = vars.get(&expr_name.id).and_then(state_shape).cloned();
             if record_hovers && let Some(s) = shape.clone() {
                 let range = text_range_to_lsp(expr_text_range(expr), source);
                 hover_entries.push((range, HoverInfo { shape: Some(s) }));
@@ -2479,7 +2482,7 @@ fn assignment_shape_checks(
 
     let range = text_range_to_lsp(expr_text_range(value), source);
     let existing_state = vars.get(&base_id);
-    let existing_shape = existing_state.and_then(|v| v.annotated.clone().or(v.inferred.clone()));
+    let existing_shape = existing_state.and_then(state_shape);
 
     if let Some(shape) = existing_shape {
         if shape.dims.len() == dims.len() {
@@ -2645,16 +2648,12 @@ fn seed_args_from_annotations(
                 })
                 .or(union_class),
         };
+        let hover_shape = state_shape(&state).cloned();
 
         if state.annotated.is_some() || state.inferred.is_some() || state.class_ref.is_some() {
-            vars.insert(arg.def.arg.clone(), state.clone());
+            vars.insert(arg.def.arg.clone(), state);
             if record_hovers {
-                hover_entries.push((
-                    range,
-                    HoverInfo {
-                        shape: state.annotated.or(state.inferred),
-                    },
-                ));
+                hover_entries.push((range, HoverInfo { shape: hover_shape }));
             }
         }
     }

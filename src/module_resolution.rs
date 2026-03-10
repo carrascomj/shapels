@@ -6,6 +6,7 @@ use rustpython_parser::ast::{Arguments, Expr, Identifier, Stmt, Suite};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 #[derive(Clone)]
 pub(crate) struct FunctionInfo {
@@ -25,14 +26,13 @@ pub(crate) struct ClassRef {
 #[derive(Clone)]
 pub(crate) struct ClassInfo {
     pub(crate) is_torch_module: bool,
-    pub(crate) init: Option<FunctionInfo>,
-    pub(crate) forward: Option<FunctionInfo>,
+    pub(crate) init_name: Option<Identifier>,
+    pub(crate) forward_name: Option<Identifier>,
     pub(crate) methods: HashMap<Identifier, FunctionInfo>,
 }
 
 pub(crate) type ClassMap = HashMap<Identifier, ClassInfo>;
 
-#[derive(Clone)]
 pub(crate) struct CachedModule {
     pub(crate) path: PathBuf,
     pub(crate) source: String,
@@ -42,7 +42,7 @@ pub(crate) struct CachedModule {
 }
 
 pub(crate) struct ModuleCache {
-    modules: HashMap<String, CachedModule>,
+    modules: HashMap<String, Rc<CachedModule>>,
     project_root: Option<PathBuf>,
 }
 
@@ -63,9 +63,9 @@ impl ModuleCache {
         &mut self,
         module_name: &str,
         current_file: &Path,
-    ) -> Option<CachedModule> {
+    ) -> Option<Rc<CachedModule>> {
         if let Some(cached) = self.modules.get(module_name) {
-            return Some(cached.clone());
+            return Some(Rc::clone(cached));
         }
         let path = resolve_module_path(module_name, current_file, self.project_root.as_deref())?;
         let source = fs::read_to_string(&path).ok()?;
@@ -76,14 +76,15 @@ impl ModuleCache {
         let mut func_map = FuncMap::new();
         collect_function_defs(&module, &mut func_map);
         let class_map = collect_class_defs(&module, &imports);
-        let cached = CachedModule {
+        let cached = Rc::new(CachedModule {
             path,
             source,
             func_map,
             imports,
             class_map,
-        };
-        self.modules.insert(module_name.to_string(), cached.clone());
+        });
+        self.modules
+            .insert(module_name.to_string(), Rc::clone(&cached));
         Some(cached)
     }
 }
@@ -111,8 +112,8 @@ pub(crate) fn collect_function_defs(body: &[Stmt], func_map: &mut FuncMap) {
 }
 
 struct ClassDefInfo {
-    init: Option<FunctionInfo>,
-    forward: Option<FunctionInfo>,
+    init_name: Option<Identifier>,
+    forward_name: Option<Identifier>,
     methods: HashMap<Identifier, FunctionInfo>,
     base_names: Vec<Identifier>,
     direct_torch: bool,
@@ -146,8 +147,8 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
     for stmt in body {
         if let Stmt::ClassDef(class_def) = stmt {
             let mut methods = HashMap::new();
-            let mut init = None;
-            let mut forward = None;
+            let mut init_name = None;
+            let mut forward_name = None;
             for stmt in &class_def.body {
                 if let Stmt::FunctionDef(func) = stmt {
                     let info = FunctionInfo {
@@ -156,10 +157,10 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
                         returns: func.returns.clone(),
                     };
                     if func.name.as_str() == "__init__" {
-                        init = Some(info.clone());
+                        init_name = Some(func.name.clone());
                     }
                     if func.name.as_str() == "forward" {
-                        forward = Some(info.clone());
+                        forward_name = Some(func.name.clone());
                     }
                     methods.insert(func.name.clone(), info);
                 }
@@ -179,8 +180,8 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
             defs.insert(
                 class_def.name.clone(),
                 ClassDefInfo {
-                    init,
-                    forward,
+                    init_name,
+                    forward_name,
                     methods,
                     base_names,
                     direct_torch,
@@ -215,13 +216,34 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
                 name.clone(),
                 ClassInfo {
                     is_torch_module: is_torch.get(&name).copied().unwrap_or(false),
-                    init: info.init,
-                    forward: info.forward,
+                    init_name: info.init_name,
+                    forward_name: info.forward_name,
                     methods: info.methods,
                 },
             )
         })
         .collect()
+}
+
+pub(crate) enum ResolvedClassRef<'a> {
+    Borrowed(&'a ClassRef),
+    Owned(ClassRef),
+}
+
+impl<'a> ResolvedClassRef<'a> {
+    pub(crate) fn as_ref(&self) -> &ClassRef {
+        match self {
+            Self::Borrowed(class_ref) => class_ref,
+            Self::Owned(class_ref) => class_ref,
+        }
+    }
+
+    pub(crate) fn into_owned(self) -> ClassRef {
+        match self {
+            Self::Borrowed(class_ref) => class_ref.clone(),
+            Self::Owned(class_ref) => class_ref,
+        }
+    }
 }
 
 pub(crate) fn with_class_info<R, F>(
@@ -302,16 +324,16 @@ pub(crate) fn class_ref_from_annotation(
     None
 }
 
-pub(crate) fn class_ref_from_expr(
+pub(crate) fn class_ref_from_expr<'a>(
     expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
+    vars: &'a HashMap<Identifier, VarState>,
     source: &str,
     func_map: &FuncMap,
     imports: &Imports,
     class_map: &ClassMap,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ClassRef> {
+) -> Option<ResolvedClassRef<'a>> {
     if let Some(class_ref) = class_ref_from_constructor_call(
         expr,
         class_map,
@@ -319,7 +341,7 @@ pub(crate) fn class_ref_from_expr(
         module_cache.as_deref_mut(),
         module_path,
     ) {
-        return Some(class_ref);
+        return Some(ResolvedClassRef::Owned(class_ref));
     }
     resolve_class_ref_expr(
         expr,
@@ -343,17 +365,15 @@ fn self_attr_name(expr: &Expr) -> Option<Identifier> {
     (name.id.as_str() == "self").then(|| attr.attr.clone())
 }
 
-fn collect_self_class_refs_from_init(
+fn find_self_class_ref_in_init(
     init: Option<&FunctionInfo>,
+    target_attr: &Identifier,
     class_map: &ClassMap,
     imports: &Imports,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> HashMap<Identifier, ClassRef> {
-    let mut self_attrs = HashMap::new();
-    let Some(init) = init else {
-        return self_attrs;
-    };
+) -> Option<ClassRef> {
+    let init = init?;
 
     for stmt in &init.body {
         let maybe_attr_and_value = match stmt {
@@ -365,6 +385,7 @@ fn collect_self_class_refs_from_init(
             _ => None,
         };
         if let Some((attr_name, value)) = maybe_attr_and_value
+            && attr_name == *target_attr
             && let Some(class_ref) = class_ref_from_constructor_call(
                 value,
                 class_map,
@@ -373,25 +394,28 @@ fn collect_self_class_refs_from_init(
                 module_path,
             )
         {
-            self_attrs.insert(attr_name, class_ref);
+            return Some(class_ref);
         }
     }
 
-    self_attrs
+    None
 }
 
-fn resolve_class_ref_expr(
+fn resolve_class_ref_expr<'a>(
     expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
+    vars: &'a HashMap<Identifier, VarState>,
     source: &str,
     func_map: &FuncMap,
     imports: &Imports,
     class_map: &ClassMap,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ClassRef> {
+) -> Option<ResolvedClassRef<'a>> {
     match expr {
-        Expr::Name(name) => vars.get(&name.id).and_then(|v| v.class_ref.clone()),
+        Expr::Name(name) => vars
+            .get(&name.id)
+            .and_then(|v| v.class_ref.as_ref())
+            .map(ResolvedClassRef::Borrowed),
         Expr::Attribute(attr) => {
             let base_class_ref = resolve_class_ref_expr(
                 attr.value.as_ref(),
@@ -404,7 +428,7 @@ fn resolve_class_ref_expr(
                 module_path,
             )?;
             with_class_info(
-                &base_class_ref,
+                base_class_ref.as_ref(),
                 source,
                 func_map,
                 imports,
@@ -418,18 +442,21 @@ fn resolve_class_ref_expr(
                  callee_class_map,
                  callee_path,
                  module_cache| {
-                    collect_self_class_refs_from_init(
-                        class_info.init.as_ref(),
+                    find_self_class_ref_in_init(
+                        class_info
+                            .init_name
+                            .as_ref()
+                            .and_then(|name| class_info.methods.get(name)),
+                        &attr.attr,
                         callee_class_map,
                         callee_imports,
                         module_cache.as_deref_mut(),
                         callee_path,
                     )
-                    .get(&attr.attr)
-                    .cloned()
                 },
             )
             .flatten()
+            .map(ResolvedClassRef::Owned)
         }
         _ => None,
     }
