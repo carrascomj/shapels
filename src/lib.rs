@@ -549,9 +549,7 @@ fn simulate_block(
                             record_hovers,
                             source,
                         ) {
-                            inferred = vars
-                                .get(&name)
-                                .and_then(|v| v.annotated.clone().or(v.inferred.clone()));
+                            inferred = vars.get(&name).and_then(state_shape).cloned();
                         } else {
                             inferred = infer_expr_shape(
                                 val,
@@ -616,12 +614,14 @@ fn simulate_block(
                             data: None,
                         });
                     }
-                    let chosen_shape = ann_shape.clone().or(inferred.clone());
+                    let annotated = ann_shape.clone();
+                    let inferred = inferred;
+                    let chosen_shape = annotated.clone().or_else(|| inferred.clone());
                     if let Some(shape) = chosen_shape {
                         vars.insert(
                             name.clone(),
                             VarState {
-                                annotated: ann_shape.clone(),
+                                annotated,
                                 inferred,
                                 class_ref: None,
                             },
@@ -2636,7 +2636,7 @@ fn seed_args_from_annotations(
         let range = text_range_to_lsp(arg.def.range, source);
         let provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg));
         let state = VarState {
-            annotated: ann_shape.clone().or(union_shape),
+            annotated: ann_shape.or(union_shape),
             inferred: provided_state.and_then(|s| s.inferred.clone()),
             class_ref: provided_state
                 .and_then(|s| s.class_ref.clone())
