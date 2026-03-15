@@ -192,13 +192,7 @@ fn normalize_return_annotations<'a>(source: &'a str) -> Cow<'a, str> {
 }
 
 pub fn analyze_source(source: &str) -> Analysis {
-    if let Ok(cwd) = std::env::current_dir() {
-        let anchor = cwd.join("__memory__.py");
-        let mut cache = ModuleCache::new(&anchor);
-        analyze_source_internal(source, Some(&anchor), Some(&mut cache))
-    } else {
-        analyze_source_internal(source, None, None)
-    }
+    analyze_source_internal(source, None, None)
 }
 
 /// Analyze in-memory source but anchored at a file path so imports can resolve.
