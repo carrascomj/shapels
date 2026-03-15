@@ -248,5 +248,5 @@ class MyModelNestedNoSelf(torch.nn.Module):
     def forward(x: F[T, "B A X"], y: F[T, "A X"]) -> tuple[F[T, "B A A"], F[T, "B X A"]]:
         # should emit a diagnostic, self unknown
         w = self.proj(x, y.T)
-        return z, y
+        return w, y
 

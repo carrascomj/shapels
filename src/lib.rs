@@ -1964,14 +1964,24 @@ fn infer_call_return_from_info(
         }
     }
     if let Some(self_class_ref) = callee_self_class_ref {
-        arg_shapes.insert(
-            Identifier::from("self"),
-            VarState {
-                annotated: None,
-                inferred: None,
-                class_ref: Some(self_class_ref.clone()),
-            },
-        );
+        // Only bind `self` when the callee signature actually declares `self` as the first parameter.
+        let has_leading_self = param_offset > 0
+            && callee_info
+                .args
+                .args
+                .first()
+                .map(|param| param.def.arg.as_str() == "self")
+                .unwrap_or(false);
+        if has_leading_self {
+            arg_shapes.insert(
+                Identifier::from("self"),
+                VarState {
+                    annotated: None,
+                    inferred: None,
+                    class_ref: Some(self_class_ref.clone()),
+                },
+            );
+        }
     }
     if let Some(ret_ann) = callee_info.returns.as_deref() {
         let annotated_return = if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
