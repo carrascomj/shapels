@@ -581,12 +581,11 @@ fn resolve_module_path(
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
-        for entry in path_var.split(':') {
-            if !entry.contains(".venv") {
+        for mut path_entry in std::env::split_paths(&path_var) {
+            if !path_entry.to_string_lossy().contains(".venv") {
                 continue;
             }
-            let mut path = PathBuf::from(entry);
-            while let Some(parent) = path.parent() {
+            while let Some(parent) = path_entry.parent() {
                 if let Some(name) = parent.file_name()
                     && name.to_string_lossy().contains(".venv")
                 {
@@ -610,7 +609,7 @@ fn resolve_module_path(
                     }
                     break;
                 }
-                path = parent.to_path_buf();
+                path_entry = parent.to_path_buf();
             }
         }
     }
