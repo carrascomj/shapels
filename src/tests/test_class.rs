@@ -1,3 +1,6 @@
+use shapels::analyze_source_at_path;
+use std::path::Path;
+
 use crate::analyze_source;
 use crate::tests::{extract_test_case, is_hover_expected};
 
@@ -74,7 +77,7 @@ fn inference_propages_through_method() {
 #[test]
 fn method_improper_is_resolved_to_its_forward_tuple_type_hints() {
     let src = extract_test_case(PY_DATA, 9);
-    let analysis = analyze_source(&src);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert!(is_hover_expected(&src, &analysis, "output,", "B X R"));
     assert!(is_hover_expected(&src, &analysis, "output2 =", "B O T"));
 }
@@ -82,21 +85,21 @@ fn method_improper_is_resolved_to_its_forward_tuple_type_hints() {
 #[test]
 fn inference_propagates_to_self() {
     let src = extract_test_case(PY_DATA, 10);
-    let analysis = analyze_source(&src);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert!(is_hover_expected(&src, &analysis, "z =", "B X Z"));
 }
 
 #[test]
 fn inference_propagates_to_nested_self() {
     let src = extract_test_case(PY_DATA, 11);
-    let analysis = analyze_source(&src);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert!(is_hover_expected(&src, &analysis, "z =", "B X L"));
 }
 
 #[test]
 fn inference_propagates_to_annotated_self() {
     let src = extract_test_case(PY_DATA, 12);
-    let analysis = analyze_source(&src);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z =", "B A A"));
 }
