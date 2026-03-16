@@ -3,7 +3,8 @@ use crate::normalize_return_annotations;
 use crate::op_groups::{Imports, collect_imports};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{Arguments, Expr, Identifier, Stmt, Suite};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -26,37 +27,95 @@ pub(crate) struct ClassRef {
 #[derive(Clone)]
 pub(crate) struct ClassInfo {
     pub(crate) is_torch_module: bool,
-    pub(crate) init_name: Option<Identifier>,
     pub(crate) forward_name: Option<Identifier>,
     pub(crate) methods: HashMap<Identifier, FunctionInfo>,
+    self_attr_refs: RefCell<Option<HashMap<Identifier, ClassRef>>>,
 }
 
 pub(crate) type ClassMap = HashMap<Identifier, ClassInfo>;
 
 pub(crate) struct CachedModule {
-    pub(crate) path: PathBuf,
+    pub(crate) file_path: PathBuf,
     pub(crate) source: String,
     pub(crate) func_map: FuncMap,
     pub(crate) imports: Imports,
     pub(crate) class_map: ClassMap,
 }
 
-pub(crate) struct ModuleCache {
-    modules: HashMap<String, Rc<CachedModule>>,
-    project_root: Option<PathBuf>,
+pub struct ModuleCache {
+    modules: HashMap<PathBuf, Rc<CachedModule>>,
+    resolved_paths: HashMap<(PathBuf, String), Option<PathBuf>>,
+    dirty_files: HashSet<PathBuf>,
+    source_overrides: HashMap<PathBuf, String>,
+    project_roots: HashSet<PathBuf>,
+    cwd: PathBuf,
 }
 
 impl ModuleCache {
-    pub(crate) fn new(current_file: &Path) -> Self {
-        let project_root = find_project_root(current_file);
+    pub fn new() -> Self {
         Self {
             modules: HashMap::new(),
-            project_root,
+            resolved_paths: HashMap::new(),
+            dirty_files: HashSet::new(),
+            source_overrides: HashMap::new(),
+            project_roots: HashSet::new(),
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         }
     }
 
-    pub(crate) fn project_root(&self) -> Option<&Path> {
-        self.project_root.as_deref()
+    pub fn update_file_source(&mut self, file_path: &Path, source: String) {
+        self.remember_path(file_path);
+        let file_path = self.normalize_file_path(file_path);
+        self.source_overrides.insert(file_path.clone(), source);
+        self.dirty_files.insert(file_path);
+    }
+
+    pub fn mark_file_changed(&mut self, file_path: &Path) {
+        self.remember_path(file_path);
+        self.dirty_files.insert(self.normalize_file_path(file_path));
+    }
+
+    pub(crate) fn project_root_for(&mut self, current_file: &Path) -> Option<PathBuf> {
+        let current_file = self.normalize_file_path(current_file);
+        if let Some(root) = self
+            .project_roots
+            .iter()
+            .filter(|root| current_file.starts_with(root))
+            .max_by_key(|root| root.components().count())
+        {
+            return Some(root.clone());
+        }
+        let root = find_project_root(&current_file).map(|root| self.normalize_file_path(&root));
+        if let Some(root) = &root {
+            self.project_roots.insert(root.clone());
+        }
+        root
+    }
+
+    fn remember_path(&mut self, path: &Path) {
+        let _ = self.project_root_for(path);
+    }
+
+    fn normalize_file_path(&self, path: &Path) -> PathBuf {
+        normalize_file_path(path, &self.cwd)
+    }
+
+    fn load_module(&mut self, file_path: &Path, source: String) -> Option<Rc<CachedModule>> {
+        let normalized = normalize_return_annotations(&source);
+        let source = normalized.into_owned();
+        let module = Suite::parse(&source, &file_path.to_string_lossy()).ok()?;
+        let project_root = self.project_root_for(file_path);
+        let imports = collect_imports(&module, Some(file_path), project_root.as_deref());
+        let mut func_map = FuncMap::new();
+        collect_function_defs(&module, &mut func_map);
+        let class_map = collect_class_defs(&module, &imports);
+        Some(Rc::new(CachedModule {
+            file_path: file_path.to_path_buf(),
+            source,
+            func_map,
+            imports,
+            class_map,
+        }))
     }
 
     pub(crate) fn get_module(
@@ -64,28 +123,38 @@ impl ModuleCache {
         module_name: &str,
         current_file: &Path,
     ) -> Option<Rc<CachedModule>> {
-        if let Some(cached) = self.modules.get(module_name) {
+        let current_file = self.normalize_file_path(current_file);
+        self.remember_path(&current_file);
+        let resolve_key = (current_file.clone(), module_name.to_string());
+        let file_path = if let Some(cached_path) = self.resolved_paths.get(&resolve_key) {
+            cached_path.clone()?
+        } else {
+            let project_root = self.project_root_for(&current_file);
+            let path = resolve_module_path(module_name, &current_file, project_root.as_deref());
+            let normalized = path.as_ref().map(|path| self.normalize_file_path(path));
+            self.resolved_paths.insert(resolve_key, normalized.clone());
+            normalized?
+        };
+        if !self.dirty_files.contains(&file_path)
+            && let Some(cached) = self.modules.get(&file_path)
+        {
             return Some(Rc::clone(cached));
         }
-        let path = resolve_module_path(module_name, current_file, self.project_root.as_deref())?;
-        let source = fs::read_to_string(&path).ok()?;
-        let normalized = normalize_return_annotations(&source);
-        let source = normalized.into_owned();
-        let module = Suite::parse(&source, module_name).ok()?;
-        let imports = collect_imports(&module, Some(&path), self.project_root());
-        let mut func_map = FuncMap::new();
-        collect_function_defs(&module, &mut func_map);
-        let class_map = collect_class_defs(&module, &imports);
-        let cached = Rc::new(CachedModule {
-            path,
-            source,
-            func_map,
-            imports,
-            class_map,
-        });
-        self.modules
-            .insert(module_name.to_string(), Rc::clone(&cached));
+        let source = self
+            .source_overrides
+            .get(&file_path)
+            .cloned()
+            .or_else(|| fs::read_to_string(&file_path).ok())?;
+        let cached = self.load_module(&file_path, source)?;
+        self.modules.insert(file_path.clone(), Rc::clone(&cached));
+        self.dirty_files.remove(&file_path);
         Some(cached)
+    }
+}
+
+impl Default for ModuleCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -112,7 +181,6 @@ pub(crate) fn collect_function_defs(body: &[Stmt], func_map: &mut FuncMap) {
 }
 
 struct ClassDefInfo {
-    init_name: Option<Identifier>,
     forward_name: Option<Identifier>,
     methods: HashMap<Identifier, FunctionInfo>,
     base_names: Vec<Identifier>,
@@ -147,7 +215,6 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
     for stmt in body {
         if let Stmt::ClassDef(class_def) = stmt {
             let mut methods = HashMap::new();
-            let mut init_name = None;
             let mut forward_name = None;
             for stmt in &class_def.body {
                 if let Stmt::FunctionDef(func) = stmt {
@@ -156,9 +223,6 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
                         body: func.body.clone(),
                         returns: func.returns.clone(),
                     };
-                    if func.name.as_str() == "__init__" {
-                        init_name = Some(func.name.clone());
-                    }
                     if func.name.as_str() == "forward" {
                         forward_name = Some(func.name.clone());
                     }
@@ -180,7 +244,6 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
             defs.insert(
                 class_def.name.clone(),
                 ClassDefInfo {
-                    init_name,
                     forward_name,
                     methods,
                     base_names,
@@ -216,9 +279,9 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
                 name.clone(),
                 ClassInfo {
                     is_torch_module: is_torch.get(&name).copied().unwrap_or(false),
-                    init_name: info.init_name,
                     forward_name: info.forward_name,
                     methods: info.methods,
+                    self_attr_refs: RefCell::new(None),
                 },
             )
         })
@@ -283,7 +346,7 @@ where
                 &module.func_map,
                 &module.imports,
                 &module.class_map,
-                Some(module.path.as_path()),
+                Some(module.file_path.as_path()),
                 module_cache,
             ))
         }
@@ -365,15 +428,17 @@ fn self_attr_name(expr: &Expr) -> Option<Identifier> {
     (name.id.as_str() == "self").then(|| attr.attr.clone())
 }
 
-fn find_self_class_ref_in_init(
+fn collect_self_attr_refs_from_init(
     init: Option<&FunctionInfo>,
-    target_attr: &Identifier,
     class_map: &ClassMap,
     imports: &Imports,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ClassRef> {
-    let init = init?;
+) -> HashMap<Identifier, ClassRef> {
+    let Some(init) = init else {
+        return HashMap::new();
+    };
+    let mut refs = HashMap::new();
 
     for stmt in &init.body {
         let maybe_attr_and_value = match stmt {
@@ -384,21 +449,48 @@ fn find_self_class_ref_in_init(
             }),
             _ => None,
         };
-        if let Some((attr_name, value)) = maybe_attr_and_value
-            && attr_name == *target_attr
-            && let Some(class_ref) = class_ref_from_constructor_call(
+        if let Some((attr_name, value)) = maybe_attr_and_value {
+            if let Some(class_ref) = class_ref_from_constructor_call(
                 value,
                 class_map,
                 imports,
                 module_cache.as_deref_mut(),
                 module_path,
-            )
-        {
-            return Some(class_ref);
+            ) {
+                refs.insert(attr_name, class_ref);
+            } else {
+                refs.remove(&attr_name);
+            }
         }
     }
 
-    None
+    refs
+}
+
+fn get_or_collect_self_attr_ref(
+    class_info: &ClassInfo,
+    target_attr: &Identifier,
+    class_map: &ClassMap,
+    imports: &Imports,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ClassRef> {
+    if class_info.self_attr_refs.borrow().is_none() {
+        let refs = collect_self_attr_refs_from_init(
+            class_info.methods.get(&Identifier::from("__init__")),
+            class_map,
+            imports,
+            module_cache.as_deref_mut(),
+            module_path,
+        );
+        *class_info.self_attr_refs.borrow_mut() = Some(refs);
+    }
+    class_info
+        .self_attr_refs
+        .borrow()
+        .as_ref()
+        .and_then(|refs| refs.get(target_attr))
+        .cloned()
 }
 
 fn resolve_class_ref_expr<'a>(
@@ -442,11 +534,8 @@ fn resolve_class_ref_expr<'a>(
                  callee_class_map,
                  callee_path,
                  module_cache| {
-                    find_self_class_ref_in_init(
-                        class_info
-                            .init_name
-                            .as_ref()
-                            .and_then(|name| class_info.methods.get(name)),
+                    get_or_collect_self_attr_ref(
+                        class_info,
                         &attr.attr,
                         callee_class_map,
                         callee_imports,
@@ -530,6 +619,27 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
         dir = current.parent();
     }
     None
+}
+
+fn normalize_file_path(path: &Path, cwd: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 fn should_skip_module_search_dir(path: &Path) -> bool {

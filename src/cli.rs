@@ -1,6 +1,6 @@
-use crate::analyze_source_at_path;
 use lsp_types::DiagnosticSeverity;
 use shapels::Analysis;
+use shapels::analyze_source_at_path;
 use std::io::{self, BufWriter, Write};
 use std::{env, path::PathBuf};
 use std::{fs::read_to_string, path::Path, process::exit};
