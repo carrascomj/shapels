@@ -16,10 +16,19 @@ serde_json = "1.0"
 phf = { version = "0.13.1"}
 phf_macros = "0.13.1"
 
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+
 [lib]
 name = "shapels"
 path = "src/lib.rs"
+bench = false
 
 [[bin]]
 name = "shapels"
 path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "bench_selected_tests"
+harness = false
