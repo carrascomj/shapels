@@ -8,7 +8,9 @@ use lsp_types::{
     notification::PublishDiagnostics,
     request::{DocumentDiagnosticRequest, HoverRequest},
 };
-use shapels::{analyze_source, analyze_source_at_path};
+#[cfg(test)]
+use shapels::analyze_source;
+use shapels::{ModuleCache, analyze_source_at_path_with_cache, analyze_source_with_cache};
 use std::collections::HashMap;
 
 mod cli;
@@ -40,6 +42,7 @@ fn main() {
     let _init_params = connection.initialize(server_capabilities).unwrap();
 
     let mut documents: HashMap<Url, String> = HashMap::new();
+    let mut module_cache = ModuleCache::new();
 
     for msg in &connection.receiver {
         match msg {
@@ -47,7 +50,7 @@ fn main() {
                 if connection.handle_shutdown(&req).unwrap() {
                     break;
                 }
-                handle_request(&req, &connection, &mut documents);
+                handle_request(&req, &connection, &mut documents, &mut module_cache);
             }
             Message::Notification(notif) => {
                 match notif.method.as_str() {
@@ -57,8 +60,12 @@ fn main() {
                         >(notif.params.clone())
                         {
                             let uri = params.text_document.uri.clone();
-                            documents.insert(uri.clone(), params.text_document.text);
-                            publish_diagnostics(&connection, &documents, &uri);
+                            let text = params.text_document.text;
+                            if let Ok(path) = uri.to_file_path() {
+                                module_cache.update_file_source(&path, text.clone());
+                            }
+                            documents.insert(uri.clone(), text);
+                            publish_diagnostics(&connection, &documents, &uri, &mut module_cache);
                         }
                     }
                     "textDocument/didChange" => {
@@ -69,8 +76,11 @@ fn main() {
                         {
                             let uri = params.text_document.uri.clone();
                             // assuming full sync kind
+                            if let Ok(path) = uri.to_file_path() {
+                                module_cache.update_file_source(&path, first.text.clone());
+                            }
                             documents.insert(uri.clone(), first.text.clone());
-                            publish_diagnostics(&connection, &documents, &uri);
+                            publish_diagnostics(&connection, &documents, &uri, &mut module_cache);
                         }
                     }
                     _ => {}
@@ -83,7 +93,12 @@ fn main() {
     io_threads.join().expect("Failed to join IO threads");
 }
 
-fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMap<Url, String>) {
+fn handle_request(
+    req: &Request,
+    connection: &Connection,
+    documents: &mut HashMap<Url, String>,
+    module_cache: &mut ModuleCache,
+) {
     match req.method.as_str() {
         <HoverRequest as lsp_types::request::Request>::METHOD => {
             let id = req.id.clone();
@@ -94,8 +109,8 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
                 let analysis = uri
                     .to_file_path()
                     .ok()
-                    .map(|p| analyze_source_at_path(text, &p))
-                    .unwrap_or_else(|| analyze_source(text));
+                    .map(|p| analyze_source_at_path_with_cache(text, &p, module_cache))
+                    .unwrap_or_else(|| analyze_source_with_cache(text, module_cache));
                 analysis.hover(pos).and_then(|info| {
                     info.shape.as_ref().map(|shape| Hover {
                         contents: HoverContents::Markup(MarkupContent {
@@ -123,8 +138,12 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
                 .map(|text| {
                     uri.to_file_path()
                         .ok()
-                        .map(|p| analyze_source_at_path(text, &p).diagnostics)
-                        .unwrap_or_else(|| analyze_source(text).diagnostics)
+                        .map(|p| {
+                            analyze_source_at_path_with_cache(text, &p, module_cache).diagnostics
+                        })
+                        .unwrap_or_else(|| {
+                            analyze_source_with_cache(text, module_cache).diagnostics
+                        })
                 })
                 .unwrap_or_default();
             let full = FullDocumentDiagnosticReport {
@@ -149,10 +168,22 @@ fn handle_request(req: &Request, connection: &Connection, documents: &mut HashMa
     }
 }
 
-fn publish_diagnostics(connection: &Connection, documents: &HashMap<Url, String>, uri: &Url) {
+fn publish_diagnostics(
+    connection: &Connection,
+    documents: &HashMap<Url, String>,
+    uri: &Url,
+    module_cache: &mut ModuleCache,
+) {
     let diagnostics = documents
         .get(uri)
-        .map(|text| analyze_source(text).diagnostics)
+        .map(|text| {
+            uri.to_file_path()
+                .ok()
+                .map(|path| {
+                    analyze_source_at_path_with_cache(text, &path, module_cache).diagnostics
+                })
+                .unwrap_or_else(|| analyze_source_with_cache(text, module_cache).diagnostics)
+        })
         .unwrap_or_default();
     let params = PublishDiagnosticsParams {
         uri: uri.clone(),

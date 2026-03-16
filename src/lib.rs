@@ -20,10 +20,10 @@ use crate::infer::{
     infer_repeat, infer_repeat_interleave, infer_squeeze, infer_to, infer_unsqueeze,
     infer_view_like, shape_dims_equal,
 };
+pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
-    ClassMap, ClassRef, FuncMap, FunctionInfo, ModuleCache, class_ref_from_annotation,
-    class_ref_from_expr, collect_class_defs, collect_function_defs, method_param_offset,
-    with_class_info,
+    ClassMap, ClassRef, FuncMap, FunctionInfo, class_ref_from_annotation, class_ref_from_expr,
+    collect_class_defs, collect_function_defs, method_param_offset, with_class_info,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
@@ -192,22 +192,37 @@ fn normalize_return_annotations<'a>(source: &'a str) -> Cow<'a, str> {
 }
 
 pub fn analyze_source(source: &str) -> Analysis {
-    analyze_source_internal(source, None, None)
+    let mut cache = ModuleCache::new();
+    analyze_source_with_cache(source, &mut cache)
+}
+
+pub fn analyze_source_with_cache(source: &str, module_cache: &mut ModuleCache) -> Analysis {
+    analyze_source_internal(source, None, Some(module_cache))
 }
 
 /// Analyze in-memory source but anchored at a file path so imports can resolve.
 pub fn analyze_source_at_path(source: &str, path: &Path) -> Analysis {
-    let mut cache = ModuleCache::new(path);
-    analyze_source_internal(source, Some(path), Some(&mut cache))
+    let mut cache = ModuleCache::new();
+    analyze_source_at_path_with_cache(source, path, &mut cache)
+}
+
+pub fn analyze_source_at_path_with_cache(
+    source: &str,
+    path: &Path,
+    module_cache: &mut ModuleCache,
+) -> Analysis {
+    analyze_source_internal(source, Some(path), Some(module_cache))
 }
 
 /// Analyze a python file with module resolution enabled.
 pub fn analyze_file(path: &Path) -> Analysis {
+    let mut cache = ModuleCache::new();
+    analyze_file_with_cache(path, &mut cache)
+}
+
+pub fn analyze_file_with_cache(path: &Path, module_cache: &mut ModuleCache) -> Analysis {
     match fs::read_to_string(path) {
-        Ok(src) => {
-            let mut cache = ModuleCache::new(path);
-            analyze_source_internal(&src, Some(path), Some(&mut cache))
-        }
+        Ok(src) => analyze_source_internal(&src, Some(path), Some(module_cache)),
         Err(err) => Analysis {
             diagnostics: vec![Diagnostic {
                 range: default_range(),
@@ -238,11 +253,12 @@ fn analyze_source_internal<'a>(
         .unwrap_or_else(|| "<memory>".to_string());
     match Suite::parse(source, &parse_name) {
         Ok(module) => {
-            let imports = collect_imports(
-                &module,
-                current_path,
-                module_cache.as_deref().and_then(|c| c.project_root()),
-            );
+            let project_root = current_path.and_then(|path| {
+                module_cache
+                    .as_deref_mut()
+                    .and_then(|cache| cache.project_root_for(path))
+            });
+            let imports = collect_imports(&module, current_path, project_root.as_deref());
             // collect function definitions first
             let mut func_map: FuncMap = HashMap::new();
             collect_function_defs(&module, &mut func_map);
@@ -1171,7 +1187,7 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         module_cache.as_deref_mut(),
-                        Some(module.path.as_path()),
+                        Some(module.file_path.as_path()),
                         None,
                         0,
                         false,
@@ -1262,7 +1278,7 @@ fn infer_expr_shape(
                         record_hovers,
                         source,
                         module_cache.as_deref_mut(),
-                        Some(module.path.as_path()),
+                        Some(module.file_path.as_path()),
                         None,
                         0,
                         false,
@@ -2262,7 +2278,7 @@ fn infer_defined_call_return(
                 record_hovers,
                 source,
                 module_cache.as_deref_mut(),
-                Some(module.path.as_path()),
+                Some(module.file_path.as_path()),
                 None,
                 0,
                 false,
@@ -2349,7 +2365,7 @@ fn infer_defined_call_return(
             record_hovers,
             source,
             module_cache,
-            Some(module.path.as_path()),
+            Some(module.file_path.as_path()),
             None,
             0,
             false,

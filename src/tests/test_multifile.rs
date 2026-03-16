@@ -1,10 +1,12 @@
 //! Tests multifile support using .venv files and relative paths at test_data/multi*.py
 
-use shapels::analyze_file;
-use std::path::Path;
+use shapels::{ModuleCache, analyze_file, analyze_source_at_path_with_cache};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::analyze_source_at_path;
 use crate::tests::{extract_test_case, is_hover_dtype, is_hover_expected};
+use shapels::analyze_source_at_path;
 
 const PY_MULTI_CALLER: &str = include_str!("../../test_data/multi_caller.py");
 const PY_REPRO: &str = include_str!("../../test_data/import_callee.py");
@@ -138,4 +140,82 @@ fn imported_function_does_not_show_diagnostic_on_callee() {
     // no diagnostics expected
     println!("{:?}", analysis.diagnostics);
     assert_eq!(analysis.diagnostics.len(), 0);
+}
+
+#[test]
+fn persistent_module_cache_reloads_changed_imported_self_attr_refs() {
+    let temp_dir = temp_test_dir("cache-invalidation");
+    let caller_path = temp_dir.join("caller.py");
+    let callee_path = temp_dir.join("imported.py");
+
+    fs::write(&callee_path, imported_module_source("First")).expect("write initial callee");
+    fs::write(&caller_path, caller_module_source()).expect("write caller");
+
+    let caller_src = fs::read_to_string(&caller_path).expect("read caller");
+    let mut cache = ModuleCache::new();
+
+    let analysis = analyze_source_at_path_with_cache(&caller_src, &caller_path, &mut cache);
+    assert!(is_hover_expected(&caller_src, &analysis, "z =", "B X O"));
+
+    cache.update_file_source(&callee_path, imported_module_source("Second"));
+
+    let updated = analyze_source_at_path_with_cache(&caller_src, &caller_path, &mut cache);
+    assert!(is_hover_expected(&caller_src, &updated, "z =", "B X P"));
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+fn temp_test_dir(prefix: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("shapels-{prefix}-{nanos}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
+}
+
+fn caller_module_source() -> String {
+    r#"
+import torch
+from imported import Outer
+
+
+def run():
+    B, X, R = 2, 3, 5
+    x = torch.zeros(B, X, R)
+    model = Outer()
+    z = model(x)
+"#
+    .trim_start()
+    .to_string()
+}
+
+fn imported_module_source(proj_class: &str) -> String {
+    format!(
+        r#"
+import torch
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+
+class First(torch.nn.Module):
+    def forward(self, x: F[T, "B X R"]) -> F[T, "B X O"]:
+        return x
+
+
+class Second(torch.nn.Module):
+    def forward(self, x: F[T, "B X R"]) -> F[T, "B X P"]:
+        return x
+
+
+class Outer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = {proj_class}()
+
+    def forward(self, x: F[T, "B X R"]):
+        return self.proj(x)
+"#
+    )
 }
