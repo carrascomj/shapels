@@ -110,3 +110,60 @@ fn inference_emits_diagnostics_on_unknown_self() {
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.len() > 0);
 }
+
+#[test]
+fn concrete_parameter_is_properly_multiplied() {
+    let src = extract_test_case(PY_DATA, 14);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "out =", "B X 57"));
+}
+
+#[test]
+fn abstract_parameter_is_properly_multiplied() {
+    let src = extract_test_case(PY_DATA, 15);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "out =", "B X 1"));
+}
+
+#[test]
+fn abstract_parameter_emits_diag_with_wrong_shape() {
+    let src = extract_test_case(PY_DATA, 16);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert!(analysis.diagnostics.len() > 0);
+}
+
+#[test]
+fn self_tensor_is_properly_multiplied() {
+    let src = extract_test_case(PY_DATA, 17);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "out =", "B X U"));
+}
+
+#[test]
+fn self_tensor_is_properly_registered_after_ops() {
+    let src = extract_test_case(PY_DATA, 18);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "out =", "B X 1"));
+}
+
+#[test]
+fn self_param_is_properly_registered_after_ops() {
+    let src = extract_test_case(PY_DATA, 19);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "self.my_param =", "S W"));
+    assert!(is_hover_expected(&src, &analysis, "out =", "B X W"));
+}
+
+#[test]
+fn self_param_is_properly_reassigned() {
+    let src = extract_test_case(PY_DATA, 20);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "my_tensor =", "S T"));
+    assert!(is_hover_expected(&src, &analysis, "out =", "B X T"));
+}

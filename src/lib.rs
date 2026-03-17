@@ -22,8 +22,9 @@ use crate::infer::{
 };
 pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
-    ClassMap, ClassRef, FuncMap, FunctionInfo, class_ref_from_annotation, class_ref_from_expr,
-    collect_class_defs, collect_function_defs, method_param_offset, with_class_info,
+    ClassMap, ClassRef, FuncMap, FunctionInfo, attr_state_from_expr, class_ref_from_annotation,
+    class_ref_from_expr, collect_class_defs, collect_function_defs, is_parameter_constructor,
+    method_param_offset, with_class_info,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
@@ -110,6 +111,46 @@ struct VarState {
 
 fn state_shape(state: &VarState) -> Option<&Shape> {
     state.annotated.as_ref().or(state.inferred.as_ref())
+}
+
+fn push_assignment_hover(
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    target: &Expr,
+    source: &str,
+    shape: Shape,
+) {
+    let range = text_range_to_lsp(expr_text_range(target), source);
+    hover_entries.push((
+        range,
+        HoverInfo {
+            shape: Some(shape.clone()),
+        },
+    ));
+    hover_entries.push((
+        Range {
+            start: range.start,
+            end: range.start,
+        },
+        HoverInfo { shape: Some(shape) },
+    ));
+}
+
+fn self_attr_name(expr: &Expr) -> Option<Identifier> {
+    let Expr::Attribute(attr) = expr else {
+        return None;
+    };
+    let Expr::Name(name) = attr.value.as_ref() else {
+        return None;
+    };
+    (name.id.as_str() == "self").then(|| attr.attr.clone())
+}
+
+fn self_attr_storage_key(attr: &Identifier) -> Identifier {
+    Identifier::from(format!("self.{}", attr.as_str()))
+}
+
+fn expr_var_key(expr: &Expr) -> Option<Identifier> {
+    name_from_expr(expr).or_else(|| self_attr_name(expr).map(|attr| self_attr_storage_key(&attr)))
 }
 
 /// Output of [`simulate_function`], such that return type
@@ -246,6 +287,22 @@ fn analyze_source_internal<'a>(
     mut module_cache: Option<&mut ModuleCache>,
 ) -> Analysis {
     let mut analysis = Analysis::default();
+    if let (Some(path), Some(cache)) = (current_path, module_cache.as_deref_mut())
+        && let Some(module) = cache.get_file_module(path, Some(source))
+    {
+        analyze_module(
+            &module.body,
+            &module.source,
+            &module.func_map,
+            &module.imports,
+            &module.class_map,
+            &mut analysis,
+            module_cache,
+            Some(module.file_path.as_path()),
+        );
+        return analysis;
+    }
+
     let normalized = normalize_return_annotations(source);
     let source = normalized.as_ref();
     let parse_name = current_path
@@ -259,40 +316,10 @@ fn analyze_source_internal<'a>(
                     .and_then(|cache| cache.project_root_for(path))
             });
             let imports = collect_imports(&module, current_path, project_root.as_deref());
-            // collect function definitions first
             let mut func_map: FuncMap = HashMap::new();
             collect_function_defs(&module, &mut func_map);
             let class_map = collect_class_defs(&module, &imports);
-
-            // analyze top-level statements (outside functions)
-            let empty_args = Arguments {
-                range: ast::OptionalRange::from(TextRange::new(
-                    TextSize::from(0),
-                    TextSize::from(0),
-                )),
-                posonlyargs: Vec::new(),
-                args: Vec::new(),
-                vararg: None,
-                kwonlyargs: Vec::new(),
-                kwarg: None,
-            };
-            let (mut top_diags, mut top_hovers, _) = simulate_function(
-                &empty_args,
-                &module,
-                source,
-                &func_map,
-                &imports,
-                &class_map,
-                &mut Vec::new(),
-                HashMap::new(),
-                true,
-                module_cache.as_deref_mut(),
-                current_path,
-            );
-            analysis.diagnostics.append(&mut top_diags);
-            analysis.hover_entries.append(&mut top_hovers);
-
-            analyze_function_bodies(
+            analyze_module(
                 &module,
                 source,
                 &func_map,
@@ -301,7 +328,6 @@ fn analyze_source_internal<'a>(
                 &mut analysis,
                 module_cache,
                 current_path,
-                None,
             );
         }
         Err(err) => {
@@ -319,6 +345,53 @@ fn analyze_source_internal<'a>(
         }
     }
     analysis
+}
+
+fn analyze_module(
+    module: &[Stmt],
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    analysis: &mut Analysis,
+    mut module_cache: Option<&mut ModuleCache>,
+    current_path: Option<&Path>,
+) {
+    let empty_args = Arguments {
+        range: ast::OptionalRange::from(TextRange::new(TextSize::from(0), TextSize::from(0))),
+        posonlyargs: Vec::new(),
+        args: Vec::new(),
+        vararg: None,
+        kwonlyargs: Vec::new(),
+        kwarg: None,
+    };
+    let (mut top_diags, mut top_hovers, _) = simulate_function(
+        &empty_args,
+        module,
+        source,
+        func_map,
+        imports,
+        class_map,
+        &mut Vec::new(),
+        HashMap::new(),
+        true,
+        module_cache.as_deref_mut(),
+        current_path,
+    );
+    analysis.diagnostics.append(&mut top_diags);
+    analysis.hover_entries.append(&mut top_hovers);
+
+    analyze_function_bodies(
+        module,
+        source,
+        func_map,
+        imports,
+        class_map,
+        analysis,
+        module_cache,
+        current_path,
+        None,
+    );
 }
 
 /// Iterate over the function and classes of a module `body`.
@@ -545,7 +618,7 @@ fn simulate_block(
                 ) {
                     continue;
                 }
-                if let Some(name) = name_from_expr(&assign.target) {
+                if let Some(name) = expr_var_key(&assign.target) {
                     let ann_shape = parse_shape_annotation(&assign.annotation);
                     let range = text_range_to_lsp(expr_text_range(&assign.target), source);
                     let mut inferred = None;
@@ -599,12 +672,12 @@ fn simulate_block(
                                 },
                             );
                             if record_hovers {
-                                hover_entries.push((
-                                    range,
-                                    HoverInfo {
-                                        shape: Some(renamed),
-                                    },
-                                ));
+                                push_assignment_hover(
+                                    hover_entries,
+                                    &assign.target,
+                                    source,
+                                    renamed,
+                                );
                             }
                             continue;
                         }
@@ -637,7 +710,7 @@ fn simulate_block(
                             },
                         );
                         if record_hovers {
-                            hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                            push_assignment_hover(hover_entries, &assign.target, source, shape);
                         }
                     } else if let Some(val) = &assign.value
                         && let Some(class_ref) = class_ref_from_expr(
@@ -715,9 +788,8 @@ fn simulate_block(
                     continue;
                 }
                 if assign.targets.len() == 1
-                    && let Some(name) = name_from_expr(&assign.targets[0])
+                    && let Some(name) = expr_var_key(&assign.targets[0])
                 {
-                    let range = text_range_to_lsp(expr_text_range(&assign.targets[0]), source);
                     let shape = infer_expr_shape(
                         &assign.value,
                         vars,
@@ -742,7 +814,7 @@ fn simulate_block(
                             },
                         );
                         if record_hovers {
-                            hover_entries.push((range, HoverInfo { shape: Some(shape) }));
+                            push_assignment_hover(hover_entries, &assign.targets[0], source, shape);
                         }
                     } else if let Some(class_ref) = class_ref_from_expr(
                         &assign.value,
@@ -983,7 +1055,7 @@ fn simulate_block(
 ///
 /// This is the central function for inference, it calls the specialized
 /// inference at src/infer.rs depending on type of the expression.
-fn infer_expr_shape(
+pub(crate) fn infer_expr_shape(
     expr: &Expr,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
@@ -1114,6 +1186,24 @@ fn infer_expr_shape(
         Expr::Call(call) => {
             if report_unbound_self_diagnostic(call.func.as_ref(), vars, diagnostics, source) {
                 return None;
+            }
+            if is_parameter_constructor(call.func.as_ref(), imports)
+                && let Some(base) = call.args.first()
+            {
+                return infer_expr_shape(
+                    base,
+                    vars,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                );
             }
             if let Some(class_ref) = class_ref_from_expr(
                 call.func.as_ref(),
@@ -1390,18 +1480,32 @@ fn infer_expr_shape(
                         )
                     });
             }
-            None
-        }
-        Expr::Name(expr_name) => {
-            if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
-                return None;
+            if let Some(shape) = lookup_shape(expr, vars, hover_entries, record_hovers, source) {
+                return Some(shape);
             }
-            let shape = vars.get(&expr_name.id).and_then(state_shape).cloned();
+            let shape = attr_state_from_expr(
+                expr,
+                vars,
+                source,
+                func_map,
+                imports,
+                class_map,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+            .and_then(|state| state_shape(&state).cloned());
             if record_hovers && let Some(s) = shape.clone() {
                 let range = text_range_to_lsp(expr_text_range(expr), source);
                 hover_entries.push((range, HoverInfo { shape: Some(s) }));
             }
             shape
+        }
+        Expr::Name(expr_name) => {
+            if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
+                return None;
+            }
+            let _ = expr_name;
+            lookup_shape(expr, vars, hover_entries, record_hovers, source)
         }
         _ => None,
     }
@@ -2431,17 +2535,13 @@ fn lookup_shape(
     record_hovers: bool,
     source: &str,
 ) -> Option<Shape> {
-    match expr {
-        Expr::Name(expr_name) => {
-            let shape = vars.get(&expr_name.id).and_then(state_shape).cloned();
-            if record_hovers && let Some(s) = shape.clone() {
-                let range = text_range_to_lsp(expr_text_range(expr), source);
-                hover_entries.push((range, HoverInfo { shape: Some(s) }));
-            }
-            shape
-        }
-        _ => None,
+    let key = expr_var_key(expr)?;
+    let shape = vars.get(&key).and_then(state_shape).cloned();
+    if record_hovers && let Some(s) = shape.clone() {
+        let range = text_range_to_lsp(expr_text_range(expr), source);
+        hover_entries.push((range, HoverInfo { shape: Some(s) }));
     }
+    shape
 }
 
 /// An operation might be a function `torch.FUNCTION` (might be imported and
