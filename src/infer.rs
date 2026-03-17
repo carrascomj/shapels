@@ -2491,3 +2491,84 @@ fn resolve_dim_in_bounds(
     }
     Some(dim)
 }
+
+fn push_error_diagnostic(
+    diagnostics: &mut Vec<Diagnostic>,
+    range: TextRange,
+    source: &str,
+    message: String,
+) {
+    diagnostics.push(Diagnostic {
+        range: text_range_to_lsp(range, source),
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: Some("shapels".into()),
+        message,
+        related_information: None,
+        tags: None,
+        data: None,
+    });
+}
+
+/// Inference for [`ast::UnaryOp`] such as
+///
+/// ```python
+/// a = ~x
+/// b = not x.sum()
+/// c = -b
+/// ```
+///
+/// Check dtype and, if compatible, return the base `shape` or `None` if op is `Not`.
+pub fn infer_unary_dtype(
+    op: ast::UnaryOp,
+    shape: Shape,
+    range: TextRange,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    // Not is independent of the dtype
+    if matches!(op, ast::UnaryOp::Not) {
+        if shape.dims.iter().any(|dim| dim.trim_ascii() != "1") {
+            push_error_diagnostic(
+                diagnostics,
+                range,
+                source,
+                format!(
+                    "Not is ambiguous for tensor with more than one value {}",
+                    shape.render(),
+                ),
+            );
+            return None;
+        } else {
+            // shape was singleton or empty
+            return None;
+        }
+    }
+    let Some(dtype) = shape.dtype.as_deref() else {
+        // if dtype is unknown, just return the shape
+        return Some(shape);
+    };
+    let dlower = dtype.to_lowercase();
+    match op {
+        ast::UnaryOp::Invert if !(dlower.contains("int") || dlower.contains("bool")) => {
+            push_error_diagnostic(
+                diagnostics,
+                range,
+                source,
+                format!("Bitwise invert only supports integer or bool dtypes, found {dtype}"),
+            );
+            None
+        }
+        ast::UnaryOp::UAdd | ast::UnaryOp::USub if dlower.contains("bool") => {
+            push_error_diagnostic(
+                diagnostics,
+                range,
+                source,
+                format!("Unary +/- operations do not support bool dtype, found {dtype}"),
+            );
+            None
+        }
+        _ => Some(shape),
+    }
+}
