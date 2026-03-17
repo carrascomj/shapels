@@ -1490,7 +1490,7 @@ pub(crate) fn infer_expr_shape(
                 func_map,
                 imports,
                 class_map,
-                module_cache.as_deref_mut(),
+                module_cache,
                 module_path,
             )
             .and_then(|state| state_shape(&state).cloned());

@@ -659,7 +659,7 @@ fn update_tracked_binding(
     self_attrs: &mut HashMap<Identifier, VarState>,
     class_map: &ClassMap,
     imports: &Imports,
-    mut module_cache: Option<&mut ModuleCache>,
+    module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
     source: &str,
 ) {
@@ -669,7 +669,7 @@ fn update_tracked_binding(
         self_attrs,
         class_map,
         imports,
-        module_cache.as_deref_mut(),
+        module_cache,
         module_path,
         source,
     );
@@ -742,7 +742,7 @@ fn get_or_collect_self_attr_state(
     source: &str,
     class_map: &ClassMap,
     imports: &Imports,
-    mut module_cache: Option<&mut ModuleCache>,
+    module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<VarState> {
     if class_info.self_attr_states.borrow().is_none() {
@@ -751,7 +751,7 @@ fn get_or_collect_self_attr_state(
             source,
             class_map,
             imports,
-            module_cache.as_deref_mut(),
+            module_cache,
             module_path,
         );
         *class_info.self_attr_states.borrow_mut() = Some(states);
