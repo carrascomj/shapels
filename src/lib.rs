@@ -1076,25 +1076,29 @@ pub(crate) fn infer_expr_shape(
             right,
             range: expr_range,
         }) => match op {
-            Operator::Mult | Operator::Add | Operator::Sub | Operator::Div => {
-                infer_broadcastable_poswise(
-                    &ShapeOrExpr::Expr(left),
-                    right,
-                    vars,
-                    func_map,
-                    imports,
-                    class_map,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    *expr_range,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                    BroadcastOp::Arithmetic,
-                )
-            }
+            Operator::Mult
+            | Operator::Add
+            | Operator::Sub
+            | Operator::Div
+            | Operator::FloorDiv
+            | Operator::Pow
+            | Operator::Mod => infer_broadcastable_poswise(
+                &ShapeOrExpr::Expr(left),
+                right,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                *expr_range,
+                module_cache.as_deref_mut(),
+                module_path,
+                BroadcastOp::Arithmetic,
+            ),
             Operator::BitAnd
             | Operator::BitXor
             | Operator::BitOr
@@ -1132,7 +1136,6 @@ pub(crate) fn infer_expr_shape(
                 module_cache.as_deref_mut(),
                 module_path,
             ),
-            _ => None,
         },
         Expr::Compare(ExprCompare {
             left: init_left,
