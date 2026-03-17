@@ -1,14 +1,24 @@
+//! Module loading and cross-file class resolution.
+//!
+//! This file keeps the parsed metadata needed to:
+//! - resolve imported user-defined modules,
+//! - follow `self.<attr>` references initialized in `__init__`,
+//! - and cache that work across LSP requests.
+
 use crate::VarState;
+use crate::infer::infer_creation_size;
+use crate::infer_expr_shape;
 use crate::normalize_return_annotations;
-use crate::op_groups::{Imports, collect_imports};
+use crate::op_groups::{Imports, TorchOp, collect_imports};
 use rustpython_parser::Parse;
-use rustpython_parser::ast::{Arguments, Expr, Identifier, Stmt, Suite};
+use rustpython_parser::ast::{Arguments, Expr, ExprCall, Identifier, Stmt, Suite};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+/// Lightweight copy of a function definition used during symbolic dispatch.
 #[derive(Clone)]
 pub(crate) struct FunctionInfo {
     pub(crate) args: Box<Arguments>,
@@ -18,30 +28,35 @@ pub(crate) struct FunctionInfo {
 
 pub(crate) type FuncMap = HashMap<Identifier, FunctionInfo>;
 
+/// Reference to a user-defined class, either in the current module or an import.
 #[derive(Debug, Clone)]
 pub(crate) struct ClassRef {
     pub(crate) name: Identifier,
     pub(crate) module: Option<String>,
 }
 
+/// Cached metadata for a class plus lazily discovered `self.<attr>` states.
 #[derive(Clone)]
 pub(crate) struct ClassInfo {
     pub(crate) is_torch_module: bool,
     pub(crate) forward_name: Option<Identifier>,
     pub(crate) methods: HashMap<Identifier, FunctionInfo>,
-    self_attr_refs: RefCell<Option<HashMap<Identifier, ClassRef>>>,
+    self_attr_states: RefCell<Option<HashMap<Identifier, VarState>>>,
 }
 
 pub(crate) type ClassMap = HashMap<Identifier, ClassInfo>;
 
+/// Parsed module data reused by cross-file inference.
 pub(crate) struct CachedModule {
     pub(crate) file_path: PathBuf,
     pub(crate) source: String,
+    pub(crate) body: Suite,
     pub(crate) func_map: FuncMap,
     pub(crate) imports: Imports,
     pub(crate) class_map: ClassMap,
 }
 
+/// Incremental cache for parsed modules, keyed by normalized file path.
 pub struct ModuleCache {
     modules: HashMap<PathBuf, Rc<CachedModule>>,
     resolved_paths: HashMap<(PathBuf, String), Option<PathBuf>>,
@@ -101,8 +116,6 @@ impl ModuleCache {
     }
 
     fn load_module(&mut self, file_path: &Path, source: String) -> Option<Rc<CachedModule>> {
-        let normalized = normalize_return_annotations(&source);
-        let source = normalized.into_owned();
         let module = Suite::parse(&source, &file_path.to_string_lossy()).ok()?;
         let project_root = self.project_root_for(file_path);
         let imports = collect_imports(&module, Some(file_path), project_root.as_deref());
@@ -112,10 +125,61 @@ impl ModuleCache {
         Some(Rc::new(CachedModule {
             file_path: file_path.to_path_buf(),
             source,
+            body: module,
             func_map,
             imports,
             class_map,
         }))
+    }
+
+    fn load_normalized_module(
+        &mut self,
+        file_path: &Path,
+        source: String,
+    ) -> Option<Rc<CachedModule>> {
+        self.load_module(file_path, source)
+    }
+
+    fn normalized_source(source: &str) -> String {
+        normalize_return_annotations(source).into_owned()
+    }
+
+    pub(crate) fn get_file_module(
+        &mut self,
+        file_path: &Path,
+        source: Option<&str>,
+    ) -> Option<Rc<CachedModule>> {
+        let file_path = self.normalize_file_path(file_path);
+        self.remember_path(&file_path);
+
+        if let Some(source) = source {
+            let normalized = Self::normalized_source(source);
+            if !self.dirty_files.contains(&file_path)
+                && let Some(cached) = self.modules.get(&file_path)
+                && cached.source == normalized
+            {
+                return Some(Rc::clone(cached));
+            }
+            let cached = self.load_normalized_module(&file_path, normalized)?;
+            self.modules.insert(file_path.clone(), Rc::clone(&cached));
+            self.dirty_files.remove(&file_path);
+            return Some(cached);
+        }
+
+        if !self.dirty_files.contains(&file_path)
+            && let Some(cached) = self.modules.get(&file_path)
+        {
+            return Some(Rc::clone(cached));
+        }
+        let source = self
+            .source_overrides
+            .get(&file_path)
+            .cloned()
+            .or_else(|| fs::read_to_string(&file_path).ok())?;
+        let cached = self.load_normalized_module(&file_path, Self::normalized_source(&source))?;
+        self.modules.insert(file_path.clone(), Rc::clone(&cached));
+        self.dirty_files.remove(&file_path);
+        Some(cached)
     }
 
     pub(crate) fn get_module(
@@ -135,20 +199,7 @@ impl ModuleCache {
             self.resolved_paths.insert(resolve_key, normalized.clone());
             normalized?
         };
-        if !self.dirty_files.contains(&file_path)
-            && let Some(cached) = self.modules.get(&file_path)
-        {
-            return Some(Rc::clone(cached));
-        }
-        let source = self
-            .source_overrides
-            .get(&file_path)
-            .cloned()
-            .or_else(|| fs::read_to_string(&file_path).ok())?;
-        let cached = self.load_module(&file_path, source)?;
-        self.modules.insert(file_path.clone(), Rc::clone(&cached));
-        self.dirty_files.remove(&file_path);
-        Some(cached)
+        self.get_file_module(&file_path, None)
     }
 }
 
@@ -158,6 +209,7 @@ impl Default for ModuleCache {
     }
 }
 
+/// Returns `1` for instance methods whose first argument is `self`.
 pub(crate) fn method_param_offset(args: &Arguments) -> usize {
     match args.args.first() {
         Some(param) if param.def.arg.as_str() == "self" => 1,
@@ -165,6 +217,7 @@ pub(crate) fn method_param_offset(args: &Arguments) -> usize {
     }
 }
 
+/// Collect all top-level function definitions in a module body.
 pub(crate) fn collect_function_defs(body: &[Stmt], func_map: &mut FuncMap) {
     for stmt in body {
         if let Stmt::FunctionDef(func) = stmt {
@@ -210,6 +263,7 @@ fn is_torch_nn_module_base(expr: &Expr, imports: &Imports) -> bool {
     }
 }
 
+/// Collect class definitions and mark which ones inherit from `torch.nn.Module`.
 pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
     let mut defs = HashMap::new();
     for stmt in body {
@@ -281,7 +335,7 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
                     is_torch_module: is_torch.get(&name).copied().unwrap_or(false),
                     forward_name: info.forward_name,
                     methods: info.methods,
-                    self_attr_refs: RefCell::new(None),
+                    self_attr_states: RefCell::new(None),
                 },
             )
         })
@@ -309,6 +363,7 @@ impl<'a> ResolvedClassRef<'a> {
     }
 }
 
+/// Look up the metadata behind a [`ClassRef`], loading the defining module if needed.
 pub(crate) fn with_class_info<R, F>(
     class_ref: &ClassRef,
     source: &str,
@@ -365,6 +420,7 @@ where
     }
 }
 
+/// Resolve a class annotation such as `UserLinear` or an imported alias.
 pub(crate) fn class_ref_from_annotation(
     ann: &Expr,
     imports: &Imports,
@@ -387,6 +443,7 @@ pub(crate) fn class_ref_from_annotation(
     None
 }
 
+/// Resolve a class-valued expression from either a constructor call or a bound variable.
 pub(crate) fn class_ref_from_expr<'a>(
     expr: &Expr,
     vars: &'a HashMap<Identifier, VarState>,
@@ -428,69 +485,358 @@ fn self_attr_name(expr: &Expr) -> Option<Identifier> {
     (name.id.as_str() == "self").then(|| attr.attr.clone())
 }
 
-fn collect_self_attr_refs_from_init(
-    init: Option<&FunctionInfo>,
+fn self_attr_storage_key(attr: &Identifier) -> Identifier {
+    Identifier::from(format!("self.{}", attr.as_str()))
+}
+
+fn shape_state(shape: crate::Shape) -> VarState {
+    VarState {
+        annotated: None,
+        inferred: Some(shape),
+        class_ref: None,
+    }
+}
+
+fn class_state(class_ref: ClassRef) -> VarState {
+    VarState {
+        annotated: None,
+        inferred: None,
+        class_ref: Some(class_ref),
+    }
+}
+
+fn is_torch_namespace(expr: &Expr, imports: &Imports) -> bool {
+    matches!(expr, Expr::Name(name) if imports.torch_aliases.contains(&name.id))
+}
+
+fn imported_class_ref(
+    module_name: &str,
+    class_name: &Identifier,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ClassRef> {
+    if module_name == "torch" || module_name.starts_with("torch.") {
+        return None;
+    }
+    let (Some(cache), Some(cur_path)) = (module_cache, module_path) else {
+        return None;
+    };
+    let module = cache.get_module(module_name, cur_path)?;
+    module.class_map.contains_key(class_name).then(|| ClassRef {
+        name: class_name.clone(),
+        module: Some(module_name.to_string()),
+    })
+}
+
+pub(crate) fn is_parameter_constructor(func: &Expr, imports: &Imports) -> bool {
+    match func {
+        Expr::Name(name) => imports
+            .from_imports
+            .get(&name.id)
+            .map(|(module, original)| module == "torch.nn" && original.as_str() == "Parameter")
+            .unwrap_or(false),
+        Expr::Attribute(attr) if attr.attr.as_str() == "Parameter" => match attr.value.as_ref() {
+            Expr::Name(name) => imports
+                .module_aliases
+                .get(&name.id)
+                .map(|module| module == "torch.nn")
+                .unwrap_or(false),
+            Expr::Attribute(nn_attr)
+                if nn_attr.attr.as_str() == "nn"
+                    && is_torch_namespace(nn_attr.value.as_ref(), imports) =>
+            {
+                true
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn torch_call_op(func: &Expr, imports: &Imports) -> TorchOp {
+    match func {
+        Expr::Name(name) => TorchOp::as_call(&name.id, imports),
+        Expr::Attribute(attr) if is_torch_namespace(attr.value.as_ref(), imports) => {
+            TorchOp::from_attr(attr.attr.as_str())
+        }
+        _ => TorchOp::Unknown,
+    }
+}
+
+fn creation_call_shape(
+    call: &ExprCall,
+    vars: &HashMap<Identifier, VarState>,
+    imports: &Imports,
+    source: &str,
+) -> Option<crate::Shape> {
+    let torch_op = torch_call_op(call.func.as_ref(), imports);
+    let TorchOp::Creation { is_size } = torch_op else {
+        return None;
+    };
+    let mut diagnostics = Vec::new();
+    infer_creation_size(call, vars, &mut diagnostics, source, None, None, is_size)
+}
+
+/// Infer the cached state for a value assigned in `__init__`.
+///
+/// Only class constructors, `torch.nn.Parameter(...)`, and tensor creation calls are tracked.
+fn infer_tracked_state_from_expr(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    self_attrs: &HashMap<Identifier, VarState>,
     class_map: &ClassMap,
     imports: &Imports,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> HashMap<Identifier, ClassRef> {
-    let Some(init) = init else {
-        return HashMap::new();
-    };
-    let mut refs = HashMap::new();
+    source: &str,
+) -> Option<VarState> {
+    if let Some(class_ref) = class_ref_from_constructor_call(
+        expr,
+        class_map,
+        imports,
+        module_cache.as_deref_mut(),
+        module_path,
+    ) {
+        return Some(class_state(class_ref));
+    }
 
-    for stmt in &init.body {
-        let maybe_attr_and_value = match stmt {
-            Stmt::Assign(assign) if assign.targets.len() == 1 => self_attr_name(&assign.targets[0])
-                .map(|attr_name| (attr_name, assign.value.as_ref())),
-            Stmt::AnnAssign(assign) => assign.value.as_deref().and_then(|value| {
-                self_attr_name(&assign.target).map(|attr_name| (attr_name, value))
-            }),
-            _ => None,
-        };
-        if let Some((attr_name, value)) = maybe_attr_and_value {
-            if let Some(class_ref) = class_ref_from_constructor_call(
-                value,
+    if let Expr::Name(name) = expr {
+        return vars.get(&name.id).cloned();
+    }
+
+    if let Some(attr_name) = self_attr_name(expr) {
+        return vars
+            .get(&self_attr_storage_key(&attr_name))
+            .cloned()
+            .or_else(|| self_attrs.get(&attr_name).cloned());
+    }
+
+    if let Expr::Call(call) = expr {
+        if is_parameter_constructor(call.func.as_ref(), imports) {
+            let first_arg = call.args.first()?;
+            return infer_tracked_state_from_expr(
+                first_arg,
+                vars,
+                self_attrs,
                 class_map,
                 imports,
                 module_cache.as_deref_mut(),
                 module_path,
-            ) {
-                refs.insert(attr_name, class_ref);
-            } else {
-                refs.remove(&attr_name);
-            }
+                source,
+            )
+            .and_then(|state| state.annotated.or(state.inferred).map(shape_state));
+        }
+
+        if let Some(shape) = creation_call_shape(call, vars, imports, source) {
+            return Some(shape_state(shape));
         }
     }
 
-    refs
+    let mut diagnostics = Vec::new();
+    let mut hover_entries = Vec::new();
+    let mut call_stack = Vec::new();
+    infer_expr_shape(
+        expr,
+        vars,
+        &FuncMap::new(),
+        imports,
+        class_map,
+        &mut call_stack,
+        &mut diagnostics,
+        &mut hover_entries,
+        false,
+        source,
+        module_cache,
+        module_path,
+    )
+    .map(shape_state)
 }
 
-fn get_or_collect_self_attr_ref(
-    class_info: &ClassInfo,
-    target_attr: &Identifier,
+fn update_tracked_binding(
+    target: &Expr,
+    value: &Expr,
+    vars: &mut HashMap<Identifier, VarState>,
+    self_attrs: &mut HashMap<Identifier, VarState>,
     class_map: &ClassMap,
     imports: &Imports,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ClassRef> {
-    if class_info.self_attr_refs.borrow().is_none() {
-        let refs = collect_self_attr_refs_from_init(
+    source: &str,
+) {
+    let state = infer_tracked_state_from_expr(
+        value,
+        vars,
+        self_attrs,
+        class_map,
+        imports,
+        module_cache.as_deref_mut(),
+        module_path,
+        source,
+    );
+    if let Some(attr_name) = self_attr_name(target) {
+        if let Some(state) = state {
+            vars.insert(self_attr_storage_key(&attr_name), state.clone());
+            self_attrs.insert(attr_name, state);
+        } else {
+            vars.remove(&self_attr_storage_key(&attr_name));
+            self_attrs.remove(&attr_name);
+        }
+    } else if let Expr::Name(name) = target {
+        if let Some(state) = state {
+            vars.insert(name.id.clone(), state);
+        } else {
+            vars.remove(&name.id);
+        }
+    }
+}
+
+/// Scan `__init__` once and cache every tracked `self.<attr>` assignment.
+fn collect_self_attr_states_from_init(
+    init: Option<&FunctionInfo>,
+    source: &str,
+    class_map: &ClassMap,
+    imports: &Imports,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> HashMap<Identifier, VarState> {
+    let Some(init) = init else {
+        return HashMap::new();
+    };
+    let mut vars = HashMap::from([(Identifier::from("self"), VarState::default())]);
+    let mut states = HashMap::new();
+
+    for stmt in &init.body {
+        match stmt {
+            Stmt::Assign(assign) if assign.targets.len() == 1 => update_tracked_binding(
+                &assign.targets[0],
+                &assign.value,
+                &mut vars,
+                &mut states,
+                class_map,
+                imports,
+                module_cache.as_deref_mut(),
+                module_path,
+                source,
+            ),
+            Stmt::AnnAssign(assign) if assign.value.is_some() => update_tracked_binding(
+                assign.target.as_ref(),
+                assign.value.as_deref().unwrap(),
+                &mut vars,
+                &mut states,
+                class_map,
+                imports,
+                module_cache.as_deref_mut(),
+                module_path,
+                source,
+            ),
+            _ => {}
+        }
+    }
+
+    states
+}
+
+fn get_or_collect_self_attr_state(
+    class_info: &ClassInfo,
+    target_attr: &Identifier,
+    source: &str,
+    class_map: &ClassMap,
+    imports: &Imports,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<VarState> {
+    if class_info.self_attr_states.borrow().is_none() {
+        let states = collect_self_attr_states_from_init(
             class_info.methods.get(&Identifier::from("__init__")),
+            source,
             class_map,
             imports,
             module_cache.as_deref_mut(),
             module_path,
         );
-        *class_info.self_attr_refs.borrow_mut() = Some(refs);
+        *class_info.self_attr_states.borrow_mut() = Some(states);
     }
     class_info
-        .self_attr_refs
+        .self_attr_states
         .borrow()
         .as_ref()
-        .and_then(|refs| refs.get(target_attr))
+        .and_then(|states| states.get(target_attr))
         .cloned()
+}
+
+fn resolve_cached_self_attr_state(
+    base_class_ref: &ClassRef,
+    target_attr: &Identifier,
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    module_cache: &mut Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<VarState> {
+    with_class_info(
+        base_class_ref,
+        source,
+        func_map,
+        imports,
+        class_map,
+        module_cache,
+        module_path,
+        |class_info,
+         callee_source,
+         _callee_func_map,
+         callee_imports,
+         callee_class_map,
+         callee_path,
+         module_cache| {
+            get_or_collect_self_attr_state(
+                class_info,
+                target_attr,
+                callee_source,
+                callee_class_map,
+                callee_imports,
+                module_cache.as_deref_mut(),
+                callee_path,
+            )
+        },
+    )
+    .flatten()
+}
+
+/// Resolve an attribute access such as `self.weight` to the cached state from `__init__`.
+pub(crate) fn attr_state_from_expr(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<VarState> {
+    let Expr::Attribute(attr) = expr else {
+        return None;
+    };
+    let base_class_ref = resolve_class_ref_expr(
+        attr.value.as_ref(),
+        vars,
+        source,
+        func_map,
+        imports,
+        class_map,
+        module_cache.as_deref_mut(),
+        module_path,
+    )?;
+    resolve_cached_self_attr_state(
+        base_class_ref.as_ref(),
+        &attr.attr,
+        source,
+        func_map,
+        imports,
+        class_map,
+        &mut module_cache,
+        module_path,
+    )
 }
 
 fn resolve_class_ref_expr<'a>(
@@ -519,38 +865,24 @@ fn resolve_class_ref_expr<'a>(
                 module_cache.as_deref_mut(),
                 module_path,
             )?;
-            with_class_info(
+            resolve_cached_self_attr_state(
                 base_class_ref.as_ref(),
+                &attr.attr,
                 source,
                 func_map,
                 imports,
                 class_map,
                 &mut module_cache,
                 module_path,
-                |class_info,
-                 _callee_source,
-                 _callee_func_map,
-                 callee_imports,
-                 callee_class_map,
-                 callee_path,
-                 module_cache| {
-                    get_or_collect_self_attr_ref(
-                        class_info,
-                        &attr.attr,
-                        callee_class_map,
-                        callee_imports,
-                        module_cache.as_deref_mut(),
-                        callee_path,
-                    )
-                },
             )
-            .flatten()
+            .and_then(|state| state.class_ref)
             .map(ResolvedClassRef::Owned)
         }
         _ => None,
     }
 }
 
+/// Resolve constructor calls to user-defined classes, including imported classes.
 fn class_ref_from_constructor_call(
     call_expr: &Expr,
     class_map: &ClassMap,
@@ -570,31 +902,23 @@ fn class_ref_from_constructor_call(
                 });
             }
             if let Some((module_name, original)) = imports.from_imports.get(&name.id)
-                && module_name != "torch"
-                && !module_name.starts_with("torch.")
-                && let (Some(cache), Some(cur_path)) = (module_cache.as_deref_mut(), module_path)
-                && let Some(module) = cache.get_module(module_name, cur_path)
-                && module.class_map.contains_key(original)
+                && let Some(class_ref) = imported_class_ref(
+                    module_name,
+                    original,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                )
             {
-                return Some(ClassRef {
-                    name: original.clone(),
-                    module: Some(module_name.to_string()),
-                });
+                return Some(class_ref);
             }
         }
         Expr::Attribute(attr) => {
             if let Expr::Name(module_ident) = attr.value.as_ref()
                 && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
-                && module_name != "torch"
-                && !module_name.starts_with("torch.")
-                && let (Some(cache), Some(cur_path)) = (module_cache, module_path)
-                && let Some(module) = cache.get_module(module_name, cur_path)
-                && module.class_map.contains_key(&attr.attr)
+                && let Some(class_ref) =
+                    imported_class_ref(module_name, &attr.attr, module_cache, module_path)
             {
-                return Some(ClassRef {
-                    name: attr.attr.clone(),
-                    module: Some(module_name.to_string()),
-                });
+                return Some(class_ref);
             }
         }
         _ => {}
@@ -672,6 +996,7 @@ fn find_module_path_recursively(root: &Path, relative: &Path) -> Option<PathBuf>
     None
 }
 
+/// Resolve an import like `a.b.c` to the python file that defines it.
 fn resolve_module_path(
     module: &str,
     current_file: &Path,

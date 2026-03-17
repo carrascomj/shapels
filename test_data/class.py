@@ -250,3 +250,141 @@ class MyModelNestedNoSelf(torch.nn.Module):
         w = self.proj(x, y.T)
         return w, y
 
+# test 14
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+import torch.nn as nn
+
+
+class MyModelNestedParamConcrete(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        self.p = nn.Parameter(torch.ones(32, 57))
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        # annotating to rename from concrete to abstract dimensions
+        self.p: F[T, "S 57"]
+        out = w @ self.p
+        return w, y
+
+
+# test 15
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+
+
+class MyModelNestedParamAbstract(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        S, U = 32, 2
+        self.pos_emb = torch.nn.Parameter(torch.Tensor(S, U))
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        out = w @ self.pos_emb.sum(dim=1).unsqueeze(1)
+        return w, y
+
+# test 16
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+import torch.nn as nn
+
+
+class MyModelNestedParamAbstractWrong(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        L, U = 32, 2
+        self.pos_emb = nn.Parameter(torch.Tensor(L, U))
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        # should emit diagnostic, S != L
+        out = w @ self.pos_emb
+        return w, y
+
+
+# test 17
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+
+
+class MyModelNestedTensorAbstract(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        S, U = 32, 2
+        self.some_tensor = torch.zeros(S, U)
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        out = w @ self.some_tensor
+        return w, y
+
+
+# test 18
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+
+
+class MyModelNestedTensorAbstractOps(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        S, U = 32, 2
+        self.some_tensor = torch.Tensor(S, U).sum(dim=-1, keepdim=True)
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        out = w @ self.some_tensor
+        return w, y
+
+
+# test 19
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+
+
+class MyModelNestedParameterAbstractOps(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        S, W = 32, 2
+        self.my_param = torch.nn.Parameter(torch.ones(W, S).permute(1, 0))
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        out = w @ self.my_param
+        return w, y
+
+
+# test 20
+from torch import Tensor as T
+from jaxtyping import Float as F
+from multi_callee import UserLinear
+import torch.nn as nn
+
+
+class MyModelNestedParameterAbstractReassigned(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = UserLinear()
+        S, T = 32, 2
+        self.some_param = nn.Parameter(torch.Tensor(T, S).permute(1, 0))
+
+    def forward(self, x: F[T, "B X A"], y: F[T, "S A"]) -> tuple[F[T, "B X S"], F[T, "S A"]]:
+        w = self.proj(x, y.T)
+        my_tensor = self.some_param
+        out = w @ my_tensor
+        return w, y
+
+
