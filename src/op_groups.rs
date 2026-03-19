@@ -50,6 +50,8 @@ pub enum TorchOp {
     Flatten,
     /// `torch.quantile`,`torch.nan_quantile`
     Quantile,
+    /// `torch.where`
+    Condition,
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -81,6 +83,8 @@ impl TorchOp {
             Self::Conv(3)
         } else if attr_name == "repeat" {
             Self::Repeat
+        } else if attr_name == "where" {
+            Self::Condition
         } else if attr_name == "repeat_interleave" {
             Self::RepeatInterleave
         } else if AGGR_ALIASES.contains(attr_name) {
@@ -123,6 +127,8 @@ impl TorchOp {
             Self::View
         } else if is_alias_of("permute", func_name_id, imports) {
             Self::Transpose(Transpose::Permute)
+        } else if is_alias_of("where", func_name_id, imports) {
+            Self::Condition
         } else if is_alias_of("transpose", func_name_id, imports) {
             Self::Transpose(Transpose::Explicit)
         } else if is_alias_of("t", func_name_id, imports) {
@@ -389,6 +395,29 @@ pub static TORCH_DTYPES: Set<&'static str> = phf_set![
     "bool",
 ];
 
+/// These are non-official dtypes used to check that operations are valid.
+pub(crate) enum SimpleDtype {
+    Float,
+    Int,
+    Bool,
+    Unknown,
+}
+
+impl From<&str> for SimpleDtype {
+    fn from(value: &str) -> SimpleDtype {
+        // need to include common user-defined dtypes loke Float, Int, etc. from jaxtyping
+        match value.to_lowercase().as_str() {
+            "f" | "float" | "float32" | "float64" | "float16" | "bfloat16" | "complex32"
+            | "complex64" | "complex128" | "float8_e4m3fn" | "float8_e5m2" | "float8_e4m3fnuz"
+            | "float8_e5m2fnuz" | "float8_e8m0fnu" | "float4_e2m1fn_x2" => SimpleDtype::Float,
+            "i" | "uint8" | "int8" | "uint16" | "int16" | "uint32" | "int32" | "uint64"
+            | "int64" => SimpleDtype::Int,
+            "b" | "bool" => SimpleDtype::Bool,
+            _ => SimpleDtype::Unknown,
+        }
+    }
+}
+
 /// Functional equivalent to broadcastable operators (+, *, -, etc.).
 pub static BROADCASTABLE_ALIASES: Set<&'static str> = phf_set![
     "add",
@@ -515,6 +544,7 @@ pub fn collect_imports(
         "conv3d",
         "repeat_interleave",
         "quantile",
+        "where",
     ] {
         imports
             .func_aliases

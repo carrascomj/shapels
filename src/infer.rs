@@ -7,7 +7,7 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
-use crate::op_groups::{BroadcastOp, RangeOps, TorchOp};
+use crate::op_groups::{BroadcastOp, RangeOps, SimpleDtype, TorchOp};
 use crate::{
     ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg,
     get_dtype,
@@ -332,9 +332,7 @@ fn infer_boolean_mask_index<'a>(
                 module_path,
             )
         })?;
-    let Some(mask_dtype) = mask_shape.dtype.as_deref() else {
-        return None;
-    };
+    let mask_dtype = mask_shape.dtype.as_deref()?;
     if !mask_dtype.eq_ignore_ascii_case("bool") {
         return None;
     }
@@ -2747,4 +2745,116 @@ pub fn infer_unary_dtype(
         }
         _ => Some(shape),
     }
+}
+
+/// [`torch.where`](https://docs.pytorch.org/docs/stable/generated/torch.where.html)
+///
+/// This is a Noop shape-wise but requires checking that the shapes of the tensors
+/// in the arguments (possibly only a value for `input` and `other`) match.
+///
+/// Also, the base_expr `condition` must be of dtype `bool`.
+pub fn infer_condition(
+    base_expr: &Expr,
+    call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+    offset: usize,
+) -> Option<Shape> {
+    let maybe_base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
+        .or_else(|| {
+            infer_expr_shape(
+                base_expr,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        });
+    if maybe_base_shape.is_none() {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(base_expr), source),
+            severity: Some(DiagnosticSeverity::HINT),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: String::from("Condition shape unknown at this point"),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+    if let Some(base_shape) = maybe_base_shape.as_ref() {
+        if let Some(SimpleDtype::Float | SimpleDtype::Int) = base_shape
+            .dtype
+            .as_ref()
+            .map(|x| SimpleDtype::from(x.as_str()))
+        {
+            {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(base_expr), source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: String::from("Condition must be of boolean dtype"),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+        for (arg_name, off) in [("input", offset), ("other", offset + 1)] {
+            if let Some(arg_expr) = get_arg(call, arg_name, off)
+                && let Some(arg_shape) =
+                    lookup_shape(arg_expr, vars, hover_entries, record_hovers, source).or_else(
+                        || {
+                            infer_expr_shape(
+                                arg_expr,
+                                vars,
+                                func_map,
+                                imports,
+                                class_map,
+                                call_stack,
+                                diagnostics,
+                                hover_entries,
+                                false,
+                                source,
+                                module_cache.as_deref_mut(),
+                                module_path,
+                            )
+                        },
+                    )
+                && arg_shape.dims != base_shape.dims
+            {
+                push_error_diagnostic(
+                    diagnostics,
+                    expr_text_range(arg_expr),
+                    source,
+                    format!(
+                        "Condition vs {} must have the same shape: {} vs {}",
+                        arg_name,
+                        arg_shape.render(),
+                        base_shape.render()
+                    ),
+                )
+            }
+        }
+    }
+    maybe_base_shape
 }
