@@ -604,21 +604,53 @@ pub fn infer_matmul_shapes(
 }
 
 /// Matrix multiplication shape inference shared by `@` and `torch.mm`.
-/// Keeps all leading dims of left except the last, then appends all trailing dims of right except the first.
+/// Mirrors `torch.matmul` semantics, including batch-dimension broadcasting.
 fn matmul(left: &Shape, right: &Shape) -> Result<Shape, String> {
     if left.dims.is_empty() || right.dims.is_empty() {
         return Err("Matmul requires both operands to have shapes".into());
     }
-    let left_inner = left.dims.last().unwrap();
-    let right_inner = right.dims.first().unwrap();
+
+    let left_promoted = left.dims.len() == 1;
+    let right_promoted = right.dims.len() == 1;
+
+    let left_dims = if left_promoted {
+        vec!["1".to_string(), left.dims[0].clone()]
+    } else {
+        left.dims.clone()
+    };
+    let right_dims = if right_promoted {
+        vec![right.dims[0].clone(), "1".to_string()]
+    } else {
+        right.dims.clone()
+    };
+
+    let left_inner = left_dims.last().unwrap();
+    let right_inner = &right_dims[right_dims.len() - 2];
     if left_inner != right_inner {
         return Err(format!(
             "Matmul inner dimensions mismatch: {} vs {}",
             left_inner, right_inner
         ));
     }
-    let mut dims: Vec<String> = left.dims[..left.dims.len() - 1].to_vec();
-    dims.extend_from_slice(&right.dims[1..]);
+
+    let batch_dims = broadcast_dims(
+        &left_dims[..left_dims.len() - 2],
+        &right_dims[..right_dims.len() - 2],
+    )
+    .map_err(|msg| format!("Matmul batch dimensions mismatch: {msg}"))?;
+
+    let mut dims = batch_dims;
+    dims.push(left_dims[left_dims.len() - 2].clone());
+    dims.push(right_dims.last().unwrap().clone());
+
+    if left_promoted {
+        let matrix_start = dims.len().saturating_sub(2);
+        dims.remove(matrix_start);
+    }
+    if right_promoted {
+        dims.pop();
+    }
+
     Ok(Shape {
         dtype: left.dtype.clone().or(right.dtype.clone()),
         dims,

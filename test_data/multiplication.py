@@ -257,3 +257,36 @@ def equality_operators_return_bool():
     y = torch.ones(B, 1, 1, dtype=torch.float16)
     good = x.ge(y) # good: broadcastable shapes, bitwise with bool
     return good
+
+
+# test 17
+from torch import Tensor
+
+
+def batch_mul_is_properly_broadcasted():
+    A, B, C, D = 81, 8, 32, 243
+    x = torch.Tensor(A, B, C)
+    y = torch.Tensor(A, C, D)
+    z = (x @ y)
+
+
+# test 18
+from torch import Tensor
+
+
+def batch_mul_is_properly_broadcasted_concrete():
+    x = torch.Tensor(81, 8, 32)
+    y = torch.Tensor(81, 32, 57)
+    z = x @ y
+
+
+# test 19
+from torch import Tensor
+
+
+def batchmul_example_docs():
+    """Example from https://docs.pytorch.org/docs/stable/generated/torch.bmm.html"""
+    input = torch.randn(10, 3, 4)
+    mat2 = torch.randn(10, 4, 5)
+    # this is a torch.bmm in the original example (10, 3, 5)
+    res = input @ mat2

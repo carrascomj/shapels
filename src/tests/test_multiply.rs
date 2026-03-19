@@ -259,3 +259,27 @@ fn equality_operators_always_return_bool() {
         assert_eq!(shape.dtype.as_deref(), Some("bool"));
     }
 }
+
+#[test]
+fn matmul_handles_abstract_bmm() {
+    let src = extract_test_case(PY_DATA, 17);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "A B D"));
+}
+
+#[test]
+fn matmul_handles_concrete_bmm() {
+    let src = extract_test_case(PY_DATA, 18);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "81 8 57"));
+}
+
+#[test]
+fn matmul_handles_concrete_bmm_from_example() {
+    let src = extract_test_case(PY_DATA, 19);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "res =", "10 3 5"));
+}
