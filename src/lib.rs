@@ -197,6 +197,23 @@ impl ReturnValue {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct AnnotationBindings {
+    dims: HashMap<String, String>,
+    ellipsis: Option<Vec<String>>,
+}
+
+impl AnnotationBindings {
+    fn merge_from(&mut self, other: Self) {
+        for (name, dim) in other.dims {
+            self.dims.entry(name).or_insert(dim);
+        }
+        if self.ellipsis.is_none() && other.ellipsis.is_some() {
+            self.ellipsis = other.ellipsis;
+        }
+    }
+}
+
 /// Normalize return annotations so `-> A, B` parses as `-> (A, B)`.
 fn normalize_return_annotations<'a>(source: &'a str) -> Cow<'a, str> {
     let mut changed = false;
@@ -1997,6 +2014,115 @@ fn tuple_shapes_from_annotation(
     }
 }
 
+fn annotation_bindings(annotated: &[String], actual: &[String]) -> Option<AnnotationBindings> {
+    let mut bindings = AnnotationBindings::default();
+    let ellipsis_pos = annotated.iter().position(|dim| dim == "...");
+    match ellipsis_pos {
+        Some(pos) => {
+            let suffix_len = annotated.len().saturating_sub(pos + 1);
+            if actual.len() < pos + suffix_len {
+                return None;
+            }
+            for (ann_dim, actual_dim) in annotated[..pos].iter().zip(actual.iter()) {
+                bind_annotation_dim(&mut bindings, ann_dim, actual_dim)?;
+            }
+            let ellipsis_end = actual.len() - suffix_len;
+            bindings.ellipsis = Some(actual[pos..ellipsis_end].to_vec());
+            for (ann_dim, actual_dim) in annotated[pos + 1..]
+                .iter()
+                .zip(actual[ellipsis_end..].iter())
+            {
+                bind_annotation_dim(&mut bindings, ann_dim, actual_dim)?;
+            }
+        }
+        None => {
+            if annotated.len() != actual.len() {
+                return None;
+            }
+            for (ann_dim, actual_dim) in annotated.iter().zip(actual.iter()) {
+                bind_annotation_dim(&mut bindings, ann_dim, actual_dim)?;
+            }
+        }
+    }
+    Some(bindings)
+}
+
+fn bind_annotation_dim(
+    bindings: &mut AnnotationBindings,
+    annotated: &str,
+    actual: &str,
+) -> Option<()> {
+    if is_concrete_dim(annotated) && is_concrete_dim(actual) && annotated != actual {
+        return None;
+    }
+    if annotated == "..." {
+        return None;
+    }
+    if !is_concrete_dim(annotated) {
+        bindings
+            .dims
+            .entry(annotated.to_string())
+            .or_insert_with(|| actual.to_string());
+    }
+    Some(())
+}
+
+fn instantiate_annotation_shape(shape: &Shape, bindings: &AnnotationBindings) -> Shape {
+    let mut dims = Vec::with_capacity(
+        shape.dims.len()
+            + bindings
+                .ellipsis
+                .as_ref()
+                .map(|dims| dims.len().saturating_sub(1))
+                .unwrap_or(0),
+    );
+    for dim in &shape.dims {
+        match dim.as_str() {
+            "..." => match bindings.ellipsis.as_ref() {
+                Some(bound) => dims.extend(bound.iter().cloned()),
+                None => dims.push(dim.clone()),
+            },
+            _ => dims.push(
+                bindings
+                    .dims
+                    .get(dim)
+                    .cloned()
+                    .unwrap_or_else(|| dim.clone()),
+            ),
+        }
+    }
+    Shape {
+        dtype: shape.dtype.clone(),
+        dims,
+    }
+}
+
+fn instantiate_optional_shape(
+    shape: Option<Shape>,
+    bindings: &AnnotationBindings,
+) -> Option<Shape> {
+    shape.map(|shape| instantiate_annotation_shape(&shape, bindings))
+}
+
+fn instantiate_annotation_return(ret: ReturnValue, bindings: &AnnotationBindings) -> ReturnValue {
+    match ret {
+        ReturnValue::Single(shape) => {
+            ReturnValue::from_shape(Some(instantiate_annotation_shape(&shape, bindings)))
+        }
+        ReturnValue::Tuple(tuple) => ReturnValue::from_tuple(
+            tuple
+                .into_iter()
+                .map(|shape| instantiate_optional_shape(shape, bindings))
+                .collect(),
+        ),
+        ReturnValue::None => ReturnValue::None,
+    }
+}
+
+fn is_concrete_dim(dim: &str) -> bool {
+    dim.parse::<i64>().is_ok()
+}
+
 /// Infer return shapes for a call, optionally simulating the callee body for diagnostics.
 fn infer_call_return_from_info(
     call: &ExprCall<TextRange>,
@@ -2025,6 +2151,7 @@ fn infer_call_return_from_info(
         return None;
     }
     let mut arg_shapes: HashMap<Identifier, VarState> = HashMap::new();
+    let mut bindings = AnnotationBindings::default();
     for (idx, param) in callee_info.args.args.iter().enumerate().skip(param_offset) {
         let call_idx = idx.saturating_sub(param_offset);
         if let Some(arg_expr) = call.args.get(call_idx) {
@@ -2048,17 +2175,9 @@ fn infer_call_return_from_info(
                     .as_deref()
                     .and_then(parse_shape_annotation)
                 {
-                    let dims_match = ann.dims.len() == shape.dims.len()
-                        && ann.dims.iter().zip(shape.dims.iter()).all(|(left, right)| {
-                            // less stringent equality (alpha-equivalence):
-                            // behaves as a annotated aliasing; only concrete
-                            // dimensions at both sides must match
-                            match (left.parse::<i32>().is_ok(), right.parse::<i32>().is_ok()) {
-                                (true, true) => left == right,
-                                _ => true,
-                            }
-                        });
-                    if !dims_match {
+                    if let Some(local_bindings) = annotation_bindings(&ann.dims, &shape.dims) {
+                        bindings.merge_from(local_bindings);
+                    } else {
                         diagnostics.push(Diagnostic {
                             range: text_range_to_lsp(expr_text_range(arg_expr), source),
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -2127,13 +2246,21 @@ fn infer_call_return_from_info(
     }
     if let Some(ret_ann) = callee_info.returns.as_deref() {
         let annotated_return = if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
-            Some(ReturnValue::from_shape(Some(ret_shape)))
+            Some(ReturnValue::from_shape(instantiate_optional_shape(
+                Some(ret_shape),
+                &bindings,
+            )))
         } else if let Some(tuple_shapes) = tuple_shapes_from_annotation(ret_ann, imports, class_map)
         {
-            Some(ReturnValue::from_tuple(tuple_shapes))
+            Some(instantiate_annotation_return(
+                ReturnValue::from_tuple(tuple_shapes),
+                &bindings,
+            ))
         } else {
             let (shape_union, _) = shape_or_class_from_union(ret_ann, imports, class_map);
-            shape_union.map(|shape| ReturnValue::from_shape(Some(shape)))
+            shape_union.map(|shape| {
+                ReturnValue::from_shape(instantiate_optional_shape(Some(shape), &bindings))
+            })
         };
         if let Some(ret) = annotated_return {
             if emit_body_diagnostics || record_hovers {

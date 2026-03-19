@@ -106,3 +106,48 @@ def arg_hint_returns_diagnostic_on_mismatch():
     # arg should be [B T O]
     user_module = UserLinear()
     out = user_module.zeros_from_x(x)
+
+
+# test 11
+from multi_callee import ellipsis_function
+
+def ellipsis_function_preserves_prefix():
+    x = torch.zeros(2, 3, 5)
+    y = ellipsis_function(x)
+    return y
+
+
+# test 12
+from multi_callee import ellipsis_function_tuple
+
+def ellipsis_function_tuple_destructuring():
+    x = torch.zeros(2, 3, 5, 7)
+    y, residual = ellipsis_function_tuple(x)
+    return y, residual
+
+
+
+# test 13
+from jaxtyping import Float as F
+from torch import Tensor
+
+def ellipsis_function_double_tuple(x: F[T, "... InHeight InWidth"]) -> tuple[F[T, "... OutHeight OutWidth"], F[T, "... OutHeight OutWidth"]]:
+    return x, x
+
+def ellipsis_function_tuple_destructuring():
+    x = torch.zeros(2, 3, 5, 7)
+    y, residual = ellipsis_function_double_tuple(x)
+    return y, residual
+
+
+# test 14
+from jaxtyping import Float as F
+from torch import Tensor
+
+
+def ellipsis_function_double_tuple(x: F[T, "... InHeight InWidth"]) -> tuple[F[T, "... OutHeight OutWidth"], F[T, "... OutHeight OutWidth"]]:
+    return x, x
+
+def ellipsis_function_tuple_destructuring(x: F[T, " Single"]):
+    y, residual = ellipsis_function_double_tuple(x)
+    return y, residual

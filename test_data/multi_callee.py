@@ -49,3 +49,11 @@ def from_zeros_to_tuple(x):
     B, A, X = 2, 8, 16
     out = torch.zeros(B, A, X, dtype=torch.float64)
     return out, x
+
+
+def ellipsis_function(x: F[T, "... InDim"]) -> F[T, "... OutDim"]:
+    return x
+
+
+def ellipsis_function_tuple(x: F[T, "... InDim"]) -> tuple[F[T, "... OutDim"], F[T, "... InDim"]]:
+    return x, x

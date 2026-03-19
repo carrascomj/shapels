@@ -133,6 +133,54 @@ fn multi_file_runs_inference_on_torch_module_method() {
 }
 
 #[test]
+fn multi_file_annotated_ellipsis_function_preserves_prefix() {
+    let src = extract_test_case(PY_MULTI_CALLER, 11);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "y =", "2 3 OutDim"));
+}
+
+#[test]
+fn multi_file_annotated_ellipsis_function_tuple_destructuring() {
+    let src = extract_test_case(PY_MULTI_CALLER, 12);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "y, residual =",
+        "2 3 5 OutDim"
+    ));
+    assert!(is_hover_expected(&src, &analysis, "residual =", "2 3 5 7"));
+}
+
+#[test]
+fn annotated_ellipsis_with_two_dims_also_works() {
+    let src = extract_test_case(PY_MULTI_CALLER, 13);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "y,",
+        "2 3 OutHeight OutWidth"
+    ));
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "residual =",
+        "2 3 OutHeight OutWidth"
+    ));
+}
+
+#[test]
+fn annotated_ellipsis_with_insufficient_dims_emits_diagnostic() {
+    let src = extract_test_case(PY_MULTI_CALLER, 14);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/multi_caller.py"));
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
 fn imported_function_does_not_show_diagnostic_on_callee() {
     // analyze entire caller file from disk so relative module resolution works
     let src = extract_test_case(PY_REPRO, 1);

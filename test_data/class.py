@@ -388,3 +388,42 @@ class MyModelNestedParameterAbstractReassigned(torch.nn.Module):
         return w, y
 
 
+# test 21
+from jaxtyping import Float as F
+from torch import Tensor
+import torch.nn as nn
+
+
+class EllipsisMlp(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(in_dim, out_dim)
+
+    def forward(self, x: F[Tensor, "... InDim"]) -> F[Tensor, "... OutDim"]:
+        return self.proj(x)
+
+
+class EllipsisModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: F[Tensor, "Batch L InEmb"], module_with_annotated_ellipsis: EllipsisMlp):
+        y = module_with_annotated_ellipsis(x)
+        return y
+
+
+# test 22
+from jaxtyping import Float as F
+from torch import Tensor
+import torch.nn as nn
+
+
+class EllipsisTuple(nn.Module):
+    def forward(self, x: F[Tensor, "... InDim"]) -> tuple[F[Tensor, "... OutDim"], F[Tensor, "... InDim"]]:
+        return x, x
+
+
+def ellipsis_tuple_destructuring(module: EllipsisTuple, x: F[Tensor, "Batch Heads Tokens Embed"]):
+    y, residual = module(x)
+    return y, residual
+
