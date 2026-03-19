@@ -333,7 +333,7 @@ fn infer_boolean_mask_index<'a>(
             )
         })?;
     let mask_dtype = mask_shape.dtype.as_deref()?;
-    if !mask_dtype.eq_ignore_ascii_case("bool") {
+    if !matches!(SimpleDtype::from(mask_dtype), SimpleDtype::Bool) {
         return None;
     }
     if mask_shape.dims.is_empty() || mask_shape.dims.len() > base_shape.dims.len() {
@@ -1395,9 +1395,7 @@ pub fn infer_broadcastable_poswise(
                 dtype: Some(dtype), ..
             }) = shape
             {
-                // TODO(carrascomj): a bit hacky, should be more systematic like get_dtype
-                let dlower = dtype.to_lowercase();
-                if !(dlower.contains("int") || dlower.contains("bool")) {
+                if let SimpleDtype::Float = SimpleDtype::from(dtype.as_str()) {
                     diagnostics.push(Diagnostic {
                         range: text_range_to_lsp(text_range, source),
                         severity: Some(DiagnosticSeverity::ERROR),
@@ -1410,7 +1408,7 @@ pub fn infer_broadcastable_poswise(
                         related_information: None,
                         tags: None,
                         data: None,
-                    });
+                    })
                 }
             }
         }
@@ -2723,9 +2721,8 @@ pub fn infer_unary_dtype(
         // if dtype is unknown, just return the shape
         return Some(shape);
     };
-    let dlower = dtype.to_lowercase();
-    match op {
-        ast::UnaryOp::Invert if !(dlower.contains("int") || dlower.contains("bool")) => {
+    match (op, SimpleDtype::from(dtype)) {
+        (ast::UnaryOp::Invert, SimpleDtype::Float) => {
             push_error_diagnostic(
                 diagnostics,
                 range,
@@ -2734,7 +2731,7 @@ pub fn infer_unary_dtype(
             );
             None
         }
-        ast::UnaryOp::UAdd | ast::UnaryOp::USub if dlower.contains("bool") => {
+        (ast::UnaryOp::UAdd | ast::UnaryOp::USub, SimpleDtype::Bool) => {
             push_error_diagnostic(
                 diagnostics,
                 range,
