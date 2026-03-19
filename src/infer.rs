@@ -80,6 +80,24 @@ pub fn infer_index(
         other => vec![parse_index_kind(other, source)],
     };
 
+    if let Some(shape) = infer_boolean_mask_index(
+        &base_shape,
+        &indices,
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+        module_cache.as_deref_mut(),
+        module_path,
+    ) {
+        return Some(shape);
+    }
+
     let consuming_without_ellipsis = indices
         .iter()
         .filter(|k| !matches!(k, IndexKind::Ellipsis))
@@ -274,6 +292,132 @@ pub fn infer_index(
         dtype: base_shape.dtype.clone(),
         dims: output_dims,
     })
+}
+
+fn infer_boolean_mask_index<'a>(
+    base_shape: &Shape,
+    indices: &[IndexKind<'a>],
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    if indices.len() != 1 {
+        return None;
+    }
+    let IndexKind::Tensor(mask_expr) = &indices[0] else {
+        return None;
+    };
+    let mask_shape =
+        lookup_shape(mask_expr, vars, hover_entries, record_hovers, source).or_else(|| {
+            infer_expr_shape(
+                mask_expr,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        })?;
+    let Some(mask_dtype) = mask_shape.dtype.as_deref() else {
+        return None;
+    };
+    if !mask_dtype.eq_ignore_ascii_case("bool") {
+        return None;
+    }
+    if mask_shape.dims.is_empty() || mask_shape.dims.len() > base_shape.dims.len() {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(mask_expr), source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!(
+                "Boolean mask shape {} is incompatible with indexed tensor shape {}",
+                Shape {
+                    dtype: mask_shape.dtype.clone(),
+                    dims: mask_shape.dims.clone(),
+                }
+                .render(),
+                base_shape.render()
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+    if !mask_matches_prefix(&mask_shape.dims, &base_shape.dims) {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(mask_expr), source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!(
+                "Boolean mask shape {} must match the leading dimensions of indexed tensor shape {}",
+                Shape {
+                    dtype: mask_shape.dtype.clone(),
+                    dims: mask_shape.dims.clone(),
+                }
+                .render(),
+                base_shape.render()
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+
+    let mut dims = vec![bounded_product_dim(&mask_shape.dims)];
+    dims.extend_from_slice(&base_shape.dims[mask_shape.dims.len()..]);
+    Some(Shape {
+        dtype: base_shape.dtype.clone(),
+        dims,
+    })
+}
+
+fn mask_matches_prefix(mask_dims: &[String], base_dims: &[String]) -> bool {
+    if mask_dims.len() > base_dims.len() {
+        return false;
+    }
+    mask_dims
+        .iter()
+        .zip(base_dims.iter())
+        .all(|(mask, base)| dims_compatible(mask, base))
+}
+
+fn dims_compatible(left: &str, right: &str) -> bool {
+    match (left.parse::<i64>().ok(), right.parse::<i64>().ok()) {
+        (Some(l), Some(r)) => l == r,
+        _ => left == right,
+    }
+}
+
+fn bounded_product_dim(dims: &[String]) -> String {
+    let product = dims.iter().try_fold(1i64, |acc, dim| {
+        dim.parse::<i64>().ok().map(|value| acc * value)
+    });
+    match (dims.len(), product) {
+        (_, Some(value)) => format!("0:{value}"),
+        (0, _) => "0:0".to_string(),
+        (1, _) => format!("0:{}", dims[0]),
+        _ => format!("0:({})", dims.join("*")),
+    }
 }
 
 fn is_advanced(kind: &IndexKind<'_>) -> bool {

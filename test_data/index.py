@@ -122,3 +122,51 @@ def slice_half_concrete_and_negative():
     tensor = torch.Tensor(256, 32, 224, 16)
     # this should emit, step cannot be negative
     z = tensor[128:, -2, 1:-2:-1]
+
+
+# test 16
+import torch
+
+def slice_half_concrete_and_negative():
+    B, L, E = 256, 32, 1536
+    padding = torch.randn((B, L, E))
+    token_emb = torch.Tensor(B, L, E)
+    attn = torch.Tensor(B, L)
+    token_valid = ~padding.eq(0).all(dim=-1)
+    # this indexing operation yields a shape unknown at runtime
+    # at the first dim but is bound by [0, B*L]
+    flat_token = token_emb[token_valid]
+    flat_attn = attn[token_valid]
+
+
+# test 17
+import torch
+
+def slice_half_concrete_and_negative():
+    B, L, E = 256, 32, 1536
+    padding = torch.rand((K, L, E))
+    token_emb = torch.Tensor(B, L, E)
+    attn = torch.Tensor(B, L)
+    token_valid = ~padding.eq(0).all(dim=-1)
+    # this indexing operation is wrong because K != B
+    flat_token = token_emb[token_valid]
+
+
+# test 18
+import torch
+
+def boolean_runtime_index_collapses_arbitrary_prefix_rank():
+    B, H, L, E = 8, 12, 32, 64
+    x = torch.Tensor(B, H, L, E)
+    mask = torch.Tensor(B, H, L).bool()
+    z = x[mask]
+
+
+# test 19
+import torch
+
+def boolean_runtime_index_with_single_mask_axis():
+    B, E = 128, 1536
+    x = torch.Tensor(B, E)
+    mask = torch.Tensor(B).bool()
+    z = x[mask]

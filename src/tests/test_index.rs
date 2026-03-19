@@ -122,3 +122,40 @@ fn step_should_be_greater_than_0() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 1);
 }
+
+#[test]
+fn boolean_runtime_index_is_properly_inferred() {
+    let src = extract_test_case(INDEX_PY_DATA, 16);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "flat_token =",
+        "0:(B*L) E"
+    ));
+    assert!(is_hover_expected(&src, &analysis, "flat_attn =", "0:(B*L)"));
+}
+
+#[test]
+fn wrong_boolean_runtime_index_emits_diagnostics() {
+    let src = extract_test_case(INDEX_PY_DATA, 17);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.len() > 0);
+}
+
+#[test]
+fn boolean_runtime_index_collapses_multi_dim_prefix() {
+    let src = extract_test_case(INDEX_PY_DATA, 18);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "0:(B*H*L) E"));
+}
+
+#[test]
+fn boolean_runtime_index_collapses_single_dim_prefix() {
+    let src = extract_test_case(INDEX_PY_DATA, 19);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "0:B E"));
+}
