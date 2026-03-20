@@ -159,3 +159,19 @@ fn boolean_runtime_index_collapses_single_dim_prefix() {
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "z =", "0:B E"));
 }
+
+#[test]
+fn take_valid_cases() {
+    let src = extract_test_case(INDEX_PY_DATA, 20);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "out =", "A E"));
+    assert!(is_hover_expected(&src, &analysis, "out_2 =", "B X"));
+}
+
+#[test]
+fn take_invalid_cases_emit_diagnostics() {
+    let src = extract_test_case(INDEX_PY_DATA, 21);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

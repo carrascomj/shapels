@@ -4,7 +4,7 @@ require bound checks for the dimension if present."""
 
 # test 1
 from jaxtyping import Floas as F
-from torch import tensor as T
+from torch import Tensor as T
 from torch import softmax
 
 def softmax_valid_cases_tensor_method(x: F[T, "B X Y"], empty: F[T, ""], one: F[T, " Features"]):
@@ -22,7 +22,7 @@ def softmax_valid_cases_tensor_method(x: F[T, "B X Y"], empty: F[T, ""], one: F[
 
 # test 2
 from jaxtyping import Floas as F
-from torch import tensor as T
+from torch import Tensor as T
 
 def softmax_invalid(x: F[T, "B X Y"], empty: F[T, ""], one: F[T, " Features"]):
     a = x.softmax(3)
@@ -33,8 +33,8 @@ def softmax_invalid(x: F[T, "B X Y"], empty: F[T, ""], one: F[T, " Features"]):
 
 
 # test 3
-from jaxtyping import Floas as F, Bool
-from torch import tensor as T
+from jaxtyping import Float as F, Bool
+from torch import Tensor as T
 
 def where_valid_cases(x: Bool[T, "B X Y"], input: F[T, "B X Y"], other: F[T, "B X Y"]):
     out = torch.where(x, input, other)
@@ -47,8 +47,8 @@ def where_valid_cases(x: Bool[T, "B X Y"], input: F[T, "B X Y"], other: F[T, "B 
 
 
 # test 4
-from jaxtyping import Floas as F, Bool
-from torch import tensor as T
+from jaxtyping import Float as F, Bool
+from torch import Tensor as T
 
 def where_invalid_cases(x: Bool[T, "B X Y"], input: F[T, "B X Y"], other: F[T, "B X Y"]):
     B, X, Y, J = 2, 5, 32, 97

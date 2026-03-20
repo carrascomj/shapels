@@ -823,7 +823,7 @@ pub fn infer_squeeze(
     keepdim: Option<&Expr>,
 ) -> Option<Shape> {
     let diag_before = diagnostics.len();
-    let base_shape = infer_expr_shape(
+    let base_shape = base_shape_or_diag(
         base_expr,
         vars,
         func_map,
@@ -1122,7 +1122,7 @@ pub fn infer_unsqueeze(
     module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<Shape> {
-    let base_shape = infer_expr_shape(
+    let base_shape = base_shape_or_diag(
         base_expr,
         vars,
         func_map,
@@ -1135,8 +1135,7 @@ pub fn infer_unsqueeze(
         source,
         module_cache,
         module_path,
-    );
-    let base_shape = base_shape?;
+    )?;
     let dim =
         dim_arg.and_then(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut false))?;
     let dim_i: i16 = dim.parse().ok()?;
@@ -1394,22 +1393,21 @@ pub fn infer_broadcastable_poswise(
             if let Some(Shape {
                 dtype: Some(dtype), ..
             }) = shape
+                && let SimpleDtype::Float = SimpleDtype::from(dtype.as_str())
             {
-                if let SimpleDtype::Float = SimpleDtype::from(dtype.as_str()) {
-                    diagnostics.push(Diagnostic {
-                        range: text_range_to_lsp(text_range, source),
-                        severity: Some(DiagnosticSeverity::ERROR),
-                        code: None,
-                        code_description: None,
-                        source: Some("shapels".into()),
-                        message: format!(
-                            "Bitwise operations only support integer or bool dtypes, found {dtype}"
-                        ),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    })
-                }
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(text_range, source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: format!(
+                        "Bitwise operations only support integer or bool dtypes, found {dtype}"
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                })
             }
         }
     }
@@ -2744,6 +2742,53 @@ pub fn infer_unary_dtype(
     }
 }
 
+fn base_shape_or_diag(
+    base_expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let maybe_base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
+        .or_else(|| {
+            infer_expr_shape(
+                base_expr,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                false,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
+        });
+    if maybe_base_shape.is_none() {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(expr_text_range(base_expr), source),
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: String::from("Tensor shape unknown at this point"),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+    maybe_base_shape
+}
+
 /// [`torch.where`](https://docs.pytorch.org/docs/stable/generated/torch.where.html)
 ///
 /// This is a Noop shape-wise but requires checking that the shapes of the tensors
@@ -2766,38 +2811,22 @@ pub fn infer_condition(
     module_path: Option<&Path>,
     offset: usize,
 ) -> Option<Shape> {
-    let maybe_base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
-        .or_else(|| {
-            infer_expr_shape(
-                base_expr,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        });
-    if maybe_base_shape.is_none() {
-        diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(expr_text_range(base_expr), source),
-            severity: Some(DiagnosticSeverity::HINT),
-            code: None,
-            code_description: None,
-            source: Some("shapels".into()),
-            message: String::from("Condition shape unknown at this point"),
-            related_information: None,
-            tags: None,
-            data: None,
-        });
-    }
+    let maybe_base_shape = base_shape_or_diag(
+        base_expr,
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+        module_cache.as_deref_mut(),
+        module_path,
+    );
     if let Some(base_shape) = maybe_base_shape.as_ref() {
-        if let Some(SimpleDtype::Float | SimpleDtype::Int) = base_shape
+        if let Some(SimpleDtype::Float | SimpleDtype::Int { .. }) = base_shape
             .dtype
             .as_ref()
             .map(|x| SimpleDtype::from(x.as_str()))
@@ -2854,4 +2883,51 @@ pub fn infer_condition(
         }
     }
     maybe_base_shape
+}
+
+pub fn infer_take(
+    call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+    offset: usize,
+) -> Option<Shape> {
+    let index_shape = base_shape_or_diag(
+        get_arg(call, "index", offset)?,
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+        module_cache.as_deref_mut(),
+        module_path,
+    )?;
+    if !index_shape
+        .dtype
+        .as_ref()
+        .map(|x| SimpleDtype::from(x.as_str()).is_long())
+        .unwrap_or(false)
+    {
+        {
+            push_error_diagnostic(
+                diagnostics,
+                call.range,
+                source,
+                format!("Index must be of dtype long"),
+            );
+        }
+    }
+    Some(index_shape)
 }

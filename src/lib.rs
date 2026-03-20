@@ -18,7 +18,7 @@ use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_condition, infer_conv,
     infer_creation_size, infer_flatten, infer_index, infer_matmul_shapes, infer_noop,
     infer_permute, infer_range_size, infer_repeat, infer_repeat_interleave, infer_squeeze,
-    infer_to, infer_unary_dtype, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_take, infer_to, infer_unary_dtype, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
@@ -1866,6 +1866,9 @@ fn torch_op_to_shape(
         }
         (TorchOp::Condition, Some(base), _, _) => {
             infer_condition(base, call, vars, func_map, imports, class_map, call_stack, diagnostics, hover_entries, record_hovers, source, module_cache.as_deref_mut(), module_path, offset)
+        }
+        (TorchOp::Take, _, _, _) => {
+            infer_take(call, vars, func_map, imports, class_map, call_stack, diagnostics, hover_entries, record_hovers, source, module_cache.as_deref_mut(), module_path, offset)
         }
         (TorchOp::Conv(d), Some(base), _, Function) => {
             let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;

@@ -170,3 +170,21 @@ def boolean_runtime_index_with_single_mask_axis():
     x = torch.Tensor(B, E)
     mask = torch.Tensor(B).bool()
     z = x[mask]
+
+
+# test 20
+import torch
+from jaxtyping import Float as F, Bool, Int64
+from torch import Tensor as T
+
+def take_valid_cases(x: Bool[T, "B X Y"], index: Int64[T, "A E"]):
+    out = torch.take(x, index)
+    out_2 = torch.take(x, (torch.randn_like(x) * 100.).sum(-1).long())
+
+
+# test 21
+from jaxtyping import Float as F, Bool
+from torch import Tensor as T
+
+def take_invalid_case(x: F[T, "B X Y"], index: F[T, "A E"]):
+    out = torch.take(x, index)

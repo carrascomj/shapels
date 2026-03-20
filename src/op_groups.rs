@@ -52,6 +52,8 @@ pub enum TorchOp {
     Quantile,
     /// `torch.where`
     Condition,
+    /// `torch.take`
+    Take,
     /// The operation is not supported or not properly indicated by the user.
     Unknown,
 }
@@ -85,6 +87,8 @@ impl TorchOp {
             Self::Repeat
         } else if attr_name == "where" {
             Self::Condition
+        } else if attr_name == "take" {
+            Self::Take
         } else if attr_name == "repeat_interleave" {
             Self::RepeatInterleave
         } else if AGGR_ALIASES.contains(attr_name) {
@@ -129,6 +133,8 @@ impl TorchOp {
             Self::Transpose(Transpose::Permute)
         } else if is_alias_of("where", func_name_id, imports) {
             Self::Condition
+        } else if is_alias_of("take", func_name_id, imports) {
+            Self::Take
         } else if is_alias_of("transpose", func_name_id, imports) {
             Self::Transpose(Transpose::Explicit)
         } else if is_alias_of("t", func_name_id, imports) {
@@ -393,12 +399,13 @@ pub static TORCH_DTYPES: Set<&'static str> = phf_set![
     "uint64",
     "int64",
     "bool",
+    "long",
 ];
 
 /// These are non-official dtypes used to check that operations are valid.
 pub(crate) enum SimpleDtype {
     Float,
-    Int,
+    Int { long: bool },
     Bool,
     Unknown,
 }
@@ -410,11 +417,19 @@ impl From<&str> for SimpleDtype {
             "f" | "float" | "float32" | "float64" | "float16" | "bfloat16" | "complex32"
             | "complex64" | "complex128" | "float8_e4m3fn" | "float8_e5m2" | "float8_e4m3fnuz"
             | "float8_e5m2fnuz" | "float8_e8m0fnu" | "float4_e2m1fn_x2" => SimpleDtype::Float,
-            "i" | "uint8" | "int8" | "uint16" | "int16" | "uint32" | "int32" | "uint64"
-            | "int64" => SimpleDtype::Int,
+            "i" | "uint8" | "int8" | "uint16" | "int16" | "uint32" | "int32" | "uint64" => {
+                SimpleDtype::Int { long: false }
+            }
+            "l" | "long" | "int64" => SimpleDtype::Int { long: true },
             "b" | "bool" => SimpleDtype::Bool,
             _ => SimpleDtype::Unknown,
         }
+    }
+}
+
+impl SimpleDtype {
+    pub fn is_long(&self) -> bool {
+        matches!(self, SimpleDtype::Int { long: true })
     }
 }
 
@@ -545,6 +560,7 @@ pub fn collect_imports(
         "repeat_interleave",
         "quantile",
         "where",
+        "take",
     ] {
         imports
             .func_aliases
