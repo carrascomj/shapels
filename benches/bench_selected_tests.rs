@@ -81,5 +81,44 @@ fn view_tests(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, parse_unet, multifile_tests, view_tests);
+fn ellipsis_multifile_tests(c: &mut Criterion) {
+    let mut group = c.benchmark_group("EllipsisMC");
+    let path = Path::new("test_data/multi_caller.py");
+    for test_idx in 11..15 {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(test_idx),
+            &test_idx,
+            |b, &test_idx| {
+                let test_src = extract_test_case(PY_VIEW_DATA, test_idx);
+                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), &path));
+            },
+        );
+    }
+    group.finish();
+}
+
+fn ellipsis_class_tests(c: &mut Criterion) {
+    let mut group = c.benchmark_group("EllipsisClass");
+    let path = Path::new("test_data/class.py");
+    for test_idx in 21..23 {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(test_idx),
+            &test_idx,
+            |b, &test_idx| {
+                let test_src = extract_test_case(PY_VIEW_DATA, test_idx);
+                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), &path));
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    parse_unet,
+    multifile_tests,
+    view_tests,
+    ellipsis_multifile_tests,
+    ellipsis_class_tests
+);
 criterion_main!(benches);
