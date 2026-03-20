@@ -360,8 +360,6 @@ pub static NOOP_ALIASES: Set<&'static str> = phf_set! {
     "cpu",
     "cuda",
     "detach",
-    // TODO(carrascomj): this should get its own inference to shape check broadcastable args
-    "masked_fill",
 };
 
 /// Shape-wise NoOp, changes dtype, do not accept arguments.
@@ -482,7 +480,7 @@ pub enum BroadcastOp {
     /// +, -, /, etc.
     Arithmetic,
     /// &, >>, etc.: constrained to input of dtype bool/int
-    Bitwise,
+    Bitwise { only_right: bool },
     /// ==, !=, etc.: returns a bool dtype
     Eq,
 }
@@ -492,7 +490,7 @@ impl BroadcastOp {
         if is_alias_of("broadcast", func_name_id, imports) {
             Some(Self::Arithmetic)
         } else if is_alias_of("bitwise", func_name_id, imports) {
-            Some(Self::Bitwise)
+            Some(Self::Bitwise { only_right: false })
         } else if is_alias_of("broadcast_eq", func_name_id, imports) {
             Some(Self::Eq)
         } else {
@@ -504,7 +502,9 @@ impl BroadcastOp {
         if BROADCASTABLE_ALIASES.contains(attr_name) {
             Some(Self::Arithmetic)
         } else if BITWISE_ALIASES.contains(attr_name) {
-            Some(Self::Bitwise)
+            Some(Self::Bitwise { only_right: false })
+        } else if "masked_fill" == attr_name {
+            Some(Self::Bitwise { only_right: true })
         } else if EQ_BROADCAST_ALIASES.contains(attr_name) {
             Some(Self::Eq)
         } else {
@@ -565,6 +565,7 @@ pub fn collect_imports(
         "quantile",
         "where",
         "take",
+        "masked_fill",
     ] {
         imports
             .func_aliases

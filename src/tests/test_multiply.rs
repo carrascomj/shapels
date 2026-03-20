@@ -283,3 +283,19 @@ fn matmul_handles_concrete_bmm_from_example() {
     assert_eq!(analysis.diagnostics.len(), 0);
     assert!(is_hover_expected(&src, &analysis, "res =", "10 3 5"));
 }
+
+#[test]
+fn masked_fill_broadcasts_abstract() {
+    let src = extract_test_case(PY_DATA, 20);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 2);
+    assert!(is_hover_expected(&src, &analysis, "z =", "A B C 1"));
+}
+
+#[test]
+fn masked_fill_broadcasts_concrete() {
+    let src = extract_test_case(PY_DATA, 21);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 2);
+    assert!(is_hover_expected(&src, &analysis, "z =", "5 3 4 1"));
+}

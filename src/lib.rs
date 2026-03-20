@@ -1135,7 +1135,7 @@ pub(crate) fn infer_expr_shape(
                 *expr_range,
                 module_cache.as_deref_mut(),
                 module_path,
-                BroadcastOp::Bitwise,
+                BroadcastOp::Bitwise { only_right: false },
             ),
             Operator::MatMult => infer_matmul_shapes(
                 left,
@@ -1751,7 +1751,14 @@ fn torch_op_to_shape(
             };
             infer_to(base_expr, dtype_expr, diagnostics, source, imports)
         }
-        (TorchOp::Broadcastable(broadcast_op), Some(left), Some(right), _) => {
+        (TorchOp::Broadcastable(broadcast_op), Some(left), maybe_right, method_or_fn)
+            if matches!(method_or_fn, Method)
+            || !matches!(broadcast_op, BroadcastOp::Bitwise { only_right: true }) =>
+        {
+            let right = maybe_right.or_else(|| {
+                if matches!(broadcast_op, BroadcastOp::Bitwise { only_right: true }) {
+                get_arg(call, "mask", 0)
+            } else {None}})?;
             infer_broadcastable_poswise(
                 &ShapeOrExpr::Expr(left),
                 right,

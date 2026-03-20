@@ -1385,29 +1385,36 @@ pub fn infer_broadcastable_poswise(
         });
 
     // check bitwise operator is applied int/bool, emit diagnostic otherwise
-    if matches!(broadcast_op, BroadcastOp::Bitwise) {
-        for (text_range, shape) in [
-            (left_range, &left_shape),
-            (expr_text_range(right), &right_shape.as_ref()),
+    if let BroadcastOp::Bitwise { only_right } = broadcast_op {
+        for (idx, text_range, shape) in [
+            (0, left_range, &left_shape),
+            (1, expr_text_range(right), &right_shape.as_ref()),
         ] {
+            if idx == 0 && only_right {
+                // masked_fill only checks the right tensor for boolean (the mask)
+                continue;
+            }
             if let Some(Shape {
                 dtype: Some(dtype), ..
             }) = shape
-                && let SimpleDtype::Float = SimpleDtype::from(dtype.as_str())
             {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(text_range, source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: format!(
-                        "Bitwise operations only support integer or bool dtypes, found {dtype}"
-                    ),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                })
+                match (SimpleDtype::from(dtype.as_str()), only_right) {
+                    (SimpleDtype::Float, false) | (SimpleDtype::Int{..} | SimpleDtype::Float, true) => diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(text_range, source),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: format!(
+                            "Bitwise operations only support integer or bool dtypes, found {dtype}"
+                        ),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    }),
+                    _ =>(),
+
+                }
             }
         }
     }

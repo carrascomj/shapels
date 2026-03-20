@@ -291,3 +291,30 @@ def batchmul_example_docs():
     mat2 = torch.randn(10, 4, 5)
     # this is a torch.bmm in the original example (10, 3, 5)
     res = input @ mat2
+
+
+
+# test 20
+from jaxtyping import Float as F, Int64
+from torch import Tensor as T
+
+def masked_fill_broadcasts_abstract():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    x: F[T, "A B C 1"]=torch.empty(5,3,4,1)
+    y: Int64[T, "B 1 1"]=torch.empty(  3,1,1)
+    bad = x.masked_fill(y, 32) # wrong
+    z = x.masked_fill(mask=y.bool(), value=51) # good
+    bad_2 = y.masked_fill(x) # good
+
+
+# test 21
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def masked_fill_broadcasts_concrete():
+    """Example adapted from https://docs.pytorch.org/docs/stable/notes/broadcasting.html."""
+    x = torch.empty(5,1,4,1, dtype=torch.float32)
+    y = torch.empty(  3,1,1, dtype=torch.bool)
+    z = x.masked_fill(y, 32) # good
+    bad = x.masked_fill(mask=y.long(), value=51) # good
+    bad_2 = y.masked_fill(x) # good
