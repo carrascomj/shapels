@@ -254,7 +254,7 @@ def equality_operators_return_bool():
     A, B, C = 5, 3, 4
     # same shapes are always broadcastable (i.e. the above rules always hold)
     x = torch.ones(A, B, C, 1, dtype=torch.float16)
-    y = torch.ones(B, 1, 1, dtype=torch.float16)
+    y = x.new_zeros(B, 1, 1, dtype=torch.float32)
     good = x.ge(y) # good: broadcastable shapes, bitwise with bool
     return good
 
@@ -266,17 +266,18 @@ from torch import Tensor
 def batch_mul_is_properly_broadcasted():
     A, B, C, D = 81, 8, 32, 243
     x = torch.Tensor(A, B, C)
-    y = torch.Tensor(A, C, D)
+    y = x.new_ones(A, C, D)
     z = (x @ y)
 
 
 # test 18
 from torch import Tensor
+from torch import new_full
 
 
 def batch_mul_is_properly_broadcasted_concrete():
     x = torch.Tensor(81, 8, 32)
-    y = torch.Tensor(81, 32, 57)
+    y = x.new_full(81, 32, 57)
     z = x @ y
 
 

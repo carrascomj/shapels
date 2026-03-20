@@ -2925,7 +2925,7 @@ pub fn infer_take(
                 diagnostics,
                 call.range,
                 source,
-                format!("Index must be of dtype long"),
+                "Index must be of dtype long".to_string(),
             );
         }
     }

@@ -1657,7 +1657,8 @@ fn torch_op_to_shape(
             module_cache.as_deref_mut(),
             module_path,
         ),
-        (TorchOp::Creation { is_size }, _, _, Function) => {
+        (TorchOp::Creation { is_size }, _, _, Function)
+        | (TorchOp::Creation { is_size: is_size @ true }, _, _, Method) => {
             let shape_assign = tensor_or_shape_as_arg(
                 is_size,
                 vars,

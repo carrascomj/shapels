@@ -103,6 +103,8 @@ impl TorchOp {
             Self::Creation { is_size: true }
         } else if CREATION_LIKE_ALIASES.contains(attr_name) {
             Self::Creation { is_size: false }
+        } else if CREATION_NEW_LIKE_ALIASES.contains(attr_name) {
+            Self::Creation { is_size: true }
         } else if let Ok(op) = RangeOps::try_from(attr_name) {
             Self::RangeOp(op)
         } else if FLATTEN_ALIASES.contains(attr_name) {
@@ -235,6 +237,8 @@ pub static NOOP_DIM_ALIASES: Set<&'static str> = phf_set![
 /// ```
 pub static CREATION_SIZE_ALIASES: Set<&'static str> =
     phf_set!["Tensor", "zeros", "ones", "empty", "full", "rand", "randn"];
+pub static CREATION_NEW_LIKE_ALIASES: Set<&'static str> =
+    phf_set!["new_zeros", "new_ones", "new_empty", "new_full"];
 
 /// `*_like`, accepting a tensor as input.
 pub static CREATION_LIKE_ALIASES: Set<&'static str> = phf_set![
