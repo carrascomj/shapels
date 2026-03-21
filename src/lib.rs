@@ -25,7 +25,7 @@ pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, FunctionInfo, ResolvedModule, attr_state_from_expr,
     class_ref_from_annotation, collect_class_defs, collect_function_defs, is_parameter_constructor,
-    method_param_offset, resolved_module_from_expr, with_class_info,
+    method_param_offset, resolved_module_from_expr, self_attr_module_from_self, with_class_info,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
@@ -1246,33 +1246,6 @@ pub(crate) fn infer_expr_shape(
                     module_path,
                 );
             }
-            if let Some(resolved_module) = resolved_module_from_expr(
-                call.func.as_ref(),
-                vars,
-                source,
-                func_map,
-                imports,
-                class_map,
-                module_cache.as_deref_mut(),
-                module_path,
-            ) && let Some(ret) = infer_module_call_return(
-                call,
-                resolved_module.as_ref(),
-                ModuleCallable::Forward,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            ) {
-                return ret.first().cloned();
-            }
             if let Expr::Name(func_name) = call.func.as_ref() {
                 let torchop_shape = torch_op_to_shape(
                     vars,
@@ -1294,6 +1267,33 @@ pub(crate) fn infer_expr_shape(
                 );
                 if torchop_shape.is_some() {
                     return torchop_shape;
+                }
+                if let Some(resolved_module) = resolved_module_from_expr(
+                    call.func.as_ref(),
+                    vars,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                ) && let Some(ret) = infer_module_call_return(
+                    call,
+                    resolved_module.as_ref(),
+                    ModuleCallable::Forward,
+                    vars,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                ) {
+                    return ret.first().cloned();
                 }
 
                 if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
@@ -1358,8 +1358,61 @@ pub(crate) fn infer_expr_shape(
             // methods are functions with attributes
             if let Expr::Attribute(attr) = call.func.as_ref() {
                 let attr_name: &str = attr.attr.as_ref();
+                if matches!(attr.value.as_ref(), Expr::Name(name) if name.id.as_str() == "self")
+                    && let Some(resolved_module) = self_attr_module_from_self(
+                        &attr.attr,
+                        vars,
+                        source,
+                        func_map,
+                        imports,
+                        class_map,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    )
+                    && let Some(ret) = infer_module_call_return(
+                        call,
+                        resolved_module.as_ref(),
+                        ModuleCallable::Forward,
+                        vars,
+                        func_map,
+                        imports,
+                        class_map,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        record_hovers,
+                        source,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    )
+                {
+                    return ret.first().cloned();
+                }
+                // two cases: torch.ATTR_NAME(torch.Tensor, ...) or torch.Tensor.ATTR_NAME(...)
+                let op_kind = function_or_method(&attr.value, imports);
+                let aliased_shape = torch_op_to_shape(
+                    vars,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    &mut module_cache,
+                    module_path,
+                    call,
+                    attr_name,
+                    TorchOp::from_attr(attr_name),
+                    op_kind,
+                    Some(attr),
+                );
+                if aliased_shape.is_some() {
+                    return aliased_shape;
+                }
                 if let Some(resolved_module) = resolved_module_from_expr(
-                    attr.value.as_ref(),
+                    call.func.as_ref(),
                     vars,
                     source,
                     func_map,
@@ -1370,7 +1423,7 @@ pub(crate) fn infer_expr_shape(
                 ) && let Some(ret) = infer_module_call_return(
                     call,
                     resolved_module.as_ref(),
-                    ModuleCallable::Method(&attr.attr),
+                    ModuleCallable::Forward,
                     vars,
                     func_map,
                     imports,
@@ -1418,9 +1471,19 @@ pub(crate) fn infer_expr_shape(
                 {
                     return ret.first().cloned();
                 }
-                // two cases: torch.ATTR_NAME(torch.Tensor, ...) or torch.Tensor.ATTR_NAME(...)
-                let op_kind = function_or_method(&attr.value, imports);
-                let aliased_shape = torch_op_to_shape(
+                if let Some(resolved_module) = resolved_module_from_expr(
+                    attr.value.as_ref(),
+                    vars,
+                    source,
+                    func_map,
+                    imports,
+                    class_map,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                ) && let Some(ret) = infer_module_call_return(
+                    call,
+                    resolved_module.as_ref(),
+                    ModuleCallable::Method(&attr.attr),
                     vars,
                     func_map,
                     imports,
@@ -1430,17 +1493,39 @@ pub(crate) fn infer_expr_shape(
                     hover_entries,
                     record_hovers,
                     source,
-                    &mut module_cache,
+                    module_cache.as_deref_mut(),
                     module_path,
-                    call,
-                    attr_name,
-                    TorchOp::from_attr(attr_name),
-                    op_kind,
-                    Some(attr),
-                );
-                if aliased_shape.is_some() {
-                    return aliased_shape;
+                ) {
+                    return ret.first().cloned();
                 }
+                return None;
+            }
+            if let Some(resolved_module) = resolved_module_from_expr(
+                call.func.as_ref(),
+                vars,
+                source,
+                func_map,
+                imports,
+                class_map,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) && let Some(ret) = infer_module_call_return(
+                call,
+                resolved_module.as_ref(),
+                ModuleCallable::Forward,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            ) {
+                return ret.first().cloned();
             }
             None
         }
@@ -2135,6 +2220,29 @@ fn instantiate_annotation_return(ret: ReturnValue, bindings: &AnnotationBindings
     }
 }
 
+fn annotated_return_from_expr(
+    ret_ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+    bindings: &AnnotationBindings,
+) -> Option<ReturnValue> {
+    if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
+        Some(ReturnValue::from_shape(instantiate_optional_shape(
+            Some(ret_shape),
+            bindings,
+        )))
+    } else if let Some(tuple_shapes) = tuple_shapes_from_annotation(ret_ann, imports, class_map) {
+        Some(instantiate_annotation_return(
+            ReturnValue::from_tuple(tuple_shapes),
+            bindings,
+        ))
+    } else {
+        let (shape_union, _) = shape_or_class_from_union(ret_ann, imports, class_map);
+        shape_union
+            .map(|shape| ReturnValue::from_shape(instantiate_optional_shape(Some(shape), bindings)))
+    }
+}
+
 fn is_concrete_dim(dim: &str) -> bool {
     dim.parse::<i64>().is_ok()
 }
@@ -2260,50 +2368,33 @@ fn infer_call_return_from_info(
             );
         }
     }
-    if let Some(ret_ann) = callee_info.returns.as_deref() {
-        let annotated_return = if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
-            Some(ReturnValue::from_shape(instantiate_optional_shape(
-                Some(ret_shape),
-                &bindings,
-            )))
-        } else if let Some(tuple_shapes) = tuple_shapes_from_annotation(ret_ann, imports, class_map)
-        {
-            Some(instantiate_annotation_return(
-                ReturnValue::from_tuple(tuple_shapes),
-                &bindings,
-            ))
-        } else {
-            let (shape_union, _) = shape_or_class_from_union(ret_ann, imports, class_map);
-            shape_union.map(|shape| {
-                ReturnValue::from_shape(instantiate_optional_shape(Some(shape), &bindings))
-            })
-        };
-        if let Some(ret) = annotated_return {
-            if emit_body_diagnostics || record_hovers {
-                call_stack.push(callee_name.clone());
-                let (mut diag, mut hovers, _) = simulate_function(
-                    callee_info.args.as_ref(),
-                    &callee_info.body,
-                    callee_source,
-                    callee_func_map,
-                    callee_imports,
-                    callee_class_map,
-                    call_stack,
-                    arg_shapes,
-                    record_hovers,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                );
-                if emit_body_diagnostics {
-                    diagnostics.append(&mut diag);
-                }
-                if record_hovers {
-                    hover_entries.append(&mut hovers);
-                }
-                call_stack.pop();
+    if let Some(ret_ann) = callee_info.returns.as_deref()
+        && let Some(ret) = annotated_return_from_expr(ret_ann, imports, class_map, &bindings)
+    {
+        if emit_body_diagnostics || record_hovers {
+            call_stack.push(callee_name.clone());
+            let (mut diag, mut hovers, _) = simulate_function(
+                callee_info.args.as_ref(),
+                &callee_info.body,
+                callee_source,
+                callee_func_map,
+                callee_imports,
+                callee_class_map,
+                call_stack,
+                arg_shapes,
+                record_hovers,
+                module_cache.as_deref_mut(),
+                module_path,
+            );
+            if emit_body_diagnostics {
+                diagnostics.append(&mut diag);
             }
-            return Some(ret);
+            if record_hovers {
+                hover_entries.append(&mut hovers);
+            }
+            call_stack.pop();
         }
+        return Some(ret);
     }
     call_stack.push(callee_name.clone());
     let (mut diag, mut hovers, ret_value) = simulate_function(
@@ -2461,6 +2552,86 @@ pub(crate) fn infer_resolved_module_shape(
     }
 }
 
+fn infer_call_base_shape(
+    call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let base_expr = call.args.first()?;
+    lookup_shape(base_expr, vars, hover_entries, record_hovers, source).or_else(|| {
+        infer_expr_shape(
+            base_expr,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            false,
+            source,
+            module_cache,
+            module_path,
+        )
+    })
+}
+
+fn infer_builtin_module_call_return(
+    module: &crate::torch_nn::TorchNNModule,
+    call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ReturnValue> {
+    let base_shape = infer_call_base_shape(
+        call,
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        record_hovers,
+        source,
+        module_cache.as_deref_mut(),
+        module_path,
+    )?;
+    module
+        .infer_builtin_module(
+            base_shape,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            source,
+            call.range,
+            module_cache,
+            module_path,
+        )
+        .map(|shape| ReturnValue::from_shape(Some(shape)))
+}
+
 fn infer_user_class_shape_from_base(
     class_ref: &ClassRef,
     base_shape: Shape,
@@ -2556,29 +2727,11 @@ fn infer_user_class_shape_from_base(
                 );
             }
 
-            if let Some(ret_ann) = callee_info.returns.as_deref() {
-                let annotated_return = if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
-                    Some(ReturnValue::from_shape(instantiate_optional_shape(
-                        Some(ret_shape),
-                        &bindings,
-                    )))
-                } else if let Some(tuple_shapes) =
-                    tuple_shapes_from_annotation(ret_ann, callee_imports, callee_class_map)
-                {
-                    Some(instantiate_annotation_return(
-                        ReturnValue::from_tuple(tuple_shapes),
-                        &bindings,
-                    ))
-                } else {
-                    let (shape_union, _) =
-                        shape_or_class_from_union(ret_ann, callee_imports, callee_class_map);
-                    shape_union.map(|shape| {
-                        ReturnValue::from_shape(instantiate_optional_shape(Some(shape), &bindings))
-                    })
-                };
-                if let Some(ret) = annotated_return {
-                    return ret.first().cloned();
-                }
+            if let Some(ret_ann) = callee_info.returns.as_deref()
+                && let Some(ret) =
+                    annotated_return_from_expr(ret_ann, callee_imports, callee_class_map, &bindings)
+            {
+                return ret.first().cloned();
             }
 
             call_stack.push(callee_name.clone());
@@ -2615,7 +2768,7 @@ fn infer_module_call_return(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
+    module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
     match resolved_module {
@@ -2635,85 +2788,41 @@ fn infer_module_call_return(
             module_cache,
             module_path,
         ),
-        ResolvedModule::Builtin(module) => {
-            match callable {
-                ModuleCallable::Forward => {
-                    let base_expr = call.args.first()?;
-                    let base_shape =
-                        lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
-                            .or_else(|| {
-                                infer_expr_shape(
-                                    base_expr,
-                                    vars,
-                                    func_map,
-                                    imports,
-                                    class_map,
-                                    call_stack,
-                                    diagnostics,
-                                    hover_entries,
-                                    false,
-                                    source,
-                                    module_cache.as_deref_mut(),
-                                    module_path,
-                                )
-                            })?;
-                    infer_resolved_module_shape(
-                        resolved_module,
-                        base_shape,
-                        vars,
-                        func_map,
-                        imports,
-                        class_map,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        source,
-                        call.range,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                    .map(|shape| ReturnValue::from_shape(Some(shape)))
-                }
-                ModuleCallable::Method(method_name) if method_name.as_str() == "forward" => {
-                    let base_expr = call.args.first()?;
-                    let base_shape =
-                        lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
-                            .or_else(|| {
-                                infer_expr_shape(
-                                    base_expr,
-                                    vars,
-                                    func_map,
-                                    imports,
-                                    class_map,
-                                    call_stack,
-                                    diagnostics,
-                                    hover_entries,
-                                    false,
-                                    source,
-                                    module_cache.as_deref_mut(),
-                                    module_path,
-                                )
-                            })?;
-                    module
-                        .infer_builtin_module(
-                            base_shape,
-                            vars,
-                            func_map,
-                            imports,
-                            class_map,
-                            call_stack,
-                            diagnostics,
-                            hover_entries,
-                            source,
-                            call.range,
-                            module_cache.as_deref_mut(),
-                            module_path,
-                        )
-                        .map(|shape| ReturnValue::from_shape(Some(shape)))
-                }
-                ModuleCallable::Method(_) => None,
+        ResolvedModule::Builtin(module) => match callable {
+            ModuleCallable::Forward => infer_builtin_module_call_return(
+                module,
+                call,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache,
+                module_path,
+            ),
+            ModuleCallable::Method(method_name) if method_name.as_str() == "forward" => {
+                infer_builtin_module_call_return(
+                    module,
+                    call,
+                    vars,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    module_cache,
+                    module_path,
+                )
             }
-        }
+            ModuleCallable::Method(_) => None,
+        },
     }
 }
 
