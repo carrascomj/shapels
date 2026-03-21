@@ -47,66 +47,29 @@ pub(crate) fn module_from_constructor_call(
         return None;
     };
 
-    match call.func.as_ref() {
-        Expr::Name(name) => {
-            if class_map.contains_key(&name.id) {
-                return Some(ResolvedModule::User(ClassRef {
-                    name: name.id.clone(),
-                    module: None,
-                }));
-            }
-            if let Some((module_name, original)) = imports.from_imports.get(&name.id) {
-                if module_name == "torch.nn" {
-                    if original.as_str() == "Parameter" {
-                        return None;
-                    }
-                    return Some(ResolvedModule::Builtin(
-                        TorchNNModule::from_constructor_call(
-                            call_expr,
-                            class_map,
-                            imports,
-                            module_cache,
-                            module_path,
-                        ),
-                    ));
-                }
-                if let Some(class_ref) = imported_class_ref(
-                    module_name,
-                    original,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                ) {
-                    return Some(ResolvedModule::User(class_ref));
-                }
-            }
-        }
-        Expr::Attribute(attr) => {
-            if is_torch_nn_constructor(call_expr, imports) {
-                if attr.attr.as_str() == "Parameter" {
-                    return None;
-                }
-                return Some(ResolvedModule::Builtin(
-                    TorchNNModule::from_constructor_call(
-                        call_expr,
-                        class_map,
-                        imports,
-                        module_cache,
-                        module_path,
-                    ),
-                ));
-            }
-            if let Expr::Name(module_ident) = attr.value.as_ref()
-                && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
-                && let Some(class_ref) =
-                    imported_class_ref(module_name, &attr.attr, module_cache, module_path)
-            {
-                return Some(ResolvedModule::User(class_ref));
-            }
-        }
-        _ => {}
+    if let Some(class_ref) = constructor_class_ref(
+        call.func.as_ref(),
+        class_map,
+        imports,
+        module_cache.as_deref_mut(),
+        module_path,
+    ) {
+        return Some(ResolvedModule::User(class_ref));
     }
 
-    None
+    let constructor_name = torch_nn_constructor_name(call_expr, imports)?;
+    if constructor_name == "Parameter" {
+        return None;
+    }
+    Some(ResolvedModule::Builtin(
+        TorchNNModule::from_constructor_call(
+            call_expr,
+            class_map,
+            imports,
+            module_cache,
+            module_path,
+        ),
+    ))
 }
 
 impl TorchNNModule {
@@ -114,7 +77,7 @@ impl TorchNNModule {
         call_expr: &Expr,
         class_map: &ClassMap,
         imports: &Imports,
-        mut module_cache: Option<&mut ModuleCache>,
+        module_cache: Option<&mut ModuleCache>,
         module_path: Option<&Path>,
     ) -> Self {
         let Expr::Call(call) = call_expr else {
@@ -123,6 +86,24 @@ impl TorchNNModule {
         let Some(constructor_name) = torch_nn_constructor_name(call_expr, imports) else {
             return Self::Noop;
         };
+        Self::from_named_constructor(
+            call,
+            &constructor_name,
+            class_map,
+            imports,
+            module_cache,
+            module_path,
+        )
+    }
+
+    fn from_named_constructor(
+        call: &ExprCall,
+        constructor_name: &str,
+        class_map: &ClassMap,
+        imports: &Imports,
+        mut module_cache: Option<&mut ModuleCache>,
+        module_path: Option<&Path>,
+    ) -> Self {
         let normalized = constructor_name.to_ascii_lowercase();
 
         if normalized == "linear" {
@@ -165,19 +146,20 @@ impl TorchNNModule {
         }
 
         if normalized == "sequential" {
-            let mut modules = Vec::new();
-            for element in sequential_elements(call) {
-                if let Some(module) = module_from_constructor_call(
-                    element,
-                    class_map,
-                    imports,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                ) {
-                    modules.push(module);
-                }
-            }
-            return Self::Sequential(modules);
+            return Self::Sequential(
+                sequential_elements(call)
+                    .into_iter()
+                    .filter_map(|element| {
+                        module_from_constructor_call(
+                            element,
+                            class_map,
+                            imports,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                    })
+                    .collect(),
+            );
         }
 
         Self::Noop
@@ -276,8 +258,33 @@ fn get_call_arg<'a>(call: &'a ExprCall, name_arg: &str, as_positional: usize) ->
     })
 }
 
-fn is_torch_nn_constructor(call_expr: &Expr, imports: &Imports) -> bool {
-    torch_nn_constructor_name(call_expr, imports).is_some()
+fn constructor_class_ref(
+    constructor: &Expr,
+    class_map: &ClassMap,
+    imports: &Imports,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ClassRef> {
+    match constructor {
+        Expr::Name(name) => {
+            if class_map.contains_key(&name.id) {
+                return Some(ClassRef {
+                    name: name.id.clone(),
+                    module: None,
+                });
+            }
+            let (module_name, original) = imports.from_imports.get(&name.id)?;
+            imported_class_ref(module_name, original, module_cache, module_path)
+        }
+        Expr::Attribute(attr) => {
+            let Expr::Name(module_ident) = attr.value.as_ref() else {
+                return None;
+            };
+            let module_name = imports.module_aliases.get(&module_ident.id)?;
+            imported_class_ref(module_name, &attr.attr, module_cache, module_path)
+        }
+        _ => None,
+    }
 }
 
 fn torch_nn_constructor_name(call_expr: &Expr, imports: &Imports) -> Option<String> {

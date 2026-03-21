@@ -13,7 +13,7 @@ use crate::op_groups::{Imports, TorchOp, collect_imports};
 use crate::torch_nn::{TorchNNModule, module_from_constructor_call};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{Arguments, Expr, ExprCall, Identifier, Stmt, Suite};
-use std::cell::RefCell;
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,8 @@ pub(crate) struct ClassInfo {
     pub(crate) is_torch_module: bool,
     pub(crate) forward_name: Option<Identifier>,
     pub(crate) methods: HashMap<Identifier, FunctionInfo>,
-    self_attr_states: RefCell<Option<HashMap<Identifier, VarState>>>,
+    self_attr_states: OnceCell<HashMap<Identifier, VarState>>,
+    self_attr_modules: OnceCell<HashMap<Identifier, Rc<ResolvedModule>>>,
 }
 
 pub(crate) type ClassMap = HashMap<Identifier, ClassInfo>;
@@ -351,7 +352,8 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
                     is_torch_module: is_torch.get(&name).copied().unwrap_or(false),
                     forward_name: info.forward_name,
                     methods: info.methods,
-                    self_attr_states: RefCell::new(None),
+                    self_attr_states: OnceCell::new(),
+                    self_attr_modules: OnceCell::new(),
                 },
             )
         })
@@ -361,6 +363,7 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
 pub(crate) enum ResolvedModuleRef<'a> {
     Borrowed(&'a ResolvedModule),
     Owned(ResolvedModule),
+    Shared(Rc<ResolvedModule>),
 }
 
 impl<'a> ResolvedModuleRef<'a> {
@@ -368,6 +371,7 @@ impl<'a> ResolvedModuleRef<'a> {
         match self {
             Self::Borrowed(module) => module,
             Self::Owned(module) => module,
+            Self::Shared(module) => module.as_ref(),
         }
     }
 
@@ -375,6 +379,7 @@ impl<'a> ResolvedModuleRef<'a> {
         match self {
             Self::Borrowed(module) => module.clone(),
             Self::Owned(module) => module,
+            Self::Shared(module) => module.as_ref().clone(),
         }
     }
 }
@@ -761,22 +766,69 @@ fn get_or_collect_self_attr_state(
     module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<VarState> {
-    if class_info.self_attr_states.borrow().is_none() {
-        let states = collect_self_attr_states_from_init(
+    self_attr_states(
+        class_info,
+        source,
+        class_map,
+        imports,
+        module_cache,
+        module_path,
+    )
+    .get(target_attr)
+    .cloned()
+}
+
+fn self_attr_states<'a>(
+    class_info: &'a ClassInfo,
+    source: &str,
+    class_map: &ClassMap,
+    imports: &Imports,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> &'a HashMap<Identifier, VarState> {
+    class_info.self_attr_states.get_or_init(|| {
+        collect_self_attr_states_from_init(
             class_info.methods.get(&Identifier::from("__init__")),
             source,
             class_map,
             imports,
             module_cache,
             module_path,
-        );
-        *class_info.self_attr_states.borrow_mut() = Some(states);
-    }
+        )
+    })
+}
+
+fn get_or_collect_self_attr_module(
+    class_info: &ClassInfo,
+    target_attr: &Identifier,
+    source: &str,
+    class_map: &ClassMap,
+    imports: &Imports,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Rc<ResolvedModule>> {
     class_info
-        .self_attr_states
-        .borrow()
-        .as_ref()
-        .and_then(|states| states.get(target_attr))
+        .self_attr_modules
+        .get_or_init(|| {
+            self_attr_states(
+                class_info,
+                source,
+                class_map,
+                imports,
+                module_cache,
+                module_path,
+            )
+            .iter()
+            .filter_map(|(attr, state)| {
+                state
+                    .resolved_module
+                    .as_ref()
+                    .cloned()
+                    .map(|module| (attr.clone(), Rc::new(module)))
+            })
+            .collect()
+        })
+        .get(target_attr)
         .cloned()
 }
 
@@ -817,6 +869,71 @@ fn resolve_cached_self_attr_state(
         },
     )
     .flatten()
+}
+
+fn resolve_cached_self_attr_module(
+    base_class_ref: &ClassRef,
+    target_attr: &Identifier,
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    module_cache: &mut Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Rc<ResolvedModule>> {
+    with_class_info(
+        base_class_ref,
+        source,
+        func_map,
+        imports,
+        class_map,
+        module_cache,
+        module_path,
+        |class_info,
+         callee_source,
+         _callee_func_map,
+         callee_imports,
+         callee_class_map,
+         callee_path,
+         module_cache| {
+            get_or_collect_self_attr_module(
+                class_info,
+                target_attr,
+                callee_source,
+                callee_class_map,
+                callee_imports,
+                module_cache.as_deref_mut(),
+                callee_path,
+            )
+        },
+    )
+    .flatten()
+}
+
+pub(crate) fn self_attr_module_from_self(
+    target_attr: &Identifier,
+    vars: &HashMap<Identifier, VarState>,
+    source: &str,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Rc<ResolvedModule>> {
+    let self_class_ref = vars
+        .get(&Identifier::from("self"))
+        .and_then(|state| state.resolved_module.as_ref())
+        .and_then(ResolvedModule::as_user)?;
+    resolve_cached_self_attr_module(
+        self_class_ref,
+        target_attr,
+        source,
+        func_map,
+        imports,
+        class_map,
+        &mut module_cache,
+        module_path,
+    )
 }
 
 /// Resolve an attribute access such as `self.weight` to the cached state from `__init__`.
@@ -881,7 +998,7 @@ fn resolve_module_expr<'a>(
                 module_cache.as_deref_mut(),
                 module_path,
             )?;
-            resolve_cached_self_attr_state(
+            resolve_cached_self_attr_module(
                 base_module.as_ref().as_user()?,
                 &attr.attr,
                 source,
@@ -891,8 +1008,7 @@ fn resolve_module_expr<'a>(
                 &mut module_cache,
                 module_path,
             )
-            .and_then(|state| state.resolved_module)
-            .map(ResolvedModuleRef::Owned)
+            .map(ResolvedModuleRef::Shared)
         }
         _ => None,
     }
