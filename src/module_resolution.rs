@@ -10,6 +10,7 @@ use crate::infer::infer_creation_size;
 use crate::infer_expr_shape;
 use crate::normalize_return_annotations;
 use crate::op_groups::{Imports, TorchOp, collect_imports};
+use crate::torch_nn::{TorchNNModule, module_from_constructor_call};
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{Arguments, Expr, ExprCall, Identifier, Stmt, Suite};
 use std::cell::RefCell;
@@ -45,6 +46,21 @@ pub(crate) struct ClassInfo {
 }
 
 pub(crate) type ClassMap = HashMap<Identifier, ClassInfo>;
+
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedModule {
+    User(ClassRef),
+    Builtin(TorchNNModule),
+}
+
+impl ResolvedModule {
+    pub(crate) fn as_user(&self) -> Option<&ClassRef> {
+        match self {
+            Self::User(class_ref) => Some(class_ref),
+            Self::Builtin(_) => None,
+        }
+    }
+}
 
 /// Parsed module data reused by cross-file inference.
 pub(crate) struct CachedModule {
@@ -342,23 +358,23 @@ pub(crate) fn collect_class_defs(body: &[Stmt], imports: &Imports) -> ClassMap {
         .collect()
 }
 
-pub(crate) enum ResolvedClassRef<'a> {
-    Borrowed(&'a ClassRef),
-    Owned(ClassRef),
+pub(crate) enum ResolvedModuleRef<'a> {
+    Borrowed(&'a ResolvedModule),
+    Owned(ResolvedModule),
 }
 
-impl<'a> ResolvedClassRef<'a> {
-    pub(crate) fn as_ref(&self) -> &ClassRef {
+impl<'a> ResolvedModuleRef<'a> {
+    pub(crate) fn as_ref(&self) -> &ResolvedModule {
         match self {
-            Self::Borrowed(class_ref) => class_ref,
-            Self::Owned(class_ref) => class_ref,
+            Self::Borrowed(module) => module,
+            Self::Owned(module) => module,
         }
     }
 
-    pub(crate) fn into_owned(self) -> ClassRef {
+    pub(crate) fn into_owned(self) -> ResolvedModule {
         match self {
-            Self::Borrowed(class_ref) => class_ref.clone(),
-            Self::Owned(class_ref) => class_ref,
+            Self::Borrowed(module) => module.clone(),
+            Self::Owned(module) => module,
         }
     }
 }
@@ -443,8 +459,8 @@ pub(crate) fn class_ref_from_annotation(
     None
 }
 
-/// Resolve a class-valued expression from either a constructor call or a bound variable.
-pub(crate) fn class_ref_from_expr<'a>(
+/// Resolve a module-valued expression from either a constructor call or a bound variable.
+pub(crate) fn resolved_module_from_expr<'a>(
     expr: &Expr,
     vars: &'a HashMap<Identifier, VarState>,
     source: &str,
@@ -453,17 +469,17 @@ pub(crate) fn class_ref_from_expr<'a>(
     class_map: &ClassMap,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ResolvedClassRef<'a>> {
-    if let Some(class_ref) = class_ref_from_constructor_call(
+) -> Option<ResolvedModuleRef<'a>> {
+    if let Some(resolved_module) = module_from_constructor_call(
         expr,
         class_map,
         imports,
         module_cache.as_deref_mut(),
         module_path,
     ) {
-        return Some(ResolvedClassRef::Owned(class_ref));
+        return Some(ResolvedModuleRef::Owned(resolved_module));
     }
-    resolve_class_ref_expr(
+    resolve_module_expr(
         expr,
         vars,
         source,
@@ -493,15 +509,15 @@ fn shape_state(shape: crate::Shape) -> VarState {
     VarState {
         annotated: None,
         inferred: Some(shape),
-        class_ref: None,
+        resolved_module: None,
     }
 }
 
-fn class_state(class_ref: ClassRef) -> VarState {
+fn module_state(resolved_module: ResolvedModule) -> VarState {
     VarState {
         annotated: None,
         inferred: None,
-        class_ref: Some(class_ref),
+        resolved_module: Some(resolved_module),
     }
 }
 
@@ -509,7 +525,7 @@ fn is_torch_namespace(expr: &Expr, imports: &Imports) -> bool {
     matches!(expr, Expr::Name(name) if imports.torch_aliases.contains(&name.id))
 }
 
-fn imported_class_ref(
+pub(crate) fn imported_class_ref(
     module_name: &str,
     class_name: &Identifier,
     module_cache: Option<&mut ModuleCache>,
@@ -590,14 +606,14 @@ fn infer_tracked_state_from_expr(
     module_path: Option<&Path>,
     source: &str,
 ) -> Option<VarState> {
-    if let Some(class_ref) = class_ref_from_constructor_call(
+    if let Some(resolved_module) = module_from_constructor_call(
         expr,
         class_map,
         imports,
         module_cache.as_deref_mut(),
         module_path,
     ) {
-        return Some(class_state(class_ref));
+        return Some(module_state(resolved_module));
     }
 
     if let Expr::Name(name) = expr {
@@ -817,7 +833,7 @@ pub(crate) fn attr_state_from_expr(
     let Expr::Attribute(attr) = expr else {
         return None;
     };
-    let base_class_ref = resolve_class_ref_expr(
+    let base_module = resolve_module_expr(
         attr.value.as_ref(),
         vars,
         source,
@@ -828,7 +844,7 @@ pub(crate) fn attr_state_from_expr(
         module_path,
     )?;
     resolve_cached_self_attr_state(
-        base_class_ref.as_ref(),
+        base_module.as_ref().as_user()?,
         &attr.attr,
         source,
         func_map,
@@ -839,7 +855,7 @@ pub(crate) fn attr_state_from_expr(
     )
 }
 
-fn resolve_class_ref_expr<'a>(
+fn resolve_module_expr<'a>(
     expr: &Expr,
     vars: &'a HashMap<Identifier, VarState>,
     source: &str,
@@ -848,14 +864,14 @@ fn resolve_class_ref_expr<'a>(
     class_map: &ClassMap,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ResolvedClassRef<'a>> {
+) -> Option<ResolvedModuleRef<'a>> {
     match expr {
         Expr::Name(name) => vars
             .get(&name.id)
-            .and_then(|v| v.class_ref.as_ref())
-            .map(ResolvedClassRef::Borrowed),
+            .and_then(|v| v.resolved_module.as_ref())
+            .map(ResolvedModuleRef::Borrowed),
         Expr::Attribute(attr) => {
-            let base_class_ref = resolve_class_ref_expr(
+            let base_module = resolve_module_expr(
                 attr.value.as_ref(),
                 vars,
                 source,
@@ -866,7 +882,7 @@ fn resolve_class_ref_expr<'a>(
                 module_path,
             )?;
             resolve_cached_self_attr_state(
-                base_class_ref.as_ref(),
+                base_module.as_ref().as_user()?,
                 &attr.attr,
                 source,
                 func_map,
@@ -875,55 +891,11 @@ fn resolve_class_ref_expr<'a>(
                 &mut module_cache,
                 module_path,
             )
-            .and_then(|state| state.class_ref)
-            .map(ResolvedClassRef::Owned)
+            .and_then(|state| state.resolved_module)
+            .map(ResolvedModuleRef::Owned)
         }
         _ => None,
     }
-}
-
-/// Resolve constructor calls to user-defined classes, including imported classes.
-fn class_ref_from_constructor_call(
-    call_expr: &Expr,
-    class_map: &ClassMap,
-    imports: &Imports,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-) -> Option<ClassRef> {
-    let Expr::Call(call) = call_expr else {
-        return None;
-    };
-    match call.func.as_ref() {
-        Expr::Name(name) => {
-            if class_map.contains_key(&name.id) {
-                return Some(ClassRef {
-                    name: name.id.clone(),
-                    module: None,
-                });
-            }
-            if let Some((module_name, original)) = imports.from_imports.get(&name.id)
-                && let Some(class_ref) = imported_class_ref(
-                    module_name,
-                    original,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                )
-            {
-                return Some(class_ref);
-            }
-        }
-        Expr::Attribute(attr) => {
-            if let Expr::Name(module_ident) = attr.value.as_ref()
-                && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
-                && let Some(class_ref) =
-                    imported_class_ref(module_name, &attr.attr, module_cache, module_path)
-            {
-                return Some(class_ref);
-            }
-        }
-        _ => {}
-    }
-    None
 }
 
 fn find_project_root(start: &Path) -> Option<PathBuf> {
