@@ -194,3 +194,50 @@ fn annotated_ellipsis_instantiates_tuple_destructuring() {
         "Batch Heads Tokens Embed"
     ));
 }
+
+#[test]
+fn linear_module_should_shape_chgck() {
+    let src = extract_test_case(PY_DATA, 23);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X 11"));
+}
+
+#[test]
+fn linear_module_abstract_should_shape_chgck() {
+    let src = extract_test_case(PY_DATA, 24);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X Z"));
+}
+
+#[test]
+fn wrong_shape_should_emit_diagnostic_for_linear_module() {
+    let src = extract_test_case(PY_DATA, 25);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
+fn alpha_equiv_concret_to_abstract_shape_checks() {
+    let src = extract_test_case(PY_DATA, 26);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "z =", "B X 12"));
+}
+
+#[test]
+fn sequential_cov_model_shape_checks() {
+    let src = extract_test_case(PY_DATA, 27);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    // TODO: check that output H W are correct
+    assert!(is_hover_expected(&src, &analysis, "y =", "B OutCh H W"));
+}
+
+#[test]
+fn wrong_input_to_sequential_cov_model_emits_diagnostics() {
+    let src = extract_test_case(PY_DATA, 28);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

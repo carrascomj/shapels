@@ -14,6 +14,7 @@ use std::path::Path;
 mod infer;
 mod module_resolution;
 pub mod op_groups;
+mod torch_nn;
 use crate::infer::{
     ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_condition, infer_conv,
     infer_creation_size, infer_flatten, infer_index, infer_matmul_shapes, infer_noop,
@@ -22,9 +23,9 @@ use crate::infer::{
 };
 pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
-    ClassMap, ClassRef, FuncMap, FunctionInfo, attr_state_from_expr, class_ref_from_annotation,
-    class_ref_from_expr, collect_class_defs, collect_function_defs, is_parameter_constructor,
-    method_param_offset, with_class_info,
+    ClassMap, ClassRef, FuncMap, FunctionInfo, ResolvedModule, attr_state_from_expr,
+    class_ref_from_annotation, collect_class_defs, collect_function_defs, is_parameter_constructor,
+    method_param_offset, resolved_module_from_expr, with_class_info,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
@@ -106,7 +107,7 @@ fn range_span(range: &Range, _pos: &Position) -> u32 {
 struct VarState {
     annotated: Option<Shape>,
     inferred: Option<Shape>,
-    class_ref: Option<ClassRef>,
+    resolved_module: Option<ResolvedModule>,
 }
 
 fn state_shape(state: &VarState) -> Option<&Shape> {
@@ -486,7 +487,7 @@ fn analyze_function(
             VarState {
                 annotated: None,
                 inferred: None,
-                class_ref: Some(class_ref.clone()),
+                resolved_module: Some(ResolvedModule::User(class_ref.clone())),
             },
         );
     }
@@ -685,7 +686,7 @@ fn simulate_block(
                                 VarState {
                                     annotated: ann_shape.clone(),
                                     inferred: Some(renamed.clone()),
-                                    class_ref: None,
+                                    resolved_module: None,
                                 },
                             );
                             if record_hovers {
@@ -723,14 +724,14 @@ fn simulate_block(
                             VarState {
                                 annotated,
                                 inferred,
-                                class_ref: None,
+                                resolved_module: None,
                             },
                         );
                         if record_hovers {
                             push_assignment_hover(hover_entries, &assign.target, source, shape);
                         }
                     } else if let Some(val) = &assign.value
-                        && let Some(class_ref) = class_ref_from_expr(
+                        && let Some(resolved_module) = resolved_module_from_expr(
                             val,
                             vars,
                             source,
@@ -746,7 +747,7 @@ fn simulate_block(
                             VarState {
                                 annotated: ann_shape.clone(),
                                 inferred: None,
-                                class_ref: Some(class_ref.into_owned()),
+                                resolved_module: Some(resolved_module.into_owned()),
                             },
                         );
                     }
@@ -793,7 +794,7 @@ fn simulate_block(
                                 VarState {
                                     annotated: None,
                                     inferred: Some(shape.clone()),
-                                    class_ref: None,
+                                    resolved_module: None,
                                 },
                             );
                             if record_hovers {
@@ -827,13 +828,13 @@ fn simulate_block(
                             VarState {
                                 annotated: None,
                                 inferred: Some(shape.clone()),
-                                class_ref: None,
+                                resolved_module: None,
                             },
                         );
                         if record_hovers {
                             push_assignment_hover(hover_entries, &assign.targets[0], source, shape);
                         }
-                    } else if let Some(class_ref) = class_ref_from_expr(
+                    } else if let Some(resolved_module) = resolved_module_from_expr(
                         &assign.value,
                         vars,
                         source,
@@ -848,7 +849,7 @@ fn simulate_block(
                             VarState {
                                 annotated: None,
                                 inferred: None,
-                                class_ref: Some(class_ref.into_owned()),
+                                resolved_module: Some(resolved_module.into_owned()),
                             },
                         );
                     }
@@ -1245,7 +1246,7 @@ pub(crate) fn infer_expr_shape(
                     module_path,
                 );
             }
-            if let Some(class_ref) = class_ref_from_expr(
+            if let Some(resolved_module) = resolved_module_from_expr(
                 call.func.as_ref(),
                 vars,
                 source,
@@ -1254,9 +1255,10 @@ pub(crate) fn infer_expr_shape(
                 class_map,
                 module_cache.as_deref_mut(),
                 module_path,
-            ) && let Some(ret) = infer_class_call_return(
+            ) && let Some(ret) = infer_module_call_return(
                 call,
-                class_ref.as_ref(),
+                resolved_module.as_ref(),
+                ModuleCallable::Forward,
                 vars,
                 func_map,
                 imports,
@@ -1356,7 +1358,7 @@ pub(crate) fn infer_expr_shape(
             // methods are functions with attributes
             if let Expr::Attribute(attr) = call.func.as_ref() {
                 let attr_name: &str = attr.attr.as_ref();
-                if let Some(class_ref) = class_ref_from_expr(
+                if let Some(resolved_module) = resolved_module_from_expr(
                     attr.value.as_ref(),
                     vars,
                     source,
@@ -1365,10 +1367,10 @@ pub(crate) fn infer_expr_shape(
                     class_map,
                     module_cache.as_deref_mut(),
                     module_path,
-                ) && let Some(ret) = infer_class_method_call_return(
+                ) && let Some(ret) = infer_module_call_return(
                     call,
-                    class_ref.as_ref(),
-                    &attr.attr,
+                    resolved_module.as_ref(),
+                    ModuleCallable::Method(&attr.attr),
                     vars,
                     func_map,
                     imports,
@@ -2214,10 +2216,10 @@ fn infer_call_return_from_info(
                     VarState {
                         annotated: None,
                         inferred: Some(shape),
-                        class_ref: None,
+                        resolved_module: None,
                     },
                 );
-            } else if let Some(class_ref) = class_ref_from_expr(
+            } else if let Some(resolved_module) = resolved_module_from_expr(
                 arg_expr,
                 vars,
                 source,
@@ -2232,7 +2234,7 @@ fn infer_call_return_from_info(
                     VarState {
                         annotated: None,
                         inferred: None,
-                        class_ref: Some(class_ref.into_owned()),
+                        resolved_module: Some(resolved_module.into_owned()),
                     },
                 );
             }
@@ -2253,7 +2255,7 @@ fn infer_call_return_from_info(
                 VarState {
                     annotated: None,
                     inferred: None,
-                    class_ref: Some(self_class_ref.clone()),
+                    resolved_module: Some(ResolvedModule::User(self_class_ref.clone())),
                 },
             );
         }
@@ -2328,15 +2330,15 @@ fn infer_call_return_from_info(
 }
 
 #[derive(Clone, Copy)]
-enum ClassCallable<'a> {
+enum ModuleCallable<'a> {
     Forward,
     Method(&'a Identifier),
 }
 
-fn infer_class_member_call_return(
+fn infer_user_class_member_call_return(
     call: &ExprCall<TextRange>,
     class_ref: &ClassRef,
-    callable: ClassCallable<'_>,
+    callable: ModuleCallable<'_>,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
@@ -2350,8 +2352,8 @@ fn infer_class_member_call_return(
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
     let callee_name = match callable {
-        ClassCallable::Forward => class_ref.name.clone(),
-        ClassCallable::Method(method_name) => {
+        ModuleCallable::Forward => class_ref.name.clone(),
+        ModuleCallable::Method(method_name) => {
             Identifier::from(format!("{}::{}", class_ref.name, method_name))
         }
     };
@@ -2371,7 +2373,7 @@ fn infer_class_member_call_return(
          callee_path,
          module_cache| {
             let callee_info = match callable {
-                ClassCallable::Forward => {
+                ModuleCallable::Forward => {
                     if !class_info.is_torch_module {
                         return None;
                     }
@@ -2380,7 +2382,7 @@ fn infer_class_member_call_return(
                         .as_ref()
                         .and_then(|name| class_info.methods.get(name))?
                 }
-                ClassCallable::Method(method_name) => class_info.methods.get(method_name)?,
+                ModuleCallable::Method(method_name) => class_info.methods.get(method_name)?,
             };
             let param_offset = method_param_offset(&callee_info.args);
             infer_call_return_from_info(
@@ -2411,9 +2413,9 @@ fn infer_class_member_call_return(
     .flatten()
 }
 
-fn infer_class_call_return(
-    call: &ExprCall<TextRange>,
-    class_ref: &ClassRef,
+pub(crate) fn infer_resolved_module_shape(
+    resolved_module: &ResolvedModule,
+    base_shape: Shape,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
@@ -2421,33 +2423,189 @@ fn infer_class_call_return(
     call_stack: &mut Vec<Identifier>,
     diagnostics: &mut Vec<Diagnostic>,
     hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
     source: &str,
+    range: TextRange,
     module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
-) -> Option<ReturnValue> {
-    infer_class_member_call_return(
-        call,
-        class_ref,
-        ClassCallable::Forward,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache,
-        module_path,
-    )
+) -> Option<Shape> {
+    match resolved_module {
+        ResolvedModule::User(class_ref) => infer_user_class_shape_from_base(
+            class_ref,
+            base_shape,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            source,
+            range,
+            module_cache,
+            module_path,
+        ),
+        ResolvedModule::Builtin(module) => module.infer_builtin_module(
+            base_shape,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            source,
+            range,
+            module_cache,
+            module_path,
+        ),
+    }
 }
 
-fn infer_class_method_call_return(
-    call: &ExprCall<TextRange>,
+fn infer_user_class_shape_from_base(
     class_ref: &ClassRef,
-    method_name: &Identifier,
+    base_shape: Shape,
+    _vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    _hover_entries: &mut Vec<(Range, HoverInfo)>,
+    source: &str,
+    range: TextRange,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<Shape> {
+    let callee_name = class_ref.name.clone();
+    if call_stack.iter().any(|id| id == &callee_name) {
+        return None;
+    }
+    with_class_info(
+        class_ref,
+        source,
+        func_map,
+        imports,
+        class_map,
+        &mut module_cache,
+        module_path,
+        |class_info,
+         callee_source,
+         callee_func_map,
+         callee_imports,
+         callee_class_map,
+         callee_path,
+         module_cache| {
+            if !class_info.is_torch_module {
+                return None;
+            }
+            let callee_info = class_info
+                .forward_name
+                .as_ref()
+                .and_then(|name| class_info.methods.get(name))?;
+            let param_offset = method_param_offset(&callee_info.args);
+            let input_param = callee_info.args.args.get(param_offset)?;
+            if callee_info.args.args.len() > param_offset + 1 {
+                return None;
+            }
+
+            let mut bindings = AnnotationBindings::default();
+            if let Some(ann) = input_param
+                .def
+                .annotation
+                .as_deref()
+                .and_then(parse_shape_annotation)
+            {
+                if let Some(local_bindings) = annotation_bindings(&ann.dims, &base_shape.dims) {
+                    bindings.merge_from(local_bindings);
+                } else {
+                    diagnostics.push(Diagnostic {
+                        range: text_range_to_lsp(range, source),
+                        severity: Some(DiagnosticSeverity::ERROR),
+                        code: None,
+                        code_description: None,
+                        source: Some("shapels".into()),
+                        message: format!(
+                            "Shape mismatch: annotation {} vs inferred {}",
+                            ann.render(),
+                            base_shape.render()
+                        ),
+                        related_information: None,
+                        tags: None,
+                        data: None,
+                    });
+                }
+            }
+
+            let mut arg_shapes = HashMap::new();
+            arg_shapes.insert(
+                input_param.def.arg.clone(),
+                VarState {
+                    annotated: None,
+                    inferred: Some(base_shape.clone()),
+                    resolved_module: None,
+                },
+            );
+            if param_offset > 0 {
+                arg_shapes.insert(
+                    Identifier::from("self"),
+                    VarState {
+                        annotated: None,
+                        inferred: None,
+                        resolved_module: Some(ResolvedModule::User(class_ref.clone())),
+                    },
+                );
+            }
+
+            if let Some(ret_ann) = callee_info.returns.as_deref() {
+                let annotated_return = if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
+                    Some(ReturnValue::from_shape(instantiate_optional_shape(
+                        Some(ret_shape),
+                        &bindings,
+                    )))
+                } else if let Some(tuple_shapes) =
+                    tuple_shapes_from_annotation(ret_ann, callee_imports, callee_class_map)
+                {
+                    Some(instantiate_annotation_return(
+                        ReturnValue::from_tuple(tuple_shapes),
+                        &bindings,
+                    ))
+                } else {
+                    let (shape_union, _) =
+                        shape_or_class_from_union(ret_ann, callee_imports, callee_class_map);
+                    shape_union.map(|shape| {
+                        ReturnValue::from_shape(instantiate_optional_shape(Some(shape), &bindings))
+                    })
+                };
+                if let Some(ret) = annotated_return {
+                    return ret.first().cloned();
+                }
+            }
+
+            call_stack.push(callee_name.clone());
+            let (_, _, ret_value) = simulate_function(
+                callee_info.args.as_ref(),
+                &callee_info.body,
+                callee_source,
+                callee_func_map,
+                callee_imports,
+                callee_class_map,
+                call_stack,
+                arg_shapes,
+                false,
+                module_cache.as_deref_mut(),
+                callee_path,
+            );
+            call_stack.pop();
+            ret_value.first().cloned()
+        },
+    )
+    .flatten()
+}
+
+fn infer_module_call_return(
+    call: &ExprCall<TextRange>,
+    resolved_module: &ResolvedModule,
+    callable: ModuleCallable<'_>,
     vars: &HashMap<Identifier, VarState>,
     func_map: &FuncMap,
     imports: &Imports,
@@ -2457,25 +2615,106 @@ fn infer_class_method_call_return(
     hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
     source: &str,
-    module_cache: Option<&mut ModuleCache>,
+    mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
-    infer_class_member_call_return(
-        call,
-        class_ref,
-        ClassCallable::Method(method_name),
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache,
-        module_path,
-    )
+    match resolved_module {
+        ResolvedModule::User(class_ref) => infer_user_class_member_call_return(
+            call,
+            class_ref,
+            callable,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache,
+            module_path,
+        ),
+        ResolvedModule::Builtin(module) => {
+            match callable {
+                ModuleCallable::Forward => {
+                    let base_expr = call.args.first()?;
+                    let base_shape =
+                        lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
+                            .or_else(|| {
+                                infer_expr_shape(
+                                    base_expr,
+                                    vars,
+                                    func_map,
+                                    imports,
+                                    class_map,
+                                    call_stack,
+                                    diagnostics,
+                                    hover_entries,
+                                    false,
+                                    source,
+                                    module_cache.as_deref_mut(),
+                                    module_path,
+                                )
+                            })?;
+                    infer_resolved_module_shape(
+                        resolved_module,
+                        base_shape,
+                        vars,
+                        func_map,
+                        imports,
+                        class_map,
+                        call_stack,
+                        diagnostics,
+                        hover_entries,
+                        source,
+                        call.range,
+                        module_cache.as_deref_mut(),
+                        module_path,
+                    )
+                    .map(|shape| ReturnValue::from_shape(Some(shape)))
+                }
+                ModuleCallable::Method(method_name) if method_name.as_str() == "forward" => {
+                    let base_expr = call.args.first()?;
+                    let base_shape =
+                        lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
+                            .or_else(|| {
+                                infer_expr_shape(
+                                    base_expr,
+                                    vars,
+                                    func_map,
+                                    imports,
+                                    class_map,
+                                    call_stack,
+                                    diagnostics,
+                                    hover_entries,
+                                    false,
+                                    source,
+                                    module_cache.as_deref_mut(),
+                                    module_path,
+                                )
+                            })?;
+                    module
+                        .infer_builtin_module(
+                            base_shape,
+                            vars,
+                            func_map,
+                            imports,
+                            class_map,
+                            call_stack,
+                            diagnostics,
+                            hover_entries,
+                            source,
+                            call.range,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
+                        .map(|shape| ReturnValue::from_shape(Some(shape)))
+                }
+                ModuleCallable::Method(_) => None,
+            }
+        }
+    }
 }
 
 fn infer_defined_call_return(
@@ -2495,7 +2734,7 @@ fn infer_defined_call_return(
     if report_unbound_self_diagnostic(call.func.as_ref(), vars, diagnostics, source) {
         return None;
     }
-    if let Some(class_ref) = class_ref_from_expr(
+    if let Some(resolved_module) = resolved_module_from_expr(
         call.func.as_ref(),
         vars,
         source,
@@ -2505,9 +2744,10 @@ fn infer_defined_call_return(
         module_cache.as_deref_mut(),
         module_path,
     ) {
-        return infer_class_call_return(
+        return infer_module_call_return(
             call,
-            class_ref.as_ref(),
+            resolved_module.as_ref(),
+            ModuleCallable::Forward,
             vars,
             func_map,
             imports,
@@ -2578,7 +2818,7 @@ fn infer_defined_call_return(
         }
     }
     if let Expr::Attribute(attr) = call.func.as_ref()
-        && let Some(class_ref) = class_ref_from_expr(
+        && let Some(resolved_module) = resolved_module_from_expr(
             attr.value.as_ref(),
             vars,
             source,
@@ -2589,10 +2829,10 @@ fn infer_defined_call_return(
             module_path,
         )
     {
-        return infer_class_method_call_return(
+        return infer_module_call_return(
             call,
-            class_ref.as_ref(),
-            &attr.attr,
+            resolved_module.as_ref(),
+            ModuleCallable::Method(&attr.attr),
             vars,
             func_map,
             imports,
@@ -2776,7 +3016,7 @@ fn assignment_shape_checks(
                 VarState {
                     annotated: None,
                     inferred: Some(new_shape.clone()),
-                    class_ref: None,
+                    resolved_module: None,
                 },
             );
             if record_hovers {
@@ -2811,7 +3051,7 @@ fn assignment_shape_checks(
             VarState {
                 annotated: None,
                 inferred: Some(new_shape.clone()),
-                class_ref: None,
+                resolved_module: None,
             },
         );
         if record_hovers {
@@ -2921,19 +3161,21 @@ fn seed_args_from_annotations(
         let state = VarState {
             annotated: ann_shape.or(union_shape),
             inferred: provided_state.and_then(|s| s.inferred.clone()),
-            class_ref: provided_state
-                .and_then(|s| s.class_ref.clone())
+            resolved_module: provided_state
+                .and_then(|s| s.resolved_module.clone())
                 .or_else(|| {
                     arg.def
                         .annotation
                         .as_ref()
                         .and_then(|ann| class_ref_from_annotation(ann.as_ref(), imports, class_map))
+                        .map(ResolvedModule::User)
                 })
-                .or(union_class),
+                .or_else(|| union_class.map(ResolvedModule::User)),
         };
         let hover_shape = state_shape(&state).cloned();
 
-        if state.annotated.is_some() || state.inferred.is_some() || state.class_ref.is_some() {
+        if state.annotated.is_some() || state.inferred.is_some() || state.resolved_module.is_some()
+        {
             vars.insert(arg.def.arg.clone(), state);
             if record_hovers {
                 hover_entries.push((range, HoverInfo { shape: hover_shape }));

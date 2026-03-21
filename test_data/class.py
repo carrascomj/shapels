@@ -427,3 +427,113 @@ def ellipsis_tuple_destructuring(module: EllipsisTuple, x: F[Tensor, "Batch Head
     y, residual = module(x)
     return y, residual
 
+
+# test 23
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch.nn as nn
+
+
+class BuiltinLinearModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(7, 11)
+
+    def forward(self, x: F[T, "B X 7"]):
+        z = self.proj(x)
+        return z
+
+
+# test 24
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch.nn as nn
+
+
+class BuiltinLinearModelAbstract(nn.Module):
+    def __init__(self):
+        super().__init__()
+        Y, Z = 7, 14
+        self.proj = nn.Linear(Y, Z)
+
+    def forward(self, x: F[T, "B X Y"]):
+        z = self.proj(x)
+        return z
+
+# test 25
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch.nn as nn
+
+
+class BuiltinLinearModelAbstractWrong(nn.Module):
+    def __init__(self):
+        super().__init__()
+        Out = 14
+        self.proj = nn.Linear(7, Out)
+
+    def forward(self, x: F[T, "B X 5"]):
+        # wrong, doesn't type check
+        z = self.proj(x)
+        return z
+
+
+# test 26
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch.nn as nn
+
+
+class BuiltinLinearModelConcreteAlphaEquiv(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(7, 12),
+            nn.ReLU(),
+        )   
+    
+    def forward(self, x: F[T, "B X Y"]):
+        # B X 12
+        z = self.proj(x)
+        return z
+
+
+# test 27
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch.nn as nn
+
+
+class BuiltinSequentialCovModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        OutCh = 16
+        self.net = nn.Sequential(
+            nn.Conv2d(3, OutCh, 3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+        )
+
+    def forward(self, x: F[T, "B 3 H W"]):
+        y = self.net(x)
+        return y
+
+
+# test 28
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch.nn as nn
+
+
+class BuiltinSequentialCovModelWrong(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 16, 3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+        )
+
+    def forward(self, x: F[T, "B 5 H W"]):
+        y = self.net(x)
+        return y

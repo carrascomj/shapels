@@ -2146,6 +2146,163 @@ pub fn infer_range_size(
     }
 }
 
+pub(crate) fn infer_linear_module(
+    mut base: Shape,
+    in_features: Option<&str>,
+    out_features: Option<&str>,
+    range: TextRange,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    let Some(last_dim) = base.dims.last_mut() else {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: "Input tensor has incorrect dims for Linear".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    };
+    if let Some(expected) = in_features
+        && concrete_dim_mismatch(last_dim, expected)
+    {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!("Linear input feature mismatch: expected {expected}, got {last_dim}"),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+    if let Some(out_features) = out_features {
+        *last_dim = out_features.to_string();
+    }
+    Some(base)
+}
+
+pub(crate) fn infer_batchnorm_module(
+    base: Shape,
+    dims: usize,
+    num_features: Option<&str>,
+    range: TextRange,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    let rank = base.dims.len();
+    let valid_rank = match dims {
+        1 => matches!(rank, 2 | 3),
+        2 => rank == 4,
+        3 => rank == 5,
+        _ => false,
+    };
+    if !valid_rank {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!("Input tensor has incorrect dims for BatchNorm{dims}d"),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+        return None;
+    }
+    if let Some(expected) = num_features
+        && let Some(channels) = base.dims.get(1)
+        && concrete_dim_mismatch(channels, expected)
+    {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!(
+                "BatchNorm{dims}d channel mismatch: expected {expected}, got {channels}"
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+    Some(base)
+}
+
+pub(crate) fn infer_conv_module(
+    base: Shape,
+    conv_dim: usize,
+    in_channels: Option<&str>,
+    out_channels: Option<&str>,
+    kernel_size: &[String],
+    stride: &[String],
+    padding: &[String],
+    dilation: &[String],
+    _groups: Option<&str>,
+    range: TextRange,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
+    let input_channel = base
+        .dims
+        .len()
+        .checked_sub(conv_dim)
+        .and_then(|pos| pos.checked_sub(1))
+        .and_then(|idx| base.dims.get(idx))
+        .cloned();
+    if let (Some(current), Some(expected)) = (input_channel.as_deref(), in_channels)
+        && concrete_dim_mismatch(current, expected)
+    {
+        diagnostics.push(Diagnostic {
+            range: text_range_to_lsp(range, source),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: Some("shapels".into()),
+            message: format!(
+                "Conv{conv_dim}d channel mismatch: expected {expected}, got {current}"
+            ),
+            related_information: None,
+            tags: None,
+            data: None,
+        });
+    }
+
+    let mut kernel = vec![
+        out_channels
+            .map(str::to_string)
+            .or_else(|| input_channel.clone())
+            .unwrap_or_else(|| "OutChannels".to_string()),
+        in_channels
+            .map(str::to_string)
+            .or(input_channel)
+            .unwrap_or_else(|| "InChannels".to_string()),
+    ];
+    kernel.extend(expand_conv_params(kernel_size, conv_dim, "K"));
+
+    infer_conv_with_params(
+        base,
+        kernel,
+        stride,
+        padding,
+        dilation,
+        conv_dim,
+        range,
+        diagnostics,
+        source,
+    )
+}
+
 pub fn infer_conv(
     base: Shape,
     kernel: Vec<String>,
@@ -2154,10 +2311,45 @@ pub fn infer_conv(
     diagnostics: &mut Vec<Diagnostic>,
     source: &str,
 ) -> Option<Shape> {
+    let stride = get_arg(call, "stride", 3)
+        .and_then(expr_to_tuple)
+        .unwrap_or_default();
+    let padding = get_arg(call, "padding", 4)
+        .and_then(expr_to_tuple)
+        .unwrap_or_default();
+    let dilation = get_arg(call, "dilation", 5)
+        .and_then(expr_to_tuple)
+        .unwrap_or_default();
+    infer_conv_with_params(
+        base,
+        kernel,
+        &stride,
+        &padding,
+        &dilation,
+        conv_dim,
+        call.range,
+        diagnostics,
+        source,
+    )
+}
+
+fn infer_conv_with_params(
+    base: Shape,
+    kernel: Vec<String>,
+    stride: &[String],
+    padding: &[String],
+    dilation: &[String],
+    conv_dim: usize,
+    range: TextRange,
+    diagnostics: &mut Vec<Diagnostic>,
+    source: &str,
+) -> Option<Shape> {
     let n_dims = base.dims.len();
     let n_k_dims = kernel.len();
-    let incorrect_input = n_dims - conv_dim > 2 || n_dims - conv_dim < 1;
-    let incorrect_kernel = n_k_dims - conv_dim > 2 || n_k_dims - conv_dim < 1;
+    let input_extra = n_dims.checked_sub(conv_dim);
+    let kernel_extra = n_k_dims.checked_sub(conv_dim);
+    let incorrect_input = !matches!(input_extra, Some(1 | 2));
+    let incorrect_kernel = !matches!(kernel_extra, Some(1 | 2));
     if incorrect_input || incorrect_kernel {
         let (incorrect_dims, tensor_msg) = if !incorrect_input {
             (n_dims, "Input tensor")
@@ -2165,7 +2357,7 @@ pub fn infer_conv(
             (n_k_dims, "Kernel")
         };
         diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(call.range, source),
+            range: text_range_to_lsp(range, source),
             severity: Some(DiagnosticSeverity::ERROR),
             code: None,
             code_description: None,
@@ -2181,9 +2373,9 @@ pub fn infer_conv(
             data: None,
         });
         return None;
-    } else if (n_k_dims - n_dims) > 1 {
+    } else if n_k_dims > n_dims + 1 {
         diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(call.range, source),
+            range: text_range_to_lsp(range, source),
             severity: Some(DiagnosticSeverity::ERROR),
             code: None,
             code_description: None,
@@ -2198,15 +2390,9 @@ pub fn infer_conv(
         return None;
     }
     let out_channels = &kernel[0];
-    let stride = get_arg(call, "stride", 3)
-        .and_then(expr_to_tuple)
-        .unwrap_or(vec!["1".to_string(); conv_dim]);
-    let padding = get_arg(call, "padding", 4)
-        .and_then(expr_to_tuple)
-        .unwrap_or(vec!["0".to_string(); conv_dim]);
-    let dilation = get_arg(call, "dilation", 5)
-        .and_then(expr_to_tuple)
-        .unwrap_or(vec!["1".to_string(); conv_dim]);
+    let stride = expand_conv_params(stride, conv_dim, "1");
+    let padding = expand_conv_params(padding, conv_dim, "0");
+    let dilation = expand_conv_params(dilation, conv_dim, "1");
     let pos = n_dims - conv_dim;
     Some(Shape {
         dtype: base.dtype,
@@ -2234,7 +2420,12 @@ pub fn infer_conv(
                             (((n + 2 * p - d * (k - 1) - 1) / s) + 1).to_string()
                         }
                         (Err(_), Ok(k), Ok(s), Ok(p), Ok(d)) => {
-                            format!("({dim}+{})/{s}+1", 2 * p - d * (k - 1) - 1)
+                            let offset = 2 * p - d * (k - 1) - 1;
+                            if s == 1 && offset == -1 {
+                                dim.clone()
+                            } else {
+                                format!("({dim}+{offset})/{s}+1")
+                            }
                         }
                         (Ok(n), Ok(k), Err(_), Ok(p), Ok(d)) => {
                             format!("{}/{stride}+1", (n + 2 * p - d * (k - 1) - 1))
@@ -2302,6 +2493,28 @@ fn expr_to_tuple(expr: &Expr) -> Option<Vec<String>> {
                 .collect(),
         ),
         _ => None,
+    }
+}
+
+fn expand_conv_params(values: &[String], conv_dim: usize, default: &str) -> Vec<String> {
+    match values.len() {
+        0 => vec![default.to_string(); conv_dim],
+        1 => vec![values[0].clone(); conv_dim],
+        len if len >= conv_dim => values[..conv_dim].to_vec(),
+        _ => {
+            let mut expanded = values.to_vec();
+            while expanded.len() < conv_dim {
+                expanded.push(values[0].clone());
+            }
+            expanded
+        }
+    }
+}
+
+fn concrete_dim_mismatch(actual: &str, expected: &str) -> bool {
+    match (actual.parse::<i64>(), expected.parse::<i64>()) {
+        (Ok(current), Ok(expected)) => current != expected,
+        _ => false,
     }
 }
 
