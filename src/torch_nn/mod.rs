@@ -40,7 +40,7 @@ pub(crate) enum TorchNNModule {
     /// `torch.nn.Module` that do not change shapes and do not require
     /// custom checks (or the checks are not yet implemented).
     Noop,
-    /// `torch.nn.Module` not implemented or unkown.
+    /// `torch.nn.Module` not implemented or unknown.
     Unknown,
 }
 

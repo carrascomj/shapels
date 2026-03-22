@@ -2241,7 +2241,6 @@ pub(crate) fn infer_conv_module(
     let mut kernel = vec![
         out_channels
             .map(str::to_string)
-            .or_else(|| input_channel.clone())
             .unwrap_or_else(|| "OutChannels".to_string()),
         in_channels
             .map(str::to_string)
@@ -2424,30 +2423,20 @@ fn infer_conv_with_params(
 }
 
 fn expr_to_tuple(expr: &Expr) -> Option<Vec<String>> {
-    match expr {
-        Expr::Tuple(tup) => Some(
-            tup.elts
-                .iter()
-                .map(|expr| {
-                    expr_to_symbolic_token(expr, CONV_PARAM_TOKEN_OPTIONS)
-                        .map(|token| token.into_owned())
-                        .unwrap_or_default()
-                })
-                .collect(),
-        ),
-        Expr::List(list) => Some(
-            list.elts
-                .iter()
-                .map(|expr| {
-                    expr_to_symbolic_token(expr, CONV_PARAM_TOKEN_OPTIONS)
-                        .map(|token| token.into_owned())
-                        .unwrap_or_default()
-                })
-                .collect(),
-        ),
-        other => expr_to_symbolic_token(other, CONV_PARAM_TOKEN_OPTIONS)
-            .map(|token| vec![token.into_owned()]),
-    }
+    let elts = match expr {
+        Expr::Tuple(tup) => &tup.elts,
+        Expr::List(list) => &list.elts,
+        other => {
+            return expr_to_symbolic_token(other, CONV_PARAM_TOKEN_OPTIONS)
+                .map(|token| vec![token.into_owned()]);
+        }
+    };
+
+    elts.iter()
+        .map(|expr| {
+            expr_to_symbolic_token(expr, CONV_PARAM_TOKEN_OPTIONS).map(|token| token.into_owned())
+        })
+        .collect()
 }
 
 fn expand_conv_params(values: &[String], conv_dim: usize, default: &str) -> Vec<String> {

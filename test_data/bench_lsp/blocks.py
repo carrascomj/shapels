@@ -6,7 +6,7 @@ from helpers import gated_update, mlp_update, normalize_like, residual_add
 
 
 class ResidualBlock(nn.Module):
-    """Unnannotated, will run inference from the caller to the forward body."""
+    """Unannotated, will run inference from the caller to the forward body."""
     def forward(self, x, up, down, gate):
         mixed = mlp_update(x, up, down)
         gated = gated_update(mixed, gate)
