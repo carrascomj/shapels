@@ -7,6 +7,9 @@
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
+use crate::expr_tokens::{
+    CONV_PARAM_TOKEN_OPTIONS, DIM_TOKEN_OPTIONS, SLICE_BOUND_TOKEN_OPTIONS, expr_to_symbolic_token,
+};
 use crate::op_groups::{BroadcastOp, RangeOps, SimpleDtype, TorchOp};
 use crate::{
     ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg,
@@ -461,6 +464,7 @@ fn parse_index_kind<'a>(expr: &'a Expr, source: &'a str) -> IndexKind<'a> {
     }
 }
 
+/// Specific to index/permute/transpose/etc. that need negative indexing normalization.
 fn expr_to_int(expr: &Expr, dims_len: Option<usize>) -> Option<i64> {
     match expr {
         Expr::Constant(ExprConstant {
@@ -480,43 +484,19 @@ fn expr_to_int(expr: &Expr, dims_len: Option<usize>) -> Option<i64> {
 }
 
 fn bound_token(expr: &Expr, source: &str) -> String {
-    if let Expr::Call(call) = expr
-        && let Expr::Name(fname) = call.func.as_ref()
-        && fname.id.as_str() == "int"
-        && let Some(arg0) = call.args.first()
-    {
-        return bound_token(arg0, source);
-    }
-    if let Some(tok) = slice_dim_token(expr) {
-        tok
-    } else {
-        let range = expr_text_range(expr);
-        let mut raw = source
-            .get(range.start().to_usize()..range.end().to_usize())
-            .unwrap_or("")
-            .replace(' ', "");
-        while raw.starts_with('(') && raw.ends_with(')') && raw.len() >= 2 {
-            raw = raw[1..raw.len() - 1].to_string();
-        }
-        raw
-    }
-}
-
-fn slice_dim_token(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Constant(_) | Expr::UnaryOp(_) => expr_to_int(expr, None).map(|x| x.to_string()),
-        Expr::Name(n) => Some(n.id.to_string()),
-        Expr::Call(call) => {
-            if let Expr::Name(fname) = call.func.as_ref()
-                && fname.id.as_str() == "int"
-                && let Some(arg0) = call.args.first()
-            {
-                return slice_dim_token(arg0);
+    expr_to_symbolic_token(expr, SLICE_BOUND_TOKEN_OPTIONS)
+        .map(|token| token.into_owned())
+        .unwrap_or_else(|| {
+            let range = expr_text_range(expr);
+            let mut raw = source
+                .get(range.start().to_usize()..range.end().to_usize())
+                .unwrap_or("")
+                .replace(' ', "");
+            while raw.starts_with('(') && raw.ends_with(')') && raw.len() >= 2 {
+                raw = raw[1..raw.len() - 1].to_string();
             }
-            None
-        }
-        _ => None,
-    }
+            raw
+        })
 }
 
 fn split_primary_offset(tok: &str) -> (String, Option<String>) {
@@ -1786,49 +1766,29 @@ fn expr_to_dim_token<'a>(
     source: &'a str,
     diag_already: &mut bool,
 ) -> Option<Cow<'a, str>> {
+    if let Some(token) = expr_to_symbolic_token(x, DIM_TOKEN_OPTIONS) {
+        return Some(token);
+    }
+
     match x {
-        Expr::Name(name) => Some(Cow::Borrowed(name.id.as_str())),
-        Expr::Constant(constant) => match &constant.value {
-            Constant::Int(int) => Some(Cow::Owned(int.to_string())),
-            // float is needed for ranges' steps but it's not valid for most dims
-            Constant::Float(float) => Some(Cow::Owned(float.to_string())),
-            _ => {
-                if !*diag_already {
-                    diagnostics.push(Diagnostic {
-                        range: text_range_to_lsp(constant.range, source),
-                        severity: Some(DiagnosticSeverity::INFORMATION),
-                        code: None,
-                        code_description: None,
-                        source: Some("shapels".into()),
-                        message: "Dim was not understood from this argument".into(),
-                        related_information: None,
-                        tags: None,
-                        data: None,
-                    });
-                    *diag_already = true;
-                }
-                None
+        Expr::Constant(constant) => {
+            if !*diag_already {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(constant.range, source),
+                    severity: Some(DiagnosticSeverity::INFORMATION),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: "Dim was not understood from this argument".into(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                *diag_already = true;
             }
-        },
-        Expr::BinOp(bin) => {
-            if matches!(bin.op, Operator::Mult) {
-                let l = expr_to_dim_token(&bin.left, vars, diagnostics, source, diag_already)?;
-                let r = expr_to_dim_token(&bin.right, vars, diagnostics, source, diag_already)?;
-                Some(Cow::Owned(format!("{l}*{r}")))
-            } else {
-                None
-            }
+            None
         }
-        Expr::UnaryOp(u) => match u.op {
-            ast::UnaryOp::USub => {
-                expr_to_dim_token(u.operand.as_ref(), vars, diagnostics, source, diag_already)
-                    .map(|s| Cow::Owned(format!("-{s}")))
-            }
-            ast::UnaryOp::UAdd => {
-                expr_to_dim_token(u.operand.as_ref(), vars, diagnostics, source, diag_already)
-            }
-            _ => None,
-        },
+        Expr::BinOp(_) | Expr::UnaryOp(_) => None,
         // e.g., torch.zeros(x.shape[int])
         Expr::Subscript(ExprSubscript { value, slice, .. }) => {
             if let (Expr::Attribute(attr), Expr::Constant(c)) = (value.as_ref(), slice.as_ref())
@@ -2463,36 +2423,30 @@ fn infer_conv_with_params(
     })
 }
 
-// TODO(carrascomj): make this more robust by piggybacking on expr_to_dim_token
 fn expr_to_tuple(expr: &Expr) -> Option<Vec<String>> {
     match expr {
-        Expr::Name(n) => Some(vec![n.id.to_string()]),
-        Expr::Constant(c) => match &c.value {
-            ast::Constant::Int(i) => Some(vec![i.to_string()]),
-            _ => None,
-        },
-        Expr::UnaryOp(unary) => {
-            if matches!(unary.op, ast::UnaryOp::USub) {
-                expr_to_tuple(&unary.operand)
-                    .map(|vals| vals.into_iter().map(|v| format!("-{v}")).collect())
-            } else {
-                None
-            }
-        }
         Expr::Tuple(tup) => Some(
             tup.elts
                 .iter()
-                .map(|x| match x {
-                    Expr::Constant(c) => match &c.value {
-                        ast::Constant::Int(i) => i.to_string(),
-                        _ => "".to_string(),
-                    },
-                    Expr::Name(n) => n.id.to_string(),
-                    _ => "".to_string(),
+                .map(|expr| {
+                    expr_to_symbolic_token(expr, CONV_PARAM_TOKEN_OPTIONS)
+                        .map(|token| token.into_owned())
+                        .unwrap_or_default()
                 })
                 .collect(),
         ),
-        _ => None,
+        Expr::List(list) => Some(
+            list.elts
+                .iter()
+                .map(|expr| {
+                    expr_to_symbolic_token(expr, CONV_PARAM_TOKEN_OPTIONS)
+                        .map(|token| token.into_owned())
+                        .unwrap_or_default()
+                })
+                .collect(),
+        ),
+        other => expr_to_symbolic_token(other, CONV_PARAM_TOKEN_OPTIONS)
+            .map(|token| vec![token.into_owned()]),
     }
 }
 
