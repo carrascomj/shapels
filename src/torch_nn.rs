@@ -1,3 +1,6 @@
+use crate::expr_tokens::{
+    MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
+};
 use crate::infer::{infer_batchnorm_module, infer_conv_module, infer_linear_module};
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
@@ -6,7 +9,7 @@ use crate::module_resolution::{
 use crate::op_groups::Imports;
 use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
 use lsp_types::{Diagnostic, Range};
-use rustpython_parser::ast::{Expr, ExprCall, Identifier, Operator};
+use rustpython_parser::ast::{Expr, ExprCall, Identifier};
 use rustpython_parser::text_size::TextRange;
 use std::collections::HashMap;
 use std::path::Path;
@@ -59,7 +62,7 @@ pub(crate) fn module_from_constructor_call(
     }
 
     let constructor_name = torch_nn_constructor_name(call_expr, imports)?;
-    if constructor_name == "Parameter" {
+    if constructor_name == "Parameter" || constructor_name == "Buffer" {
         return None;
     }
     Some(ResolvedModule::Builtin(
@@ -109,8 +112,8 @@ impl TorchNNModule {
 
         if normalized == "linear" {
             return Self::Linear {
-                in_features: get_call_arg(call, "in_features", 0).and_then(expr_to_token),
-                out_features: get_call_arg(call, "out_features", 1).and_then(expr_to_token),
+                in_features: get_call_arg(call, "in_features", 0).and_then(module_arg_token),
+                out_features: get_call_arg(call, "out_features", 1).and_then(module_arg_token),
             };
         }
 
@@ -119,7 +122,7 @@ impl TorchNNModule {
         {
             return Self::BatchNorm {
                 dims,
-                num_features: get_call_arg(call, "num_features", 0).and_then(expr_to_token),
+                num_features: get_call_arg(call, "num_features", 0).and_then(module_arg_token),
             };
         }
 
@@ -128,21 +131,21 @@ impl TorchNNModule {
         {
             return Self::Conv {
                 dims,
-                in_channels: get_call_arg(call, "in_channels", 0).and_then(expr_to_token),
-                out_channels: get_call_arg(call, "out_channels", 1).and_then(expr_to_token),
+                in_channels: get_call_arg(call, "in_channels", 0).and_then(module_arg_token),
+                out_channels: get_call_arg(call, "out_channels", 1).and_then(module_arg_token),
                 kernel_size: get_call_arg(call, "kernel_size", 2)
-                    .and_then(expr_to_tokens)
+                    .and_then(module_arg_tokens)
                     .unwrap_or_default(),
                 stride: get_call_arg(call, "stride", 3)
-                    .and_then(expr_to_tokens)
+                    .and_then(module_arg_tokens)
                     .unwrap_or_default(),
                 padding: get_call_arg(call, "padding", 4)
-                    .and_then(expr_to_tokens)
+                    .and_then(module_arg_tokens)
                     .unwrap_or_default(),
                 dilation: get_call_arg(call, "dilation", 5)
-                    .and_then(expr_to_tokens)
+                    .and_then(module_arg_tokens)
                     .unwrap_or_default(),
-                groups: get_call_arg(call, "groups", 6).and_then(expr_to_token),
+                groups: get_call_arg(call, "groups", 6).and_then(module_arg_token),
             };
         }
 
@@ -321,51 +324,10 @@ fn sequential_elements(call: &ExprCall) -> Vec<&Expr> {
     call.args.iter().collect()
 }
 
-fn expr_to_tokens(expr: &Expr) -> Option<Vec<String>> {
-    match expr {
-        Expr::Tuple(tuple) => tuple.elts.iter().map(expr_to_token).collect(),
-        Expr::List(list) => list.elts.iter().map(expr_to_token).collect(),
-        other => expr_to_token(other).map(|token| vec![token]),
-    }
+fn module_arg_token(expr: &Expr) -> Option<String> {
+    expr_to_symbolic_token(expr, MODULE_ARG_TOKEN_OPTIONS).map(|token| token.into_owned())
 }
 
-fn expr_to_token(expr: &Expr) -> Option<String> {
-    match expr {
-        Expr::Name(name) => Some(name.id.to_string()),
-        Expr::Constant(constant) => match &constant.value {
-            rustpython_parser::ast::Constant::Int(int) => Some(int.to_string()),
-            rustpython_parser::ast::Constant::Float(float) => Some(float.to_string()),
-            rustpython_parser::ast::Constant::Str(string) => Some(string.to_string()),
-            _ => None,
-        },
-        Expr::Attribute(attr) => Some(attr.attr.to_string()),
-        Expr::UnaryOp(unary) => match unary.op {
-            rustpython_parser::ast::UnaryOp::USub => {
-                expr_to_token(unary.operand.as_ref()).map(|token| format!("-{token}"))
-            }
-            rustpython_parser::ast::UnaryOp::UAdd => expr_to_token(unary.operand.as_ref()),
-            _ => None,
-        },
-        Expr::BinOp(bin) => {
-            let left = expr_to_token(bin.left.as_ref())?;
-            let right = expr_to_token(bin.right.as_ref())?;
-            let op = match bin.op {
-                Operator::Add => "+",
-                Operator::Sub => "-",
-                Operator::Mult => "*",
-                Operator::Div | Operator::FloorDiv => "/",
-                _ => return None,
-            };
-            Some(format!("{left}{op}{right}"))
-        }
-        Expr::Call(call) => {
-            if let Expr::Name(name) = call.func.as_ref()
-                && name.id.as_str() == "int"
-            {
-                return call.args.first().and_then(expr_to_token);
-            }
-            None
-        }
-        _ => None,
-    }
+fn module_arg_tokens(expr: &Expr) -> Option<Vec<String>> {
+    expr_to_symbolic_tokens(expr, MODULE_ARG_TOKEN_OPTIONS)
 }
