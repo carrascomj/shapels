@@ -261,23 +261,7 @@ fn is_torch_nn_module_base(expr: &Expr, imports: &Imports) -> bool {
     let Expr::Attribute(attr) = expr else {
         return false;
     };
-    if attr.attr.as_str() != "Module" {
-        return false;
-    }
-    match attr.value.as_ref() {
-        Expr::Attribute(nn_attr) if nn_attr.attr.as_str() == "nn" => {
-            if let Expr::Name(torch_name) = nn_attr.value.as_ref() {
-                return imports.torch_aliases.contains(&torch_name.id);
-            }
-            false
-        }
-        Expr::Name(nn_name) => imports
-            .module_aliases
-            .get(&nn_name.id)
-            .map(|module| module == "torch.nn")
-            .unwrap_or(false),
-        _ => false,
-    }
+    attr.attr.as_str() == "Module" && is_torch_nn_namespace(attr.value.as_ref(), imports)
 }
 
 /// Collect class definitions and mark which ones inherit from `torch.nn.Module`.
@@ -530,6 +514,18 @@ fn is_torch_namespace(expr: &Expr, imports: &Imports) -> bool {
     matches!(expr, Expr::Name(name) if imports.torch_aliases.contains(&name.id))
 }
 
+pub(crate) fn is_torch_nn_namespace(expr: &Expr, imports: &Imports) -> bool {
+    match expr {
+        Expr::Name(name) => imports.is_module_alias(&name.id, "torch.nn"),
+        Expr::Attribute(attr)
+            if attr.attr.as_str() == "nn" && is_torch_namespace(attr.value.as_ref(), imports) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn imported_class_ref(
     module_name: &str,
     class_name: &Identifier,
@@ -552,24 +548,12 @@ pub(crate) fn imported_class_ref(
 pub(crate) fn is_parameter_constructor(func: &Expr, imports: &Imports) -> bool {
     match func {
         Expr::Name(name) => imports
-            .from_imports
-            .get(&name.id)
-            .map(|(module, original)| module == "torch.nn" && original.as_str() == "Parameter")
+            .imported_symbol_from(&name.id, "torch.nn")
+            .map(|original| original.as_str() == "Parameter")
             .unwrap_or(false),
-        Expr::Attribute(attr) if attr.attr.as_str() == "Parameter" => match attr.value.as_ref() {
-            Expr::Name(name) => imports
-                .module_aliases
-                .get(&name.id)
-                .map(|module| module == "torch.nn")
-                .unwrap_or(false),
-            Expr::Attribute(nn_attr)
-                if nn_attr.attr.as_str() == "nn"
-                    && is_torch_namespace(nn_attr.value.as_ref(), imports) =>
-            {
-                true
-            }
-            _ => false,
-        },
+        Expr::Attribute(attr) => {
+            attr.attr.as_str() == "Parameter" && is_torch_nn_namespace(attr.value.as_ref(), imports)
+        }
         _ => false,
     }
 }

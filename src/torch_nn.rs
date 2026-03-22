@@ -1,6 +1,7 @@
 use crate::infer::{infer_batchnorm_module, infer_conv_module, infer_linear_module};
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
+    is_torch_nn_namespace,
 };
 use crate::op_groups::Imports;
 use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
@@ -293,26 +294,11 @@ fn torch_nn_constructor_name(call_expr: &Expr, imports: &Imports) -> Option<Stri
     };
     match call.func.as_ref() {
         Expr::Name(name) => imports
-            .from_imports
-            .get(&name.id)
-            .filter(|(module_name, _)| module_name == "torch.nn")
-            .map(|(_, original)| original.to_string()),
-        Expr::Attribute(attr) => match attr.value.as_ref() {
-            Expr::Name(module_ident) => imports
-                .module_aliases
-                .get(&module_ident.id)
-                .filter(|module_name| module_name.as_str() == "torch.nn")
-                .map(|_| attr.attr.to_string()),
-            Expr::Attribute(nn_attr) if nn_attr.attr.as_str() == "nn" => {
-                if let Expr::Name(torch_name) = nn_attr.value.as_ref()
-                    && imports.torch_aliases.contains(&torch_name.id)
-                {
-                    return Some(attr.attr.to_string());
-                }
-                None
-            }
-            _ => None,
-        },
+            .imported_symbol_from(&name.id, "torch.nn")
+            .map(ToString::to_string),
+        Expr::Attribute(attr) if is_torch_nn_namespace(attr.value.as_ref(), imports) => {
+            Some(attr.attr.to_string())
+        }
         _ => None,
     }
 }
