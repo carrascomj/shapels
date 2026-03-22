@@ -537,3 +537,22 @@ class BuiltinSequentialCovModelWrong(nn.Module):
     def forward(self, x: F[T, "B 5 H W"]):
         y = self.net(x)
         return y
+
+
+# test 29
+from jaxtyping import Float as F
+from torch import Tensor as T
+from torch.nn import Buffer as Buf, Parameter as Param
+import torch
+import torch.nn as nn
+
+
+class ImportedParameterAndBuffer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = Param(torch.ones(32, 57))
+        self.bias = Buf(torch.ones(57))
+
+    def forward(self, x: F[T, "B X 32"]):
+        y = x @ self.weight + self.bias
+        return y
