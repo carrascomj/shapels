@@ -25,8 +25,8 @@ use crate::infer::{
 pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, FunctionInfo, ResolvedModule, attr_state_from_expr,
-    class_ref_from_annotation, collect_class_defs, collect_function_defs, is_parameter_constructor,
-    method_param_offset, resolved_module_from_expr, self_attr_module_from_self, with_class_info,
+    class_ref_from_annotation, collect_class_defs, collect_function_defs, method_param_offset,
+    resolved_module_from_expr, self_attr_module_from_self, with_class_info,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
@@ -1231,7 +1231,7 @@ pub(crate) fn infer_expr_shape(
             if report_unbound_self_diagnostic(call.func.as_ref(), vars, diagnostics, source) {
                 return None;
             }
-            if is_parameter_constructor(call.func.as_ref(), imports)
+            if imports.is_torch_nn_storage_constructor(call.func.as_ref())
                 && let Some(base) = call.args.first()
             {
                 return infer_expr_shape(

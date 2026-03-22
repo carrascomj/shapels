@@ -83,7 +83,8 @@ import torch.nn as nn
 
 
 class Conv3dModule(nn.Module):
-    def __init__(self,):
+    def __init__(self):
+        super().__init__()
         self.filter = nn.Conv3d(4, 8, (3, 5, 7), stride=(2, 3, 4), padding=(1, 2, 3), dilation=(1, 2, 1))
         self.out_layer = nn.Sequential(
             nn.SiLU()

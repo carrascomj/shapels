@@ -196,7 +196,7 @@ fn annotated_ellipsis_instantiates_tuple_destructuring() {
 }
 
 #[test]
-fn linear_module_should_shape_chgck() {
+fn linear_module_should_shape_check() {
     let src = extract_test_case(PY_DATA, 23);
     let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert_eq!(analysis.diagnostics.len(), 0);
@@ -204,7 +204,7 @@ fn linear_module_should_shape_chgck() {
 }
 
 #[test]
-fn linear_module_abstract_should_shape_chgck() {
+fn linear_module_abstract_should_shape_check() {
     let src = extract_test_case(PY_DATA, 24);
     let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert_eq!(analysis.diagnostics.len(), 0);
@@ -219,7 +219,7 @@ fn wrong_shape_should_emit_diagnostic_for_linear_module() {
 }
 
 #[test]
-fn alpha_equiv_concret_to_abstract_shape_checks() {
+fn alpha_equiv_concrete_to_abstract_shape_checks() {
     let src = extract_test_case(PY_DATA, 26);
     let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert_eq!(analysis.diagnostics.len(), 0);
@@ -227,7 +227,7 @@ fn alpha_equiv_concret_to_abstract_shape_checks() {
 }
 
 #[test]
-fn sequential_cov_model_shape_checks() {
+fn sequential_conv_model_shape_checks() {
     let src = extract_test_case(PY_DATA, 27);
     let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert_eq!(analysis.diagnostics.len(), 0);

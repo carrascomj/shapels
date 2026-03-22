@@ -552,10 +552,6 @@ pub(crate) fn imported_class_ref(
     })
 }
 
-pub(crate) fn is_parameter_constructor(func: &Expr, imports: &Imports) -> bool {
-    imports.is_torch_nn_storage_constructor(func)
-}
-
 fn torch_call_op(func: &Expr, imports: &Imports) -> TorchOp {
     match func {
         Expr::Name(name) => TorchOp::as_call(&name.id, imports),
@@ -615,7 +611,7 @@ fn infer_tracked_state_from_expr(
     }
 
     if let Expr::Call(call) = expr {
-        if is_parameter_constructor(call.func.as_ref(), imports) {
+        if imports.is_torch_nn_storage_constructor(call.func.as_ref()) {
             let first_arg = call.args.first()?;
             return infer_tracked_state_from_expr(
                 first_arg,
