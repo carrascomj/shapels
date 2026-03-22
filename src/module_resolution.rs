@@ -6,11 +6,15 @@
 //! - and cache that work across LSP requests.
 
 use crate::VarState;
+use crate::expr_text_range;
 use crate::infer::infer_creation_size;
 use crate::infer_expr_shape;
 use crate::normalize_return_annotations;
 use crate::op_groups::{Imports, TorchOp, collect_imports};
+use crate::text_range_to_lsp;
 use crate::torch_nn::{TorchNNModule, module_from_constructor_call};
+use lsp_types::Diagnostic;
+use lsp_types::DiagnosticSeverity;
 use rustpython_parser::Parse;
 use rustpython_parser::ast::{Arguments, Expr, ExprCall, Identifier, Stmt, Suite};
 use std::cell::OnceCell;
@@ -456,6 +460,7 @@ pub(crate) fn resolved_module_from_expr<'a>(
     func_map: &FuncMap,
     imports: &Imports,
     class_map: &ClassMap,
+    diagnostics: &mut Vec<Diagnostic>,
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ResolvedModuleRef<'a>> {
@@ -466,6 +471,24 @@ pub(crate) fn resolved_module_from_expr<'a>(
         module_cache.as_deref_mut(),
         module_path,
     ) {
+        if matches!(
+            resolved_module,
+            ResolvedModule::Builtin(TorchNNModule::Unknown)
+        ) {
+            // TODO(carrascomj): consider if this is too annoying for users
+            diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(expr_text_range(expr), source),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: None,
+                code_description: None,
+                source: Some("shapels".into()),
+                message: "Module not yet understood by shapels (treated as Noop)".to_string(),
+                related_information: None,
+                tags: None,
+                data: None,
+            });
+        }
+
         return Some(ResolvedModuleRef::Owned(resolved_module));
     }
     resolve_module_expr(

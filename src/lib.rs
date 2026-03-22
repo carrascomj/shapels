@@ -739,6 +739,7 @@ fn simulate_block(
                             func_map,
                             imports,
                             class_map,
+                            diagnostics,
                             module_cache.as_deref_mut(),
                             module_path,
                         )
@@ -842,6 +843,7 @@ fn simulate_block(
                         func_map,
                         imports,
                         class_map,
+                        diagnostics,
                         module_cache.as_deref_mut(),
                         module_path,
                     ) {
@@ -1276,6 +1278,7 @@ pub(crate) fn infer_expr_shape(
                     func_map,
                     imports,
                     class_map,
+                    diagnostics,
                     module_cache.as_deref_mut(),
                     module_path,
                 ) && let Some(ret) = infer_module_call_return(
@@ -1419,6 +1422,7 @@ pub(crate) fn infer_expr_shape(
                     func_map,
                     imports,
                     class_map,
+                    diagnostics,
                     module_cache.as_deref_mut(),
                     module_path,
                 ) && let Some(ret) = infer_module_call_return(
@@ -1479,6 +1483,7 @@ pub(crate) fn infer_expr_shape(
                     func_map,
                     imports,
                     class_map,
+                    diagnostics,
                     module_cache.as_deref_mut(),
                     module_path,
                 ) && let Some(ret) = infer_module_call_return(
@@ -1508,6 +1513,7 @@ pub(crate) fn infer_expr_shape(
                 func_map,
                 imports,
                 class_map,
+                diagnostics,
                 module_cache.as_deref_mut(),
                 module_path,
             ) && let Some(ret) = infer_module_call_return(
@@ -2335,6 +2341,7 @@ fn infer_call_return_from_info(
                 func_map,
                 imports,
                 class_map,
+                diagnostics,
                 module_cache.as_deref_mut(),
                 module_path,
             ) {
@@ -2851,6 +2858,7 @@ fn infer_defined_call_return(
         func_map,
         imports,
         class_map,
+        diagnostics,
         module_cache.as_deref_mut(),
         module_path,
     ) {
@@ -2935,6 +2943,7 @@ fn infer_defined_call_return(
             func_map,
             imports,
             class_map,
+            diagnostics,
             module_cache.as_deref_mut(),
             module_path,
         )
