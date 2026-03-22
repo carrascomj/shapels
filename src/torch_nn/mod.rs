@@ -13,6 +13,8 @@ use rustpython_parser::text_size::TextRange;
 use std::collections::HashMap;
 use std::path::Path;
 
+pub(crate) mod known_nn_modules;
+
 /// Attribute in __init__ parsed into a builtin `torch.nn.Module`.
 #[derive(Debug, Clone)]
 pub(crate) enum TorchNNModule {
@@ -35,8 +37,11 @@ pub(crate) enum TorchNNModule {
         groups: Option<String>,
     },
     Sequential(Vec<ResolvedModule>),
-    /// Any unknown identifier from torch.nn.*, is parsed as Noop.
+    /// `torch.nn.Module` that do not change shapes and do not require
+    /// custom checks (or the checks are not yet implemented).
     Noop,
+    /// `torch.nn.Module` not implemented or unkown.
+    Unknown,
 }
 
 pub(crate) fn module_from_constructor_call(
@@ -85,10 +90,10 @@ impl TorchNNModule {
         module_path: Option<&Path>,
     ) -> Self {
         let Expr::Call(call) = call_expr else {
-            return Self::Noop;
+            return Self::Unknown;
         };
         let Some(constructor_name) = torch_nn_constructor_name(call_expr, imports) else {
-            return Self::Noop;
+            return Self::Unknown;
         };
         Self::from_named_constructor(
             call,
@@ -166,7 +171,11 @@ impl TorchNNModule {
             );
         }
 
-        Self::Noop
+        if known_nn_modules::NOOP_NN_MODULES.contains(constructor_name) {
+            Self::Noop
+        } else {
+            Self::Unknown
+        }
     }
 
     pub(crate) fn infer_builtin_module(
@@ -248,7 +257,7 @@ impl TorchNNModule {
                 }
                 Some(current)
             }
-            Self::Noop => Some(base_shape),
+            Self::Noop | Self::Unknown => Some(base_shape),
         }
     }
 }
@@ -298,6 +307,7 @@ fn torch_nn_constructor_name(call_expr: &Expr, imports: &Imports) -> Option<Stri
     match call.func.as_ref() {
         Expr::Name(name) => imports
             .imported_symbol_from(&name.id, "torch.nn")
+            .or_else(|| imports.imported_torch_nn_noop(&name.id))
             .map(ToString::to_string),
         Expr::Attribute(attr) if imports.is_torch_nn_namespace_expr(attr.value.as_ref()) => {
             Some(attr.attr.to_string())

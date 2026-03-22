@@ -556,3 +556,37 @@ class ImportedParameterAndBuffer(nn.Module):
     def forward(self, x: F[T, "B X 32"]):
         y = x @ self.weight + self.bias
         return y
+
+
+# test 30
+from jaxtyping import Float as F
+from torch import Tensor as T
+from torch.nn import ReLU as Act
+import torch.nn as nn
+
+
+class ImportedAliasedNoopModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.act = Act()
+
+    def forward(self, x: F[T, "B X 32"]):
+        y = self.act(x)
+        return y
+
+
+# test 31
+from jaxtyping import Float as F
+from torch import Tensor as T
+from torch.nn import *
+import torch.nn as nn
+
+
+class ImportedStarNoopModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.act = ReLU()
+
+    def forward(self, x: F[T, "B X 32"]):
+        y = self.act(x)
+        return y

@@ -7,6 +7,7 @@ use phf::Set;
 use phf_macros::phf_set;
 use rustpython_parser::ast::{Expr, Identifier, Stmt, StmtImportFrom};
 
+use crate::torch_nn::known_nn_modules::NOOP_NN_MODULES;
 use crate::{infer::Transpose, is_alias_of};
 
 /// Torch functions and operations whose inference is supported.
@@ -520,6 +521,8 @@ pub struct Imports {
     pub torch_nn_functional_aliases: HashSet<Identifier>,
     /// Direct imports of `torch.nn.Parameter` or `torch.nn.Buffer`.
     pub torch_nn_storage_aliases: HashSet<Identifier>,
+    /// Noop `torch.nn.Module`s imported into the current scope.
+    pub torch_nn_noop_aliases: HashMap<Identifier, Identifier>,
     /// Maps simple function name (e.g., "mm") to all aliases in scope.
     pub func_aliases: HashMap<&'static str, HashSet<Identifier>>,
     /// Module alias mapping for `import foo as bar` style.
@@ -531,6 +534,10 @@ pub struct Imports {
 impl Imports {
     fn is_torch_nn_storage_name(name: &str) -> bool {
         matches!(name, "Parameter" | "Buffer")
+    }
+
+    fn record_torch_nn_noop_alias(&mut self, alias: Identifier, original: Identifier) {
+        self.torch_nn_noop_aliases.insert(alias, original);
     }
 
     pub(crate) fn imported_symbol_from<'a>(
@@ -548,6 +555,13 @@ impl Imports {
             .get(ident)
             .map(|module| module == module_name)
             .unwrap_or(false)
+    }
+
+    pub(crate) fn imported_torch_nn_noop<'a>(
+        &'a self,
+        ident: &Identifier,
+    ) -> Option<&'a Identifier> {
+        self.torch_nn_noop_aliases.get(ident)
     }
 
     pub(crate) fn is_torch_namespace_expr(&self, expr: &Expr) -> bool {
@@ -659,6 +673,8 @@ pub fn collect_imports(
             Stmt::ImportFrom(f) => {
                 let resolved_module = resolve_from_module(f, module_path, project_root);
                 if let Some(module) = &resolved_module {
+                    let is_torch_nn_module_path = module == "torch.nn"
+                        || (module.starts_with("torch.nn.") && module != "torch.nn.functional");
                     for alias in &f.names {
                         let name = alias.name.as_str();
                         let id = alias
@@ -666,10 +682,22 @@ pub fn collect_imports(
                             .clone()
                             .unwrap_or_else(|| Identifier::from(name));
 
+                        if is_torch_nn_module_path && name == "*" {
+                            for noop_name in &NOOP_NN_MODULES {
+                                let ident = Identifier::from(*noop_name);
+                                imports.record_torch_nn_noop_alias(ident.clone(), ident);
+                            }
+                            continue;
+                        }
+
                         if matches!(module.as_str(), "torch.nn" | "torch.nn.parameter")
                             && Imports::is_torch_nn_storage_name(name)
                         {
                             imports.torch_nn_storage_aliases.insert(id.clone());
+                        }
+
+                        if is_torch_nn_module_path && NOOP_NN_MODULES.contains(name) {
+                            imports.record_torch_nn_noop_alias(id.clone(), alias.name.clone());
                         }
 
                         if module == "torch" && name == "nn" {
