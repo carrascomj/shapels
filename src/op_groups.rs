@@ -5,7 +5,7 @@ use std::{
 
 use phf::Set;
 use phf_macros::phf_set;
-use rustpython_parser::ast::{Identifier, Stmt, StmtImportFrom};
+use rustpython_parser::ast::{Expr, Identifier, Stmt, StmtImportFrom};
 
 use crate::{infer::Transpose, is_alias_of};
 
@@ -518,6 +518,8 @@ pub struct Imports {
     pub torch_aliases: HashSet<Identifier>,
     // e.g., `import torch.nn.functional as F`
     pub torch_nn_functional_aliases: HashSet<Identifier>,
+    /// Direct imports of `torch.nn.Parameter` or `torch.nn.Buffer`.
+    pub torch_nn_storage_aliases: HashSet<Identifier>,
     /// Maps simple function name (e.g., "mm") to all aliases in scope.
     pub func_aliases: HashMap<&'static str, HashSet<Identifier>>,
     /// Module alias mapping for `import foo as bar` style.
@@ -527,6 +529,10 @@ pub struct Imports {
 }
 
 impl Imports {
+    fn is_torch_nn_storage_name(name: &str) -> bool {
+        matches!(name, "Parameter" | "Buffer")
+    }
+
     pub(crate) fn imported_symbol_from<'a>(
         &'a self,
         ident: &Identifier,
@@ -542,6 +548,34 @@ impl Imports {
             .get(ident)
             .map(|module| module == module_name)
             .unwrap_or(false)
+    }
+
+    pub(crate) fn is_torch_namespace_expr(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::Name(name) if self.torch_aliases.contains(&name.id))
+    }
+
+    pub(crate) fn is_torch_nn_namespace_expr(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(name) => self.is_module_alias(&name.id, "torch.nn"),
+            Expr::Attribute(attr)
+                if attr.attr.as_str() == "nn"
+                    && self.is_torch_namespace_expr(attr.value.as_ref()) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_torch_nn_storage_constructor(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Name(name) => self.torch_nn_storage_aliases.contains(&name.id),
+            Expr::Attribute(attr) => {
+                Self::is_torch_nn_storage_name(attr.attr.as_str())
+                    && self.is_torch_nn_namespace_expr(attr.value.as_ref())
+            }
+            _ => false,
+        }
     }
 }
 
@@ -631,6 +665,12 @@ pub fn collect_imports(
                             .asname
                             .clone()
                             .unwrap_or_else(|| Identifier::from(name));
+
+                        if matches!(module.as_str(), "torch.nn" | "torch.nn.parameter")
+                            && Imports::is_torch_nn_storage_name(name)
+                        {
+                            imports.torch_nn_storage_aliases.insert(id.clone());
+                        }
 
                         if module == "torch" && name == "nn" {
                             imports

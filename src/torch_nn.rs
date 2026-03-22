@@ -4,7 +4,6 @@ use crate::expr_tokens::{
 use crate::infer::{infer_batchnorm_module, infer_conv_module, infer_linear_module};
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
-    is_torch_nn_namespace,
 };
 use crate::op_groups::Imports;
 use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
@@ -51,6 +50,10 @@ pub(crate) fn module_from_constructor_call(
         return None;
     };
 
+    if imports.is_torch_nn_storage_constructor(call.func.as_ref()) {
+        return None;
+    }
+
     if let Some(class_ref) = constructor_class_ref(
         call.func.as_ref(),
         class_map,
@@ -61,10 +64,7 @@ pub(crate) fn module_from_constructor_call(
         return Some(ResolvedModule::User(class_ref));
     }
 
-    let constructor_name = torch_nn_constructor_name(call_expr, imports)?;
-    if constructor_name == "Parameter" || constructor_name == "Buffer" {
-        return None;
-    }
+    torch_nn_constructor_name(call_expr, imports)?;
     Some(ResolvedModule::Builtin(
         TorchNNModule::from_constructor_call(
             call_expr,
@@ -299,7 +299,7 @@ fn torch_nn_constructor_name(call_expr: &Expr, imports: &Imports) -> Option<Stri
         Expr::Name(name) => imports
             .imported_symbol_from(&name.id, "torch.nn")
             .map(ToString::to_string),
-        Expr::Attribute(attr) if is_torch_nn_namespace(attr.value.as_ref(), imports) => {
+        Expr::Attribute(attr) if imports.is_torch_nn_namespace_expr(attr.value.as_ref()) => {
             Some(attr.attr.to_string())
         }
         _ => None,

@@ -241,3 +241,11 @@ fn wrong_input_to_sequential_cov_model_emits_diagnostics() {
     let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
     assert_eq!(analysis.diagnostics.len(), 1);
 }
+
+#[test]
+fn imported_parameter_and_buffer_are_tracked() {
+    let src = extract_test_case(PY_DATA, 29);
+    let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
+    assert_eq!(analysis.diagnostics.len(), 0);
+    assert!(is_hover_expected(&src, &analysis, "y =", "B X 57"));
+}

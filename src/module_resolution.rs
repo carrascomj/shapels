@@ -261,7 +261,7 @@ fn is_torch_nn_module_base(expr: &Expr, imports: &Imports) -> bool {
     let Expr::Attribute(attr) = expr else {
         return false;
     };
-    attr.attr.as_str() == "Module" && is_torch_nn_namespace(attr.value.as_ref(), imports)
+    attr.attr.as_str() == "Module" && imports.is_torch_nn_namespace_expr(attr.value.as_ref())
 }
 
 /// Collect class definitions and mark which ones inherit from `torch.nn.Module`.
@@ -510,22 +510,6 @@ fn module_state(resolved_module: ResolvedModule) -> VarState {
     }
 }
 
-fn is_torch_namespace(expr: &Expr, imports: &Imports) -> bool {
-    matches!(expr, Expr::Name(name) if imports.torch_aliases.contains(&name.id))
-}
-
-pub(crate) fn is_torch_nn_namespace(expr: &Expr, imports: &Imports) -> bool {
-    match expr {
-        Expr::Name(name) => imports.is_module_alias(&name.id, "torch.nn"),
-        Expr::Attribute(attr)
-            if attr.attr.as_str() == "nn" && is_torch_namespace(attr.value.as_ref(), imports) =>
-        {
-            true
-        }
-        _ => false,
-    }
-}
-
 pub(crate) fn imported_class_ref(
     module_name: &str,
     class_name: &Identifier,
@@ -546,22 +530,13 @@ pub(crate) fn imported_class_ref(
 }
 
 pub(crate) fn is_parameter_constructor(func: &Expr, imports: &Imports) -> bool {
-    match func {
-        Expr::Name(name) => imports
-            .imported_symbol_from(&name.id, "torch.nn")
-            .map(|original| original.as_str() == "Parameter")
-            .unwrap_or(false),
-        Expr::Attribute(attr) => {
-            attr.attr.as_str() == "Parameter" && is_torch_nn_namespace(attr.value.as_ref(), imports)
-        }
-        _ => false,
-    }
+    imports.is_torch_nn_storage_constructor(func)
 }
 
 fn torch_call_op(func: &Expr, imports: &Imports) -> TorchOp {
     match func {
         Expr::Name(name) => TorchOp::as_call(&name.id, imports),
-        Expr::Attribute(attr) if is_torch_namespace(attr.value.as_ref(), imports) => {
+        Expr::Attribute(attr) if imports.is_torch_namespace_expr(attr.value.as_ref()) => {
             TorchOp::from_attr(attr.attr.as_str())
         }
         _ => TorchOp::Unknown,
