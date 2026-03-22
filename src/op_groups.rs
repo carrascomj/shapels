@@ -526,6 +526,25 @@ pub struct Imports {
     pub from_imports: HashMap<Identifier, (String, Identifier)>,
 }
 
+impl Imports {
+    pub(crate) fn imported_symbol_from<'a>(
+        &'a self,
+        ident: &Identifier,
+        module_name: &str,
+    ) -> Option<&'a Identifier> {
+        self.from_imports
+            .get(ident)
+            .and_then(|(module, original)| (module == module_name).then_some(original))
+    }
+
+    pub(crate) fn is_module_alias(&self, ident: &Identifier, module_name: &str) -> bool {
+        self.module_aliases
+            .get(ident)
+            .map(|module| module == module_name)
+            .unwrap_or(false)
+    }
+}
+
 /// Map all known operations to their importing aliases, for instance:
 ///
 /// ```python
@@ -605,18 +624,36 @@ pub fn collect_imports(
             }
             Stmt::ImportFrom(f) => {
                 let resolved_module = resolve_from_module(f, module_path, project_root);
-                if let Some(module) = &resolved_module
-                    && (module == "torch" || module == "torch.nn.functional")
-                {
+                if let Some(module) = &resolved_module {
                     for alias in &f.names {
                         let name = alias.name.as_str();
-                        if let Some(val) = imports.func_aliases.get_mut(name) {
-                            let id = alias
-                                .asname
-                                .clone()
-                                .unwrap_or_else(|| Identifier::from(name));
-                            val.insert(id);
-                        } else {
+                        let id = alias
+                            .asname
+                            .clone()
+                            .unwrap_or_else(|| Identifier::from(name));
+
+                        if module == "torch" && name == "nn" {
+                            imports
+                                .module_aliases
+                                .insert(id.clone(), "torch.nn".to_string());
+                            continue;
+                        }
+
+                        if module == "torch.nn" && name == "functional" {
+                            imports
+                                .module_aliases
+                                .insert(id.clone(), "torch.nn.functional".to_string());
+                            imports.torch_nn_functional_aliases.insert(id.clone());
+                            continue;
+                        }
+
+                        if module == "torch" || module == "torch.nn.functional" {
+                            if let Some(val) = imports.func_aliases.get_mut(name) {
+                                val.insert(id);
+                                continue;
+                            }
+
+                            let mut handled = false;
                             for (container, key) in [
                                 (&AGGR_ALIASES, "sum"),
                                 (&NOOP_DIM_ALIASES, "softmax"),
@@ -631,21 +668,19 @@ pub fn collect_imports(
                                 (&QUANTILE_ALIASES, "quantile"),
                             ] {
                                 if container.contains(name) {
-                                    let id = alias
-                                        .asname
-                                        .clone()
-                                        .unwrap_or_else(|| Identifier::from(name));
-                                    imports.func_aliases.entry(key).or_default().insert(id);
+                                    imports
+                                        .func_aliases
+                                        .entry(key)
+                                        .or_default()
+                                        .insert(id.clone());
+                                    handled = true;
                                 }
                             }
+                            if handled {
+                                continue;
+                            }
                         }
-                    }
-                } else if let Some(module) = &resolved_module {
-                    for alias in &f.names {
-                        let id = alias
-                            .asname
-                            .clone()
-                            .unwrap_or_else(|| Identifier::from(alias.name.as_str()));
+
                         imports
                             .from_imports
                             .insert(id, (module.to_string(), alias.name.clone()));

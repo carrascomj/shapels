@@ -58,7 +58,7 @@ def wrong_conv1d():
 
 # test 6
 import torch
-import torch.nn as nn
+from torch import nn
 
 def infer_conv1d_module():
     x = torch.ones(32, 256, 512)
