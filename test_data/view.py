@@ -157,6 +157,43 @@ def flatten_improper(x: F[T, "A B C D"]):
 # test 16
 import torch
 
+class FlattenDiversion(torch.nn.Module):
+    def __init__(self):
+        self.op = torch.nn.Flatten(start_dim=1, end_dim=3)
+    def forward(self, x):
+        return self.op(x)
+
+
+def flatten_proper_symbolic(x):
+    A, B, C, D, E, F = x.shape
+    my_flatten_diversion = FlattenDiversion()
+    # flat is [A B*C*D E F]
+    flat = my_flatten_diversion(x, start_dim=1, end_dim=3)
+
+
+# test 17
+import torch
+from torch import nn
+
+def flatten_proper_concrete():
+    x = torch.zeros(32, 64, 128)
+    # flat is [32, 8192]
+    flattener = nn.Flatten(start_dim=1)
+    flat = flattener(x)
+
+
+# test 18
+from jaxtyping import Float as F
+from torch import Tensor as T
+import torch
+import torch.nn as nn
+
+def flatten_improper(x: F[T, "A B"]):
+    flattener = nn.Flatten(start_dim=3)
+    wrong = flattener(x)
+
+# test 19
+import torch
 def repeat_interleave_concrete():
     """Adapted rom torch docs."""
     x = torch.zeros(3)
@@ -179,7 +216,7 @@ def repeat_interleave_concrete():
     #         [3, 4]])
 
 
-# test 17
+# test 20
 import torch
 
 def repeat_interleave_symbolic():
@@ -189,7 +226,7 @@ def repeat_interleave_symbolic():
     rep1 = torch.repeat_interleave(y, C, dim=1)
 
 
-# test 18
+# test 21
 import torch
 
 def repeat_interleave_improper():

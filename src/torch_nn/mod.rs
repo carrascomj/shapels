@@ -1,7 +1,9 @@
 use crate::expr_tokens::{
     MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
 };
-use crate::infer::{infer_batchnorm_module, infer_conv_module, infer_linear_module};
+use crate::infer::{
+    FlattenDims, infer_batchnorm_module, infer_conv_module, infer_flatten, infer_linear_module,
+};
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
 };
@@ -10,6 +12,7 @@ use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
 use lsp_types::{Diagnostic, Range};
 use rustpython_parser::ast::{Expr, ExprCall, Identifier};
 use rustpython_parser::text_size::TextRange;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -37,6 +40,7 @@ pub(crate) enum TorchNNModule {
         groups: Option<String>,
     },
     Sequential(Vec<ResolvedModule>),
+    Flatten(FlattenDims<'static>),
     /// `torch.nn.Module` that do not change shapes and do not require
     /// custom checks (or the checks are not yet implemented).
     Noop,
@@ -171,6 +175,17 @@ impl TorchNNModule {
             );
         }
 
+        if normalized == "flatten" {
+            return Self::Flatten(FlattenDims {
+                start_dim: get_call_arg(call, "start_dim", 0)
+                    .and_then(module_arg_token)
+                    .map(Cow::Owned),
+                end_dim: get_call_arg(call, "end_dim", 1)
+                    .and_then(module_arg_token)
+                    .map(Cow::Owned),
+            });
+        }
+
         if known_nn_modules::NOOP_NN_MODULES.contains(constructor_name) {
             Self::Noop
         } else {
@@ -256,6 +271,9 @@ impl TorchNNModule {
                     )?;
                 }
                 Some(current)
+            }
+            Self::Flatten(flatten_dims) => {
+                infer_flatten(base_shape, &range, flatten_dims, diagnostics, source)
             }
             Self::Noop | Self::Unknown => Some(base_shape),
         }

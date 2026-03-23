@@ -17,8 +17,8 @@ mod module_resolution;
 pub mod op_groups;
 mod torch_nn;
 use crate::infer::{
-    ShapeOrExpr, Transpose, infer_broadcastable_poswise, infer_condition, infer_conv,
-    infer_creation_size, infer_flatten, infer_index, infer_matmul_shapes, infer_noop,
+    ShapeOrExpr, Transpose, get_flatten_dims, infer_broadcastable_poswise, infer_condition,
+    infer_conv, infer_creation_size, infer_flatten, infer_index, infer_matmul_shapes, infer_noop,
     infer_permute, infer_range_size, infer_repeat, infer_repeat_interleave, infer_squeeze,
     infer_take, infer_to, infer_unary_dtype, infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
@@ -1985,8 +1985,9 @@ fn torch_op_to_shape(
             })
         }
         (TorchOp::Flatten, Some(base), _, _) => {
-            // TODO(carrascomj): ravel is function-only
-            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_flatten(shape, offset, call, vars, diagnostics, source))
+            let flatten_dims = get_flatten_dims(offset, call, vars, diagnostics, source);
+            // TODO(carrascomj): ravel is function-onlyj
+            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_flatten(shape, &call.range, &flatten_dims, diagnostics, source))
         }
         (TorchOp::Unknown, _, _, Function) => {
             // TODO(carrascomj): check if emitting diagnostics here
