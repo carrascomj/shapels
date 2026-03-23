@@ -98,5 +98,5 @@ fn conv3d_module_with_mixed_dims() {
 fn wrong_input_for_conv1d_module() {
     let src = extract_test_case(PY_DATA, 10);
     let analysis = analyze_source(&src);
-    assert_eq!(analysis.diagnostics.len(), 2);
+    assert_eq!(analysis.diagnostics.len(), 1);
 }

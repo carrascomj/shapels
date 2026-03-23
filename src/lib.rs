@@ -1358,6 +1358,8 @@ pub(crate) fn infer_expr_shape(
                 {
                     return ret.first().cloned();
                 }
+
+                return None;
             }
             // methods are functions with attributes
             if let Expr::Attribute(attr) = call.func.as_ref() {

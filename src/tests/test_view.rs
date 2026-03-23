@@ -199,7 +199,7 @@ fn nn_module_flatten_improper_emit_diagnostics() {
     let src = extract_test_case(VIEW_PY_DATA, 18);
     let analysis = analyze_source(&src);
     // start_dim is higher than the base shape
-    assert_eq!(analysis.diagnostics.len(), 2);
+    assert_eq!(analysis.diagnostics.len(), 1);
 }
 
 #[test]
