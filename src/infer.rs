@@ -11,6 +11,7 @@ use crate::expr_tokens::{
     CONV_PARAM_TOKEN_OPTIONS, DIM_TOKEN_OPTIONS, SLICE_BOUND_TOKEN_OPTIONS, expr_to_symbolic_token,
 };
 use crate::op_groups::{BroadcastOp, RangeOps, SimpleDtype, TorchOp};
+use crate::torch_nn::get_call_arg;
 use crate::{
     ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg,
     get_dtype,
@@ -3124,4 +3125,39 @@ pub fn infer_take(
         }
     }
     Some(index_shape)
+}
+
+/// Reduction argument for a [loss](https://docs.pytorch.org/docs/stable/nn.html#loss-functions).
+#[derive(Clone, Debug)]
+pub enum Reduction {
+    /// "none"
+    None,
+    /// any other ("mean", "sum")
+    Some,
+}
+
+impl Reduction {
+    pub fn loss_from_args(call: &ExprCall, reduction_arg_pos: usize) -> Reduction {
+        if let Some(Expr::Constant(ExprConstant {
+            value: Constant::Str(s),
+            ..
+        })) = get_call_arg(call, "reduction", reduction_arg_pos)
+            && s == "none"
+        {
+            Reduction::None
+        } else {
+            // default is "mean" (Some)
+            Reduction::Some
+        }
+    }
+}
+
+pub fn infer_loss(base_shape: Option<Shape>, reduction: &Reduction) -> Option<Shape> {
+    match reduction {
+        Reduction::None => base_shape,
+        Reduction::Some => Some(Shape {
+            dtype: base_shape.and_then(|sh| sh.dtype),
+            dims: Vec::new(),
+        }),
+    }
 }

@@ -2,7 +2,8 @@ use crate::expr_tokens::{
     MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
 };
 use crate::infer::{
-    FlattenDims, infer_batchnorm_module, infer_conv_module, infer_flatten, infer_linear_module,
+    FlattenDims, Reduction, infer_batchnorm_module, infer_conv_module, infer_flatten,
+    infer_linear_module, infer_loss,
 };
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
@@ -10,7 +11,7 @@ use crate::module_resolution::{
 use crate::op_groups::Imports;
 use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
 use lsp_types::{Diagnostic, Range};
-use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant, Identifier};
+use rustpython_parser::ast::{Expr, ExprCall, Identifier};
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -49,15 +50,6 @@ pub(crate) enum TorchNNModule {
     Noop,
     /// `torch.nn.Module` not implemented or unknown.
     Unknown,
-}
-
-/// Reduction argument for a loss.
-#[derive(Clone, Debug)]
-pub enum Reduction {
-    /// "none"
-    None,
-    /// any other ("mean", "sum")
-    Some,
 }
 
 pub(crate) fn module_from_constructor_call(
@@ -199,19 +191,9 @@ impl TorchNNModule {
         }
 
         if let Some(reduction_arg_pos) = known_nn_modules::LOSS_MODULES.get(constructor_name) {
-            let reduction = if let Some(Expr::Constant(ExprConstant {
-                value: Constant::Str(s),
-                ..
-            })) = get_call_arg(call, "reduction", *reduction_arg_pos)
-                && s == "none"
-            {
-                Reduction::None
-            } else {
-                // default is "mean"
-                Reduction::Some
+            return Self::Loss {
+                reduction: Reduction::loss_from_args(call, *reduction_arg_pos),
             };
-
-            return Self::Loss { reduction };
         }
 
         if known_nn_modules::NOOP_NN_MODULES.contains(constructor_name) {
@@ -303,19 +285,17 @@ impl TorchNNModule {
             Self::Flatten(flatten_dims) => {
                 infer_flatten(base_shape, &range, flatten_dims, diagnostics, source)
             }
-            Self::Loss { reduction } => match reduction {
-                Reduction::None => Some(base_shape),
-                Reduction::Some => Some(Shape {
-                    dtype: base_shape.dtype,
-                    dims: Vec::new(),
-                }),
-            },
+            Self::Loss { reduction } => infer_loss(Some(base_shape), reduction),
             Self::Noop | Self::Unknown => Some(base_shape),
         }
     }
 }
 
-fn get_call_arg<'a>(call: &'a ExprCall, name_arg: &str, as_positional: usize) -> Option<&'a Expr> {
+pub fn get_call_arg<'a>(
+    call: &'a ExprCall,
+    name_arg: &str,
+    as_positional: usize,
+) -> Option<&'a Expr> {
     call.args.get(as_positional).or_else(|| {
         call.keywords
             .iter()
