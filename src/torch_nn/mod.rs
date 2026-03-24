@@ -10,7 +10,7 @@ use crate::module_resolution::{
 use crate::op_groups::Imports;
 use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
 use lsp_types::{Diagnostic, Range};
-use rustpython_parser::ast::{Expr, ExprCall, Identifier};
+use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant, Identifier};
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -41,11 +41,23 @@ pub(crate) enum TorchNNModule {
     },
     Sequential(Vec<ResolvedModule>),
     Flatten(FlattenDims<'static>),
+    Loss {
+        reduction: Reduction,
+    },
     /// `torch.nn.Module` that do not change shapes and do not require
     /// custom checks (or the checks are not yet implemented).
     Noop,
     /// `torch.nn.Module` not implemented or unknown.
     Unknown,
+}
+
+/// Reduction argument for a loss.
+#[derive(Clone, Debug)]
+pub enum Reduction {
+    /// "none"
+    None,
+    /// any other ("mean", "sum")
+    Some,
 }
 
 pub(crate) fn module_from_constructor_call(
@@ -186,6 +198,22 @@ impl TorchNNModule {
             });
         }
 
+        if let Some(reduction_arg_pos) = known_nn_modules::LOSS_MODULES.get(constructor_name) {
+            let reduction = if let Some(Expr::Constant(ExprConstant {
+                value: Constant::Str(s),
+                ..
+            })) = get_call_arg(call, "reduction", *reduction_arg_pos)
+                && s == "none"
+            {
+                Reduction::None
+            } else {
+                // default is "mean"
+                Reduction::Some
+            };
+
+            return Self::Loss { reduction };
+        }
+
         if known_nn_modules::NOOP_NN_MODULES.contains(constructor_name) {
             Self::Noop
         } else {
@@ -275,6 +303,13 @@ impl TorchNNModule {
             Self::Flatten(flatten_dims) => {
                 infer_flatten(base_shape, &range, flatten_dims, diagnostics, source)
             }
+            Self::Loss { reduction } => match reduction {
+                Reduction::None => Some(base_shape),
+                Reduction::Some => Some(Shape {
+                    dtype: base_shape.dtype,
+                    dims: Vec::new(),
+                }),
+            },
             Self::Noop | Self::Unknown => Some(base_shape),
         }
     }
