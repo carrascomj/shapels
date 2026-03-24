@@ -17,10 +17,11 @@ mod module_resolution;
 pub mod op_groups;
 mod torch_nn;
 use crate::infer::{
-    ShapeOrExpr, Transpose, get_flatten_dims, infer_broadcastable_poswise, infer_condition,
-    infer_conv, infer_creation_size, infer_flatten, infer_index, infer_matmul_shapes, infer_noop,
-    infer_permute, infer_range_size, infer_repeat, infer_repeat_interleave, infer_squeeze,
-    infer_take, infer_to, infer_unary_dtype, infer_unsqueeze, infer_view_like, shape_dims_equal,
+    Reduction, ShapeOrExpr, Transpose, get_flatten_dims, infer_broadcastable_poswise,
+    infer_condition, infer_conv, infer_creation_size, infer_flatten, infer_index, infer_loss,
+    infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_repeat,
+    infer_repeat_interleave, infer_squeeze, infer_take, infer_to, infer_unary_dtype,
+    infer_unsqueeze, infer_view_like, shape_dims_equal,
 };
 pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
@@ -1978,6 +1979,24 @@ fn torch_op_to_shape(
             let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_conv(shape, kernel.dims, call, d, diagnostics, source))
         }
+        (TorchOp::Loss { reduction_arg_pos }, _, _, Function) => {
+            let base_shape = infer_call_base_shape(
+                call,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )?;
+            let reduction = Reduction::loss_from_args(call, reduction_arg_pos);
+            infer_loss(Some(base_shape), &reduction)
+        }
         (TorchOp::Repeat, Some(base), _, Method) => {
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))
         }
@@ -3079,24 +3098,12 @@ enum TorchOpKind {
 }
 
 fn function_or_method<R>(expr: &Expr<R>, imports: &Imports) -> TorchOpKind {
-    match expr {
-        Expr::Name(n)
-            if n.id.as_str() == "torch"
-                || imports.torch_aliases.contains(&n.id)
-                || imports.torch_nn_functional_aliases.contains(&n.id) =>
-        {
-            TorchOpKind::Function
-        }
-        _ => TorchOpKind::Method,
+    if imports.is_torch_namespace_expr(expr) || imports.is_torch_nn_functional_namespace_expr(expr)
+    {
+        TorchOpKind::Function
+    } else {
+        TorchOpKind::Method
     }
-}
-
-fn is_alias_of(canonical: &str, ident: &Identifier, imports: &Imports) -> bool {
-    imports
-        .func_aliases
-        .get(canonical)
-        .map(|set| set.contains(ident))
-        .unwrap_or(false)
 }
 
 fn assignment_shape_checks(

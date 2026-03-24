@@ -3,12 +3,12 @@ use std::{
     path::Path,
 };
 
-use phf::Set;
-use phf_macros::phf_set;
+use phf::{Map, Set};
+use phf_macros::{phf_map, phf_set};
 use rustpython_parser::ast::{Expr, Identifier, Stmt, StmtImportFrom};
 
+use crate::infer::Transpose;
 use crate::torch_nn::known_nn_modules::NOOP_NN_MODULES;
-use crate::{infer::Transpose, is_alias_of};
 
 /// Torch functions and operations whose inference is supported.
 ///
@@ -43,6 +43,8 @@ pub enum TorchOp {
     Expand,
     /// Conv1d, Conv2d, Conv3d
     Conv(usize),
+    /// Losses from `torch.nn.functional`.
+    Loss { reduction_arg_pos: usize },
     /// `torch.repeat`
     Repeat,
     /// `torch.repeat_interleave`
@@ -60,6 +62,14 @@ pub enum TorchOp {
 }
 
 impl TorchOp {
+    fn is_alias_of(canonical: &str, func_name_id: &Identifier, imports: &Imports) -> bool {
+        imports
+            .func_aliases
+            .get(canonical)
+            .map(|set| set.contains(func_name_id))
+            .unwrap_or(false)
+    }
+
     pub fn from_attr(attr_name: &str) -> Self {
         if attr_name == "mm" {
             Self::MatMul
@@ -84,6 +94,10 @@ impl TorchOp {
             Self::Conv(2)
         } else if attr_name == "conv3d" {
             Self::Conv(3)
+        } else if let Some(reduction_arg_pos) = LOSS_FUNCTIONS.get(attr_name) {
+            Self::Loss {
+                reduction_arg_pos: *reduction_arg_pos,
+            }
         } else if attr_name == "repeat" {
             Self::Repeat
         } else if attr_name == "where" {
@@ -124,57 +138,59 @@ impl TorchOp {
         }
     }
     pub(crate) fn as_call(func_name_id: &Identifier, imports: &Imports) -> Self {
-        if is_alias_of("mm", func_name_id, imports) {
+        if Self::is_alias_of("mm", func_name_id, imports) {
             Self::MatMul
         } else if let Some(op) = BroadcastOp::try_from_alias(func_name_id, imports) {
             Self::Broadcastable(op)
-        } else if is_alias_of("view", func_name_id, imports)
-            || is_alias_of("reshape", func_name_id, imports)
+        } else if Self::is_alias_of("view", func_name_id, imports)
+            || Self::is_alias_of("reshape", func_name_id, imports)
         {
             Self::View
-        } else if is_alias_of("permute", func_name_id, imports) {
+        } else if Self::is_alias_of("permute", func_name_id, imports) {
             Self::Transpose(Transpose::Permute)
-        } else if is_alias_of("where", func_name_id, imports) {
+        } else if Self::is_alias_of("where", func_name_id, imports) {
             Self::Condition
-        } else if is_alias_of("take", func_name_id, imports) {
+        } else if Self::is_alias_of("take", func_name_id, imports) {
             Self::Take
-        } else if is_alias_of("transpose", func_name_id, imports) {
+        } else if Self::is_alias_of("transpose", func_name_id, imports) {
             Self::Transpose(Transpose::Explicit)
-        } else if is_alias_of("t", func_name_id, imports) {
+        } else if Self::is_alias_of("t", func_name_id, imports) {
             Self::Transpose(Transpose::T)
-        } else if is_alias_of("unsqueeze", func_name_id, imports) {
+        } else if Self::is_alias_of("unsqueeze", func_name_id, imports) {
             Self::Unsqueeze
-        } else if is_alias_of("squeeze", func_name_id, imports) {
+        } else if Self::is_alias_of("squeeze", func_name_id, imports) {
             Self::Squeeze
-        } else if is_alias_of("sum", func_name_id, imports) {
+        } else if Self::is_alias_of("sum", func_name_id, imports) {
             Self::Aggr
-        } else if is_alias_of("conv1d", func_name_id, imports) {
+        } else if Self::is_alias_of("conv1d", func_name_id, imports) {
             Self::Conv(1)
-        } else if is_alias_of("conv2d", func_name_id, imports) {
+        } else if Self::is_alias_of("conv2d", func_name_id, imports) {
             Self::Conv(2)
-        } else if is_alias_of("conv3d", func_name_id, imports) {
+        } else if Self::is_alias_of("conv3d", func_name_id, imports) {
             Self::Conv(3)
-        } else if is_alias_of("softmax", func_name_id, imports) {
+        } else if let Some(loss_op) = Self::loss_from_alias(func_name_id, imports) {
+            loss_op
+        } else if Self::is_alias_of("softmax", func_name_id, imports) {
             Self::NoopDim
-        } else if is_alias_of("noop", func_name_id, imports) {
+        } else if Self::is_alias_of("noop", func_name_id, imports) {
             Self::Noop
-        } else if is_alias_of("quantile", func_name_id, imports) {
+        } else if Self::is_alias_of("quantile", func_name_id, imports) {
             Self::Quantile
-        } else if is_alias_of("Tensor", func_name_id, imports) {
+        } else if Self::is_alias_of("Tensor", func_name_id, imports) {
             Self::Creation { is_size: true }
-        } else if is_alias_of("like", func_name_id, imports) {
+        } else if Self::is_alias_of("like", func_name_id, imports) {
             Self::Creation { is_size: false }
-        } else if is_alias_of("to", func_name_id, imports) {
+        } else if Self::is_alias_of("to", func_name_id, imports) {
             Self::NoArg { predef_dtype: None }
-        } else if is_alias_of("flatten", func_name_id, imports) {
+        } else if Self::is_alias_of("flatten", func_name_id, imports) {
             Self::Flatten
-        } else if is_alias_of("repeat", func_name_id, imports) {
+        } else if Self::is_alias_of("repeat", func_name_id, imports) {
             Self::Repeat
-        } else if is_alias_of("repeat_interleave", func_name_id, imports) {
+        } else if Self::is_alias_of("repeat_interleave", func_name_id, imports) {
             Self::RepeatInterleave
         } else if let Some(Ok(range_op)) = CREATION_RANGE_ALIASES
             .iter()
-            .filter(|x| is_alias_of(x, func_name_id, imports))
+            .filter(|x| Self::is_alias_of(x, func_name_id, imports))
             .map(|&x| RangeOps::try_from(x))
             .next()
         {
@@ -182,6 +198,16 @@ impl TorchOp {
         } else {
             Self::Unknown
         }
+    }
+
+    fn loss_from_alias(func_name_id: &Identifier, imports: &Imports) -> Option<Self> {
+        LOSS_FUNCTIONS.keys().find_map(|loss_name| {
+            Self::is_alias_of(loss_name, func_name_id, imports).then(|| Self::Loss {
+                reduction_arg_pos: *LOSS_FUNCTIONS
+                    .get(loss_name)
+                    .expect("loss key must be present in LOSS_FUNCTIONS"),
+            })
+        })
     }
 }
 
@@ -379,6 +405,33 @@ pub static TO_NOARG_ALIASES: Set<&'static str> = phf_set! {
 /// Flatten, product of dimensions is preserved.
 pub static FLATTEN_ALIASES: Set<&'static str> = phf_set!["flatten", "ravel"];
 
+/// [Losses in `torch.nn.functional`](https://docs.pytorch.org/docs/stable/nn.functional.html#loss-functions).
+///
+/// They're mapped to the position of the argument `reduction` in each case.
+pub static LOSS_FUNCTIONS: Map<&'static str, usize> = phf_map![
+    "l1_loss" => 4,
+    "mse_loss" => 4,
+    "cross_entropy" => 6,
+    "ctc_loss" => 5,
+    "nll_loss" => 6,
+    "poisson_nll_loss" => 7,
+    "gaussian_nll_loss" => 5,
+    "kl_div" => 4,
+    "binary_cross_entropy" => 5,
+    "binary_cross_entropy_with_logits" => 5,
+    "margin_ranking_loss" => 6,
+    "hinge_embedding_loss" => 5,
+    "multilabel_margin_loss" => 4,
+    "huber_loss" => 2,
+    "smooth_l1_loss" => 4,
+    "soft_margin_loss" => 4,
+    "multilabel_soft_margin_loss" => 5,
+    "cosine_embedding_loss" => 6,
+    "multi_margin_loss" => 7,
+    "triplet_margin_loss" => 9,
+    "triplet_margin_with_distance_loss" => 6,
+];
+
 pub static TORCH_DTYPES: Set<&'static str> = phf_set![
     "float32",
     "float64",
@@ -488,11 +541,11 @@ pub enum BroadcastOp {
 
 impl BroadcastOp {
     pub(crate) fn try_from_alias(func_name_id: &Identifier, imports: &Imports) -> Option<Self> {
-        if is_alias_of("broadcast", func_name_id, imports) {
+        if TorchOp::is_alias_of("broadcast", func_name_id, imports) {
             Some(Self::Arithmetic)
-        } else if is_alias_of("bitwise", func_name_id, imports) {
+        } else if TorchOp::is_alias_of("bitwise", func_name_id, imports) {
             Some(Self::Bitwise { only_right: false })
-        } else if is_alias_of("broadcast_eq", func_name_id, imports) {
+        } else if TorchOp::is_alias_of("broadcast_eq", func_name_id, imports) {
             Some(Self::Eq)
         } else {
             None
@@ -540,6 +593,31 @@ impl Imports {
         self.torch_nn_noop_aliases.insert(alias, original);
     }
 
+    fn record_func_alias(&mut self, canonical: &'static str, alias: Identifier) {
+        self.func_aliases
+            .entry(canonical)
+            .or_default()
+            .insert(alias);
+    }
+
+    fn import_torch_nn_functional_wildcard(&mut self) {
+        for name in ["conv1d", "conv2d", "conv3d"] {
+            self.record_func_alias(name, Identifier::from(name));
+        }
+        for name in &NOOP_DIM_ALIASES {
+            self.record_func_alias("softmax", Identifier::from(*name));
+        }
+        for name in &NOOP_ALIASES {
+            self.record_func_alias("noop", Identifier::from(*name));
+        }
+        for name in &FLATTEN_ALIASES {
+            self.record_func_alias("flatten", Identifier::from(*name));
+        }
+        for loss_name in LOSS_FUNCTIONS.keys() {
+            self.record_func_alias(loss_name, Identifier::from(*loss_name));
+        }
+    }
+
     pub(crate) fn imported_symbol_from<'a>(
         &'a self,
         ident: &Identifier,
@@ -564,11 +642,11 @@ impl Imports {
         self.torch_nn_noop_aliases.get(ident)
     }
 
-    pub(crate) fn is_torch_namespace_expr(&self, expr: &Expr) -> bool {
+    pub(crate) fn is_torch_namespace_expr<R>(&self, expr: &Expr<R>) -> bool {
         matches!(expr, Expr::Name(name) if self.torch_aliases.contains(&name.id))
     }
 
-    pub(crate) fn is_torch_nn_namespace_expr(&self, expr: &Expr) -> bool {
+    pub(crate) fn is_torch_nn_namespace_expr<R>(&self, expr: &Expr<R>) -> bool {
         match expr {
             Expr::Name(name) => self.is_module_alias(&name.id, "torch.nn"),
             Expr::Attribute(attr)
@@ -581,7 +659,23 @@ impl Imports {
         }
     }
 
-    pub(crate) fn is_torch_nn_storage_constructor(&self, expr: &Expr) -> bool {
+    pub(crate) fn is_torch_nn_functional_namespace_expr<R>(&self, expr: &Expr<R>) -> bool {
+        match expr {
+            Expr::Name(name) => {
+                self.torch_nn_functional_aliases.contains(&name.id)
+                    || self.is_module_alias(&name.id, "torch.nn.functional")
+            }
+            Expr::Attribute(attr)
+                if attr.attr.as_str() == "functional"
+                    && self.is_torch_nn_namespace_expr(attr.value.as_ref()) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_torch_nn_storage_constructor<R>(&self, expr: &Expr<R>) -> bool {
         match expr {
             Expr::Name(name) => self.torch_nn_storage_aliases.contains(&name.id),
             Expr::Attribute(attr) => {
@@ -639,6 +733,12 @@ pub fn collect_imports(
             .entry(fname)
             .or_insert_with(HashSet::new);
     }
+    for loss_name in LOSS_FUNCTIONS.keys() {
+        imports
+            .func_aliases
+            .entry(loss_name)
+            .or_insert_with(HashSet::new);
+    }
     imports
         .torch_aliases
         .insert(Identifier::from("torch".to_string()));
@@ -681,6 +781,11 @@ pub fn collect_imports(
                             .asname
                             .clone()
                             .unwrap_or_else(|| Identifier::from(name));
+
+                        if module == "torch.nn.functional" && name == "*" {
+                            imports.import_torch_nn_functional_wildcard();
+                            continue;
+                        }
 
                         if is_torch_nn_module_path && name == "*" {
                             for noop_name in &NOOP_NN_MODULES {
