@@ -2,8 +2,8 @@ use crate::expr_tokens::{
     MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
 };
 use crate::infer::{
-    FlattenDims, Reduction, infer_batchnorm_module, infer_conv_module, infer_flatten,
-    infer_linear_module, infer_loss,
+    FlattenDims, PoolKind, Reduction, infer_batchnorm_module, infer_conv_module, infer_flatten,
+    infer_linear_module, infer_loss, infer_pool_module,
 };
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
@@ -11,7 +11,7 @@ use crate::module_resolution::{
 use crate::op_groups::Imports;
 use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
 use lsp_types::{Diagnostic, Range};
-use rustpython_parser::ast::{Expr, ExprCall, Identifier};
+use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant, Identifier};
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -39,6 +39,18 @@ pub(crate) enum TorchNNModule {
         padding: Vec<String>,
         dilation: Vec<String>,
         groups: Option<String>,
+    },
+    Pool {
+        dims: usize,
+        kind: PoolKind,
+        kernel_size: Vec<String>,
+        stride: Vec<String>,
+        padding: Vec<String>,
+        dilation: Vec<String>,
+        output_size: Vec<Option<String>>,
+        output_ratio: Vec<String>,
+        ceil_mode: bool,
+        return_indices: bool,
     },
     Sequential(Vec<ResolvedModule>),
     Flatten(FlattenDims<'static>),
@@ -162,6 +174,10 @@ impl TorchNNModule {
             };
         }
 
+        if let Some(pool) = pool_from_named_call(call, &normalized, PoolCallStyle::Module) {
+            return pool;
+        }
+
         if normalized == "sequential" {
             return Self::Sequential(
                 sequential_elements(call)
@@ -257,6 +273,33 @@ impl TorchNNModule {
                 padding,
                 dilation,
                 groups.as_deref(),
+                range,
+                diagnostics,
+                source,
+            ),
+            Self::Pool {
+                dims,
+                kind,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+                output_size,
+                output_ratio,
+                ceil_mode,
+                return_indices,
+            } => infer_pool_module(
+                base_shape,
+                *dims,
+                kind,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+                output_size,
+                output_ratio,
+                *ceil_mode,
+                *return_indices,
                 range,
                 diagnostics,
                 source,
@@ -373,4 +416,271 @@ fn module_arg_token(expr: &Expr) -> Option<String> {
 
 fn module_arg_tokens(expr: &Expr) -> Option<Vec<String>> {
     expr_to_symbolic_tokens(expr, MODULE_ARG_TOKEN_OPTIONS)
+}
+
+fn module_arg_bool(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Constant(ExprConstant {
+            value: Constant::Bool(value),
+            ..
+        }) => Some(*value),
+        _ => None,
+    }
+}
+
+fn module_arg_optional_tokens(expr: &Expr) -> Option<Vec<Option<String>>> {
+    match expr {
+        Expr::Tuple(tuple) => tuple.elts.iter().map(optional_module_arg_token).collect(),
+        Expr::List(list) => list.elts.iter().map(optional_module_arg_token).collect(),
+        other => optional_module_arg_token(other).map(|token| vec![token]),
+    }
+}
+
+fn optional_module_arg_token(expr: &Expr) -> Option<Option<String>> {
+    match expr {
+        Expr::Constant(ExprConstant {
+            value: Constant::None,
+            ..
+        }) => Some(None),
+        _ => module_arg_token(expr).map(Some),
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+struct PoolParseSpec {
+    kernel_size: Option<usize>,
+    stride: Option<usize>,
+    padding: Option<usize>,
+    dilation: Option<usize>,
+    output_size: Option<usize>,
+    output_ratio: Option<usize>,
+    ceil_mode: Option<usize>,
+    return_indices: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum PoolCallStyle {
+    Module,
+    Functional,
+}
+
+pub(crate) fn functional_pool_from_call(call: &ExprCall, func_name: &str) -> Option<TorchNNModule> {
+    let normalized = func_name.to_ascii_lowercase();
+    pool_from_named_call(call, &normalized, PoolCallStyle::Functional)
+}
+
+fn pool_from_named_call(
+    call: &ExprCall,
+    normalized: &str,
+    style: PoolCallStyle,
+) -> Option<TorchNNModule> {
+    let (dims, kind, spec) = pool_spec_from_name(normalized, style)?;
+    Some(build_pool_module(call, dims, kind, spec))
+}
+
+fn pool_spec_from_name(
+    normalized: &str,
+    style: PoolCallStyle,
+) -> Option<(usize, PoolKind, PoolParseSpec)> {
+    let (dims, kind, spec) = match style {
+        PoolCallStyle::Module => {
+            if normalized.starts_with("maxpool") {
+                (
+                    parse_module_dims(normalized, "maxpool")?,
+                    PoolKind::Max,
+                    PoolParseSpec {
+                        kernel_size: Some(0),
+                        stride: Some(1),
+                        padding: Some(2),
+                        dilation: Some(3),
+                        return_indices: Some(4),
+                        ceil_mode: Some(5),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("avgpool") {
+                (
+                    parse_module_dims(normalized, "avgpool")?,
+                    PoolKind::Avg,
+                    PoolParseSpec {
+                        kernel_size: Some(0),
+                        stride: Some(1),
+                        padding: Some(2),
+                        ceil_mode: Some(3),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("lppool") {
+                (
+                    parse_module_dims(normalized, "lppool")?,
+                    PoolKind::Lp,
+                    PoolParseSpec {
+                        kernel_size: Some(1),
+                        stride: Some(2),
+                        ceil_mode: Some(3),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("fractionalmaxpool") {
+                (
+                    parse_module_dims(normalized, "fractionalmaxpool")?,
+                    PoolKind::FractionalMax,
+                    PoolParseSpec {
+                        kernel_size: Some(0),
+                        output_size: Some(1),
+                        output_ratio: Some(2),
+                        return_indices: Some(3),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("adaptivemaxpool") {
+                (
+                    parse_module_dims(normalized, "adaptivemaxpool")?,
+                    PoolKind::AdaptiveMax,
+                    PoolParseSpec {
+                        output_size: Some(0),
+                        return_indices: Some(1),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("adaptiveavgpool") {
+                (
+                    parse_module_dims(normalized, "adaptiveavgpool")?,
+                    PoolKind::AdaptiveAvg,
+                    PoolParseSpec {
+                        output_size: Some(0),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else {
+                return None;
+            }
+        }
+        PoolCallStyle::Functional => {
+            if normalized.starts_with("max_pool") {
+                (
+                    parse_module_dims(normalized, "max_pool")?,
+                    PoolKind::Max,
+                    PoolParseSpec {
+                        kernel_size: Some(1),
+                        stride: Some(2),
+                        padding: Some(3),
+                        dilation: Some(4),
+                        ceil_mode: Some(5),
+                        return_indices: Some(6),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("avg_pool") {
+                (
+                    parse_module_dims(normalized, "avg_pool")?,
+                    PoolKind::Avg,
+                    PoolParseSpec {
+                        kernel_size: Some(1),
+                        stride: Some(2),
+                        padding: Some(3),
+                        ceil_mode: Some(4),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("lp_pool") {
+                (
+                    parse_module_dims(normalized, "lp_pool")?,
+                    PoolKind::Lp,
+                    PoolParseSpec {
+                        kernel_size: Some(2),
+                        stride: Some(3),
+                        ceil_mode: Some(4),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("fractional_max_pool") {
+                (
+                    parse_module_dims(normalized, "fractional_max_pool")?,
+                    PoolKind::FractionalMax,
+                    PoolParseSpec {
+                        kernel_size: Some(1),
+                        output_size: Some(2),
+                        output_ratio: Some(3),
+                        return_indices: Some(4),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("adaptive_max_pool") {
+                (
+                    parse_module_dims(normalized, "adaptive_max_pool")?,
+                    PoolKind::AdaptiveMax,
+                    PoolParseSpec {
+                        output_size: Some(1),
+                        return_indices: Some(2),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else if normalized.starts_with("adaptive_avg_pool") {
+                (
+                    parse_module_dims(normalized, "adaptive_avg_pool")?,
+                    PoolKind::AdaptiveAvg,
+                    PoolParseSpec {
+                        output_size: Some(1),
+                        ..PoolParseSpec::default()
+                    },
+                )
+            } else {
+                return None;
+            }
+        }
+    };
+    Some((dims, kind, spec))
+}
+
+fn build_pool_module(
+    call: &ExprCall,
+    dims: usize,
+    kind: PoolKind,
+    spec: PoolParseSpec,
+) -> TorchNNModule {
+    TorchNNModule::Pool {
+        dims,
+        kind,
+        kernel_size: spec
+            .kernel_size
+            .and_then(|pos| get_call_arg(call, "kernel_size", pos))
+            .and_then(module_arg_tokens)
+            .unwrap_or_default(),
+        stride: spec
+            .stride
+            .and_then(|pos| get_call_arg(call, "stride", pos))
+            .and_then(module_arg_tokens)
+            .unwrap_or_default(),
+        padding: spec
+            .padding
+            .and_then(|pos| get_call_arg(call, "padding", pos))
+            .and_then(module_arg_tokens)
+            .unwrap_or_default(),
+        dilation: spec
+            .dilation
+            .and_then(|pos| get_call_arg(call, "dilation", pos))
+            .and_then(module_arg_tokens)
+            .unwrap_or_default(),
+        output_size: spec
+            .output_size
+            .and_then(|pos| get_call_arg(call, "output_size", pos))
+            .and_then(module_arg_optional_tokens)
+            .unwrap_or_default(),
+        output_ratio: spec
+            .output_ratio
+            .and_then(|pos| get_call_arg(call, "output_ratio", pos))
+            .and_then(module_arg_tokens)
+            .unwrap_or_default(),
+        ceil_mode: spec
+            .ceil_mode
+            .and_then(|pos| get_call_arg(call, "ceil_mode", pos))
+            .and_then(module_arg_bool)
+            .unwrap_or(false),
+        return_indices: spec
+            .return_indices
+            .and_then(|pos| get_call_arg(call, "return_indices", pos))
+            .and_then(module_arg_bool)
+            .unwrap_or(false),
+    }
 }

@@ -31,6 +31,7 @@ use crate::module_resolution::{
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
+use crate::torch_nn::functional_pool_from_call;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
@@ -1996,6 +1997,37 @@ fn torch_op_to_shape(
             )?;
             let reduction = Reduction::loss_from_args(call, reduction_arg_pos);
             infer_loss(Some(base_shape), &reduction)
+        }
+        (TorchOp::Pool { func_name }, _, _, Function) => {
+            let pool = functional_pool_from_call(call, func_name)?;
+            let base_shape = infer_call_base_shape(
+                call,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                record_hovers,
+                source,
+                module_cache.as_deref_mut(),
+                module_path,
+            )?;
+            pool.infer_builtin_module(
+                base_shape,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                source,
+                call.range,
+                module_cache.as_deref_mut(),
+                module_path,
+            )
         }
         (TorchOp::Repeat, Some(base), _, Method) => {
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))

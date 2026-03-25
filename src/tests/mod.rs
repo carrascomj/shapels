@@ -16,6 +16,7 @@ mod test_multiply;
 mod test_native_modules;
 mod test_noop;
 mod test_permute;
+mod test_pooling;
 mod test_shape_assign;
 mod test_view;
 

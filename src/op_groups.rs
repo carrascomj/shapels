@@ -45,6 +45,8 @@ pub enum TorchOp {
     Conv(usize),
     /// Losses from `torch.nn.functional`.
     Loss { reduction_arg_pos: usize },
+    /// Pooling ops from `torch.nn.functional`.
+    Pool { func_name: &'static str },
     /// `torch.repeat`
     Repeat,
     /// `torch.repeat_interleave`
@@ -94,6 +96,8 @@ impl TorchOp {
             Self::Conv(2)
         } else if attr_name == "conv3d" {
             Self::Conv(3)
+        } else if let Some(func_name) = POOL_FUNCTIONS.get_key(attr_name).copied() {
+            Self::Pool { func_name }
         } else if let Some(reduction_arg_pos) = LOSS_FUNCTIONS.get(attr_name) {
             Self::Loss {
                 reduction_arg_pos: *reduction_arg_pos,
@@ -168,6 +172,8 @@ impl TorchOp {
             Self::Conv(2)
         } else if Self::is_alias_of("conv3d", func_name_id, imports) {
             Self::Conv(3)
+        } else if let Some(pool_op) = Self::pool_from_alias(func_name_id, imports) {
+            pool_op
         } else if let Some(loss_op) = Self::loss_from_alias(func_name_id, imports) {
             loss_op
         } else if Self::is_alias_of("softmax", func_name_id, imports) {
@@ -207,6 +213,12 @@ impl TorchOp {
                     .get(loss_name)
                     .expect("loss key must be present in LOSS_FUNCTIONS"),
             })
+        })
+    }
+
+    fn pool_from_alias(func_name_id: &Identifier, imports: &Imports) -> Option<Self> {
+        POOL_FUNCTIONS.iter().find_map(|&func_name| {
+            Self::is_alias_of(func_name, func_name_id, imports).then_some(Self::Pool { func_name })
         })
     }
 }
@@ -404,6 +416,27 @@ pub static TO_NOARG_ALIASES: Set<&'static str> = phf_set! {
 
 /// Flatten, product of dimensions is preserved.
 pub static FLATTEN_ALIASES: Set<&'static str> = phf_set!["flatten", "ravel"];
+
+/// [Pooling functions in `torch.nn.functional`](https://docs.pytorch.org/docs/stable/nn.functional.html#pooling-functions).
+pub static POOL_FUNCTIONS: Set<&'static str> = phf_set![
+    "max_pool1d",
+    "max_pool2d",
+    "max_pool3d",
+    "avg_pool1d",
+    "avg_pool2d",
+    "avg_pool3d",
+    "lp_pool1d",
+    "lp_pool2d",
+    "lp_pool3d",
+    "adaptive_max_pool1d",
+    "adaptive_max_pool2d",
+    "adaptive_max_pool3d",
+    "adaptive_avg_pool1d",
+    "adaptive_avg_pool2d",
+    "adaptive_avg_pool3d",
+    "fractional_max_pool2d",
+    "fractional_max_pool3d",
+];
 
 /// [Losses in `torch.nn.functional`](https://docs.pytorch.org/docs/stable/nn.functional.html#loss-functions).
 ///
@@ -613,6 +646,9 @@ impl Imports {
         for name in &FLATTEN_ALIASES {
             self.record_func_alias("flatten", Identifier::from(*name));
         }
+        for &pool_name in POOL_FUNCTIONS.iter() {
+            self.record_func_alias(pool_name, Identifier::from(pool_name));
+        }
         for loss_name in LOSS_FUNCTIONS.keys() {
             self.record_func_alias(loss_name, Identifier::from(*loss_name));
         }
@@ -731,6 +767,12 @@ pub fn collect_imports(
         imports
             .func_aliases
             .entry(fname)
+            .or_insert_with(HashSet::new);
+    }
+    for &pool_name in POOL_FUNCTIONS.iter() {
+        imports
+            .func_aliases
+            .entry(pool_name)
             .or_insert_with(HashSet::new);
     }
     for loss_name in LOSS_FUNCTIONS.keys() {
