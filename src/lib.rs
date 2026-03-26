@@ -111,6 +111,7 @@ struct VarState {
     annotated: Option<Shape>,
     inferred: Option<Shape>,
     resolved_module: Option<ResolvedModule>,
+    callable: Option<CallableSignature>,
 }
 
 fn state_shape(state: &VarState) -> Option<&Shape> {
@@ -199,6 +200,18 @@ impl ReturnValue {
             Self::None => false,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum CallableParamList {
+    Exact(Vec<Option<Shape>>),
+    Any,
+}
+
+#[derive(Debug, Clone)]
+struct CallableSignature {
+    params: CallableParamList,
+    return_value: ReturnValue,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -491,6 +504,7 @@ fn analyze_function(
                 annotated: None,
                 inferred: None,
                 resolved_module: Some(ResolvedModule::User(class_ref.clone())),
+                callable: None,
             },
         );
     }
@@ -640,7 +654,8 @@ fn simulate_block(
                     continue;
                 }
                 if let Some(name) = expr_var_key(&assign.target) {
-                    let ann_shape = parse_shape_annotation(&assign.annotation);
+                    let (ann_shape, ann_class, ann_callable) =
+                        annotation_metadata_from_expr(&assign.annotation, imports, class_map);
                     let range = text_range_to_lsp(expr_text_range(&assign.target), source);
                     let mut inferred = None;
                     if let Some(val) = &assign.value {
@@ -690,6 +705,7 @@ fn simulate_block(
                                     annotated: ann_shape.clone(),
                                     inferred: Some(renamed.clone()),
                                     resolved_module: None,
+                                    callable: ann_callable.clone(),
                                 },
                             );
                             if record_hovers {
@@ -727,7 +743,8 @@ fn simulate_block(
                             VarState {
                                 annotated,
                                 inferred,
-                                resolved_module: None,
+                                resolved_module: ann_class.clone().map(ResolvedModule::User),
+                                callable: ann_callable.clone(),
                             },
                         );
                         if record_hovers {
@@ -752,6 +769,17 @@ fn simulate_block(
                                 annotated: ann_shape.clone(),
                                 inferred: None,
                                 resolved_module: Some(resolved_module.into_owned()),
+                                callable: ann_callable.clone(),
+                            },
+                        );
+                    } else if ann_callable.is_some() || ann_class.is_some() {
+                        vars.insert(
+                            name.clone(),
+                            VarState {
+                                annotated: ann_shape,
+                                inferred: None,
+                                resolved_module: ann_class.map(ResolvedModule::User),
+                                callable: ann_callable,
                             },
                         );
                     }
@@ -799,6 +827,7 @@ fn simulate_block(
                                     annotated: None,
                                     inferred: Some(shape.clone()),
                                     resolved_module: None,
+                                    callable: None,
                                 },
                             );
                             if record_hovers {
@@ -833,6 +862,7 @@ fn simulate_block(
                                 annotated: None,
                                 inferred: Some(shape.clone()),
                                 resolved_module: None,
+                                callable: None,
                             },
                         );
                         if record_hovers {
@@ -855,6 +885,7 @@ fn simulate_block(
                                 annotated: None,
                                 inferred: None,
                                 resolved_module: Some(resolved_module.into_owned()),
+                                callable: None,
                             },
                         );
                     }
@@ -1250,6 +1281,25 @@ pub(crate) fn infer_expr_shape(
                     module_cache.as_deref_mut(),
                     module_path,
                 );
+            }
+            if let Some(callable) = callable_signature_from_state(call.func.as_ref(), vars)
+                && let Some(ret) = infer_call_return_from_callable_signature(
+                    call,
+                    callable,
+                    vars,
+                    func_map,
+                    imports,
+                    class_map,
+                    call_stack,
+                    diagnostics,
+                    hover_entries,
+                    record_hovers,
+                    source,
+                    module_cache.as_deref_mut(),
+                    module_path,
+                )
+            {
+                return ret.first().cloned();
             }
             if let Expr::Name(func_name) = call.func.as_ref() {
                 let torchop_shape = torch_op_to_shape(
@@ -2141,6 +2191,70 @@ fn shape_or_class_from_union(
         .unwrap_or((None, None))
 }
 
+fn is_named_module(expr: &Expr, imports: &Imports, module_name: &str) -> bool {
+    match expr {
+        Expr::Name(name) => {
+            name.id.as_str() == module_name || imports.is_module_alias(&name.id, module_name)
+        }
+        Expr::Attribute(_) => name_like(expr).as_deref() == Some(module_name),
+        _ => false,
+    }
+}
+
+fn is_callable_annotation_target(expr: &Expr, imports: &Imports) -> bool {
+    match expr {
+        Expr::Name(name) => {
+            name.id.as_str() == "Callable"
+                || matches!(
+                    imports.imported_symbol_from(&name.id, "typing"),
+                    Some(original) if original.as_str() == "Callable"
+                )
+                || matches!(
+                    imports.imported_symbol_from(&name.id, "collections.abc"),
+                    Some(original) if original.as_str() == "Callable"
+                )
+        }
+        Expr::Attribute(attr) => {
+            attr.attr.as_str() == "Callable"
+                && (is_named_module(attr.value.as_ref(), imports, "typing")
+                    || is_named_module(attr.value.as_ref(), imports, "collections.abc"))
+        }
+        _ => false,
+    }
+}
+
+fn callable_param_list_from_expr(
+    expr: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> Option<CallableParamList> {
+    match expr {
+        Expr::Constant(constant) if matches!(constant.value, Constant::Ellipsis) => {
+            Some(CallableParamList::Any)
+        }
+        Expr::List(list) => Some(CallableParamList::Exact(
+            list.elts
+                .iter()
+                .map(|elt| {
+                    parse_shape_annotation(elt)
+                        .or_else(|| shape_or_class_from_union(elt, imports, class_map).0)
+                })
+                .collect(),
+        )),
+        Expr::Tuple(tuple) => Some(CallableParamList::Exact(
+            tuple
+                .elts
+                .iter()
+                .map(|elt| {
+                    parse_shape_annotation(elt)
+                        .or_else(|| shape_or_class_from_union(elt, imports, class_map).0)
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
 fn tuple_shapes_from_annotation(
     ann: &Expr,
     imports: &Imports,
@@ -2174,6 +2288,69 @@ fn tuple_shapes_from_annotation(
     } else {
         None
     }
+}
+
+fn return_value_template_from_annotation(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> Option<ReturnValue> {
+    if let Some(ret_shape) = parse_shape_annotation(ann) {
+        Some(ReturnValue::from_shape(Some(ret_shape)))
+    } else if let Some(tuple_shapes) = tuple_shapes_from_annotation(ann, imports, class_map) {
+        Some(ReturnValue::from_tuple(tuple_shapes))
+    } else {
+        let (shape_union, _) = shape_or_class_from_union(ann, imports, class_map);
+        shape_union.map(|shape| ReturnValue::from_shape(Some(shape)))
+    }
+}
+
+fn callable_signature_from_single_annotation(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> Option<CallableSignature> {
+    let Expr::Subscript(sub) = ann else {
+        return None;
+    };
+    if !is_callable_annotation_target(sub.value.as_ref(), imports) {
+        return None;
+    }
+    let components: Vec<&Expr> = match &*sub.slice {
+        Expr::Tuple(tuple) => tuple.elts.iter().collect(),
+        other => vec![other],
+    };
+    if components.len() != 2 {
+        return None;
+    }
+    let params = callable_param_list_from_expr(components[0], imports, class_map)?;
+    let return_value = return_value_template_from_annotation(components[1], imports, class_map)?;
+    Some(CallableSignature {
+        params,
+        return_value,
+    })
+}
+
+fn callable_signature_from_annotation(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> Option<CallableSignature> {
+    let mut members = Vec::new();
+    union_members(ann, &mut members);
+    members
+        .into_iter()
+        .find_map(|member| callable_signature_from_single_annotation(member, imports, class_map))
+}
+
+fn annotation_metadata_from_expr(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> (Option<Shape>, Option<ClassRef>, Option<CallableSignature>) {
+    let (shape, class_ref) = shape_or_class_from_union(ann, imports, class_map);
+    let callable = callable_signature_from_annotation(ann, imports, class_map);
+    (shape, class_ref, callable)
 }
 
 fn annotation_bindings(annotated: &[String], actual: &[String]) -> Option<AnnotationBindings> {
@@ -2287,25 +2464,86 @@ fn annotated_return_from_expr(
     class_map: &ClassMap,
     bindings: &AnnotationBindings,
 ) -> Option<ReturnValue> {
-    if let Some(ret_shape) = parse_shape_annotation(ret_ann) {
-        Some(ReturnValue::from_shape(instantiate_optional_shape(
-            Some(ret_shape),
-            bindings,
-        )))
-    } else if let Some(tuple_shapes) = tuple_shapes_from_annotation(ret_ann, imports, class_map) {
-        Some(instantiate_annotation_return(
-            ReturnValue::from_tuple(tuple_shapes),
-            bindings,
-        ))
-    } else {
-        let (shape_union, _) = shape_or_class_from_union(ret_ann, imports, class_map);
-        shape_union
-            .map(|shape| ReturnValue::from_shape(instantiate_optional_shape(Some(shape), bindings)))
-    }
+    return_value_template_from_annotation(ret_ann, imports, class_map)
+        .map(|ret| instantiate_annotation_return(ret, bindings))
 }
 
 fn is_concrete_dim(dim: &str) -> bool {
     dim.parse::<i64>().is_ok()
+}
+
+fn callable_signature_from_state<'a>(
+    expr: &Expr,
+    vars: &'a HashMap<Identifier, VarState>,
+) -> Option<&'a CallableSignature> {
+    expr_var_key(expr)
+        .and_then(|name| vars.get(&name))
+        .and_then(|state| state.callable.as_ref())
+}
+
+fn infer_call_return_from_callable_signature(
+    call: &ExprCall<TextRange>,
+    signature: &CallableSignature,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    class_map: &ClassMap,
+    call_stack: &mut Vec<Identifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+    hover_entries: &mut Vec<(Range, HoverInfo)>,
+    record_hovers: bool,
+    source: &str,
+    mut module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> Option<ReturnValue> {
+    let mut bindings = AnnotationBindings::default();
+    let args: &[Option<Shape>] = match &signature.params {
+        CallableParamList::Exact(args) => args,
+        CallableParamList::Any => &[],
+    };
+    for (idx, arg_expr) in call.args.iter().enumerate() {
+        let inferred = infer_expr_shape(
+            arg_expr,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        );
+        if let Some(ann) = args.get(idx).and_then(|shape| shape.as_ref())
+            && let Some(shape) = inferred.as_ref()
+        {
+            if let Some(local_bindings) = annotation_bindings(&ann.dims, &shape.dims) {
+                bindings.merge_from(local_bindings);
+            } else {
+                diagnostics.push(Diagnostic {
+                    range: text_range_to_lsp(expr_text_range(arg_expr), source),
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: format!(
+                        "Shape mismatch: annotation {} vs inferred {}",
+                        ann.render(),
+                        shape.render()
+                    ),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+            }
+        }
+    }
+    Some(instantiate_annotation_return(
+        signature.return_value.clone(),
+        &bindings,
+    ))
 }
 
 /// Infer return shapes for a call, optionally simulating the callee body for diagnostics.
@@ -2386,6 +2624,17 @@ fn infer_call_return_from_info(
                         annotated: None,
                         inferred: Some(shape),
                         resolved_module: None,
+                        callable: callable_signature_from_state(arg_expr, vars).cloned(),
+                    },
+                );
+            } else if let Some(callable) = callable_signature_from_state(arg_expr, vars).cloned() {
+                arg_shapes.insert(
+                    param.def.arg.clone(),
+                    VarState {
+                        annotated: None,
+                        inferred: None,
+                        resolved_module: None,
+                        callable: Some(callable),
                     },
                 );
             } else if let Some(resolved_module) = resolved_module_from_expr(
@@ -2405,6 +2654,7 @@ fn infer_call_return_from_info(
                         annotated: None,
                         inferred: None,
                         resolved_module: Some(resolved_module.into_owned()),
+                        callable: None,
                     },
                 );
             }
@@ -2426,6 +2676,7 @@ fn infer_call_return_from_info(
                     annotated: None,
                     inferred: None,
                     resolved_module: Some(ResolvedModule::User(self_class_ref.clone())),
+                    callable: None,
                 },
             );
         }
@@ -2776,6 +3027,7 @@ fn infer_user_class_shape_from_base(
                     annotated: None,
                     inferred: Some(base_shape.clone()),
                     resolved_module: None,
+                    callable: None,
                 },
             );
             if param_offset > 0 {
@@ -2785,6 +3037,7 @@ fn infer_user_class_shape_from_base(
                         annotated: None,
                         inferred: None,
                         resolved_module: Some(ResolvedModule::User(class_ref.clone())),
+                        callable: None,
                     },
                 );
             }
@@ -2904,6 +3157,23 @@ fn infer_defined_call_return(
 ) -> Option<ReturnValue> {
     if report_unbound_self_diagnostic(call.func.as_ref(), vars, diagnostics, source) {
         return None;
+    }
+    if let Some(callable) = callable_signature_from_state(call.func.as_ref(), vars) {
+        return infer_call_return_from_callable_signature(
+            call,
+            callable,
+            vars,
+            func_map,
+            imports,
+            class_map,
+            call_stack,
+            diagnostics,
+            hover_entries,
+            record_hovers,
+            source,
+            module_cache.as_deref_mut(),
+            module_path,
+        );
     }
     if let Some(resolved_module) = resolved_module_from_expr(
         call.func.as_ref(),
@@ -3178,6 +3448,7 @@ fn assignment_shape_checks(
                     annotated: None,
                     inferred: Some(new_shape.clone()),
                     resolved_module: None,
+                    callable: None,
                 },
             );
             if record_hovers {
@@ -3213,6 +3484,7 @@ fn assignment_shape_checks(
                 annotated: None,
                 inferred: Some(new_shape.clone()),
                 resolved_module: None,
+                callable: None,
             },
         );
         if record_hovers {
@@ -3306,21 +3578,16 @@ fn seed_args_from_annotations(
     class_map: &ClassMap,
 ) {
     for arg in &args.args {
-        let ann_shape = arg
+        let (ann_shape, union_class, ann_callable) = arg
             .def
             .annotation
             .as_ref()
-            .and_then(|expr| parse_shape_annotation(expr.as_ref()));
-        let (union_shape, union_class) = arg
-            .def
-            .annotation
-            .as_ref()
-            .map(|ann| shape_or_class_from_union(ann.as_ref(), imports, class_map))
-            .unwrap_or((None, None));
+            .map(|ann| annotation_metadata_from_expr(ann.as_ref(), imports, class_map))
+            .unwrap_or((None, None, None));
         let range = text_range_to_lsp(arg.def.range, source);
         let provided_state = provided.as_ref().and_then(|p| p.get(&arg.def.arg));
         let state = VarState {
-            annotated: ann_shape.or(union_shape),
+            annotated: ann_shape,
             inferred: provided_state.and_then(|s| s.inferred.clone()),
             resolved_module: provided_state
                 .and_then(|s| s.resolved_module.clone())
@@ -3332,10 +3599,14 @@ fn seed_args_from_annotations(
                         .map(ResolvedModule::User)
                 })
                 .or_else(|| union_class.map(ResolvedModule::User)),
+            callable: ann_callable.or_else(|| provided_state.and_then(|s| s.callable.clone())),
         };
         let hover_shape = state_shape(&state).cloned();
 
-        if state.annotated.is_some() || state.inferred.is_some() || state.resolved_module.is_some()
+        if state.annotated.is_some()
+            || state.inferred.is_some()
+            || state.resolved_module.is_some()
+            || state.callable.is_some()
         {
             vars.insert(arg.def.arg.clone(), state);
             if record_hovers {

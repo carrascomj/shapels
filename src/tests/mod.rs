@@ -7,6 +7,7 @@ use shapels::Analysis;
 
 mod test_aggr;
 mod test_branch;
+mod test_callable;
 mod test_class;
 mod test_conv;
 mod test_dtype;

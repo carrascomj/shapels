@@ -522,6 +522,7 @@ fn shape_state(shape: crate::Shape) -> VarState {
         annotated: None,
         inferred: Some(shape),
         resolved_module: None,
+        callable: None,
     }
 }
 
@@ -530,6 +531,7 @@ fn module_state(resolved_module: ResolvedModule) -> VarState {
         annotated: None,
         inferred: None,
         resolved_module: Some(resolved_module),
+        callable: None,
     }
 }
 
