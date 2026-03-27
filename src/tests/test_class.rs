@@ -108,7 +108,7 @@ fn inference_propagates_to_annotated_self() {
 fn inference_emits_diagnostics_on_unknown_self() {
     let src = extract_test_case(PY_DATA, 13);
     let analysis = analyze_source(&src);
-    assert!(analysis.diagnostics.len() > 0);
+    assert!(!analysis.diagnostics.is_empty());
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn abstract_parameter_is_properly_multiplied() {
 fn abstract_parameter_emits_diag_with_wrong_shape() {
     let src = extract_test_case(PY_DATA, 16);
     let analysis = analyze_source_at_path(&src, Path::new("test_data/class.py"));
-    assert!(analysis.diagnostics.len() > 0);
+    assert!(!analysis.diagnostics.is_empty());
 }
 
 #[test]

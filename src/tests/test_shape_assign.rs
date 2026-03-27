@@ -231,3 +231,25 @@ fn range_arange_concrete_shapes() {
         "11"
     ));
 }
+
+#[test]
+fn reannotate_is_okay_alpha_equivalent_fn() {
+    let src = extract_test_case(PY_DATA, 16);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "x:", "B O A"));
+}
+
+#[test]
+fn reannotate_is_wrong_emit_diagnostics() {
+    let src = extract_test_case(PY_DATA, 17);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
+
+#[test]
+fn reannotate_is_okay_alpha_equivalent_inferred_return_fn() {
+    let src = extract_test_case(PY_DATA, 18);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+}

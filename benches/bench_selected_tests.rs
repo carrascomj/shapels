@@ -28,7 +28,7 @@ pub fn extract_test_case(py_data: &'static str, n: usize) -> String {
 }
 
 fn analyse_and_count_diagnostics(src: &str, path: &Path) -> usize {
-    let analysis = analyze_source_at_path(&src, path);
+    let analysis = analyze_source_at_path(src, path);
     analysis.diagnostics.len()
 }
 
@@ -37,7 +37,7 @@ fn analyse_cached_and_count_diagnostics(
     path: &Path,
     module_cache: &mut ModuleCache,
 ) -> usize {
-    let analysis = analyze_source_at_path_with_cache(&src, path, module_cache);
+    let analysis = analyze_source_at_path_with_cache(src, path, module_cache);
     analysis.diagnostics.len()
 }
 
@@ -45,7 +45,7 @@ fn parse_unet(c: &mut Criterion) {
     let path = Path::new("test_data/unet.py");
     let mut module_cache = ModuleCache::new();
     c.bench_function("Unet analysis", |b| {
-        b.iter(|| analyse_cached_and_count_diagnostics(PY_UNET_DATA, &path, &mut module_cache))
+        b.iter(|| analyse_cached_and_count_diagnostics(PY_UNET_DATA, path, &mut module_cache))
     });
 }
 
@@ -58,7 +58,7 @@ fn multifile_tests(c: &mut Criterion) {
             &test_idx,
             |b, &test_idx| {
                 let test_src = extract_test_case(PY_MULTIFILE_DATA, test_idx);
-                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), &path));
+                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), path));
             },
         );
     }
@@ -74,7 +74,7 @@ fn view_tests(c: &mut Criterion) {
             &test_idx,
             |b, &test_idx| {
                 let test_src = extract_test_case(PY_VIEW_DATA, test_idx);
-                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), &path));
+                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), path));
             },
         );
     }
@@ -90,7 +90,7 @@ fn ellipsis_multifile_tests(c: &mut Criterion) {
             &test_idx,
             |b, &test_idx| {
                 let test_src = extract_test_case(PY_VIEW_DATA, test_idx);
-                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), &path));
+                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), path));
             },
         );
     }
@@ -106,7 +106,7 @@ fn ellipsis_class_tests(c: &mut Criterion) {
             &test_idx,
             |b, &test_idx| {
                 let test_src = extract_test_case(PY_VIEW_DATA, test_idx);
-                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), &path));
+                b.iter(|| analyse_and_count_diagnostics(test_src.as_str(), path));
             },
         );
     }

@@ -141,7 +141,7 @@ fn boolean_runtime_index_is_properly_inferred() {
 fn wrong_boolean_runtime_index_emits_diagnostics() {
     let src = extract_test_case(INDEX_PY_DATA, 17);
     let analysis = analyze_source(&src);
-    assert!(analysis.diagnostics.len() > 0);
+    assert!(!analysis.diagnostics.is_empty());
 }
 
 #[test]

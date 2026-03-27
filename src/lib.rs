@@ -688,36 +688,17 @@ fn simulate_block(
                     }
                     if let (Some(ann), Some(inf)) = (ann_shape.as_ref(), inferred.as_ref())
                         && !shape_dims_equal(ann, inf)
+                        && !assignment_can_rename_annotation_dims(
+                            ann,
+                            inf,
+                            assign.value.as_deref(),
+                            vars,
+                            func_map,
+                            imports,
+                            module_cache.as_deref_mut(),
+                            module_path,
+                        )
                     {
-                        // If annotation is a shape-unroll, treat it as a rename rather than mismatch.
-                        if let Expr::Subscript(_sub) = &*assign.annotation
-                            && ann.dims.len() == inf.dims.len()
-                            && matches!(
-                                assign.value.as_deref(),
-                                Some(Expr::Name(_)) | Some(Expr::Attribute(_))
-                            )
-                        {
-                            let mut renamed = inf.clone();
-                            renamed.dims = ann.dims.clone();
-                            vars.insert(
-                                name.clone(),
-                                VarState {
-                                    annotated: ann_shape.clone(),
-                                    inferred: Some(renamed.clone()),
-                                    resolved_module: None,
-                                    callable: ann_callable.clone(),
-                                },
-                            );
-                            if record_hovers {
-                                push_assignment_hover(
-                                    hover_entries,
-                                    &assign.target,
-                                    source,
-                                    renamed,
-                                );
-                            }
-                            continue;
-                        }
                         diagnostics.push(Diagnostic {
                             range,
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -2176,19 +2157,40 @@ fn shape_or_class_from_union(
     imports: &Imports,
     class_map: &ClassMap,
 ) -> (Option<Shape>, Option<ClassRef>) {
+    let (shape, class_ref, _) = annotation_metadata_from_union(ann, imports, class_map);
+    (shape, class_ref)
+}
+
+fn annotation_metadata_from_union(
+    ann: &Expr,
+    imports: &Imports,
+    class_map: &ClassMap,
+) -> (Option<Shape>, Option<ClassRef>, Option<CallableSignature>) {
     let mut members = Vec::new();
     union_members(ann, &mut members);
-    members
-        .into_iter()
-        .find_map(|member| {
-            parse_shape_annotation(member)
-                .map(|shape| (Some(shape), None))
-                .or_else(|| {
-                    class_ref_from_annotation(member, imports, class_map)
-                        .map(|class_ref| (None, Some(class_ref)))
-                })
-        })
-        .unwrap_or((None, None))
+    let mut shape = None;
+    let mut class_ref = None;
+    let mut callable = None;
+
+    for member in members {
+        if shape.is_none() && class_ref.is_none() {
+            if let Some(member_shape) = parse_shape_annotation(member) {
+                shape = Some(member_shape);
+            } else if let Some(member_class_ref) =
+                class_ref_from_annotation(member, imports, class_map)
+            {
+                class_ref = Some(member_class_ref);
+            }
+        }
+        if callable.is_none() {
+            callable = callable_signature_from_single_annotation(member, imports, class_map);
+        }
+        if (shape.is_some() || class_ref.is_some()) && callable.is_some() {
+            break;
+        }
+    }
+
+    (shape, class_ref, callable)
 }
 
 fn is_named_module(expr: &Expr, imports: &Imports, module_name: &str) -> bool {
@@ -2331,26 +2333,12 @@ fn callable_signature_from_single_annotation(
     })
 }
 
-fn callable_signature_from_annotation(
-    ann: &Expr,
-    imports: &Imports,
-    class_map: &ClassMap,
-) -> Option<CallableSignature> {
-    let mut members = Vec::new();
-    union_members(ann, &mut members);
-    members
-        .into_iter()
-        .find_map(|member| callable_signature_from_single_annotation(member, imports, class_map))
-}
-
 fn annotation_metadata_from_expr(
     ann: &Expr,
     imports: &Imports,
     class_map: &ClassMap,
 ) -> (Option<Shape>, Option<ClassRef>, Option<CallableSignature>) {
-    let (shape, class_ref) = shape_or_class_from_union(ann, imports, class_map);
-    let callable = callable_signature_from_annotation(ann, imports, class_map);
-    (shape, class_ref, callable)
+    annotation_metadata_from_union(ann, imports, class_map)
 }
 
 fn annotation_bindings(annotated: &[String], actual: &[String]) -> Option<AnnotationBindings> {
@@ -2398,10 +2386,15 @@ fn bind_annotation_dim(
         return None;
     }
     if !is_concrete_dim(annotated) {
-        bindings
-            .dims
-            .entry(annotated.to_string())
-            .or_insert_with(|| actual.to_string());
+        if let Some(bound) = bindings.dims.get(annotated) {
+            if bound != actual {
+                return None;
+            }
+        } else {
+            bindings
+                .dims
+                .insert(annotated.to_string(), actual.to_string());
+        }
     }
     Some(())
 }
@@ -2466,6 +2459,177 @@ fn annotated_return_from_expr(
 ) -> Option<ReturnValue> {
     return_value_template_from_annotation(ret_ann, imports, class_map)
         .map(|ret| instantiate_annotation_return(ret, bindings))
+}
+
+fn call_allows_alpha_equivalent_annotation(
+    call: &ExprCall<TextRange>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> bool {
+    let callable_allows = callable_signature_from_state(call.func.as_ref(), vars)
+        .map(|signature| matches!(&signature.params, CallableParamList::Exact(args) if args.is_empty()))
+        .unwrap_or(false);
+    if callable_allows || imports.is_torch_nn_storage_constructor(call.func.as_ref()) {
+        return true;
+    }
+    match call.func.as_ref() {
+        Expr::Name(func_name) => {
+            if matches!(
+                TorchOp::as_call(&func_name.id, imports),
+                TorchOp::Creation { .. } | TorchOp::RangeOp(_)
+            ) {
+                return true;
+            }
+            if let Some(callee) = func_map.get(&func_name.id)
+                && function_info_allows_alpha_equivalent_annotation(callee)
+            {
+                return true;
+            }
+            if let Some((module_name, original)) = imports.from_imports.get(&func_name.id)
+                && let (Some(cache), Some(cur_path)) = (module_cache, module_path)
+                && let Some(module) = cache.get_module(module_name, cur_path)
+            {
+                return module
+                    .func_map
+                    .get(original)
+                    .map(function_info_allows_alpha_equivalent_annotation)
+                    .unwrap_or(false);
+            }
+            false
+        }
+        Expr::Attribute(attr) => {
+            if imports.is_torch_namespace_expr(attr.value.as_ref())
+                && matches!(
+                    TorchOp::from_attr(attr.attr.as_str()),
+                    TorchOp::Creation { .. } | TorchOp::RangeOp(_)
+                )
+            {
+                return true;
+            }
+            if let Expr::Name(module_ident) = attr.value.as_ref()
+                && let Some(module_name) = imports.module_aliases.get(&module_ident.id)
+                && module_name != "torch"
+                && let (Some(cache), Some(cur_path)) = (module_cache, module_path)
+                && let Some(module) = cache.get_module(module_name, cur_path)
+            {
+                return module
+                    .func_map
+                    .get(&attr.attr)
+                    .map(function_info_allows_alpha_equivalent_annotation)
+                    .unwrap_or(false);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn function_arg_has_shape_annotation(args: &Arguments, name: &Identifier) -> bool {
+    args.args.iter().any(|arg| {
+        arg.def.arg == *name
+            && arg
+                .def
+                .annotation
+                .as_deref()
+                .and_then(parse_shape_annotation)
+                .is_some()
+    })
+}
+
+fn body_has_annotated_tensor_return(body: &[Stmt], args: &Arguments) -> bool {
+    for stmt in body {
+        match stmt {
+            Stmt::Return(ret)
+                if ret
+                    .value
+                    .as_deref()
+                    .and_then(name_from_expr)
+                    .is_some_and(|name| function_arg_has_shape_annotation(args, &name)) =>
+            {
+                return true;
+            }
+            Stmt::If(if_stmt)
+                if body_has_annotated_tensor_return(&if_stmt.body, args)
+                    || body_has_annotated_tensor_return(&if_stmt.orelse, args) =>
+            {
+                return true;
+            }
+            Stmt::For(for_stmt)
+                if body_has_annotated_tensor_return(&for_stmt.body, args)
+                    || body_has_annotated_tensor_return(&for_stmt.orelse, args) =>
+            {
+                return true;
+            }
+            Stmt::While(while_stmt)
+                if body_has_annotated_tensor_return(&while_stmt.body, args)
+                    || body_has_annotated_tensor_return(&while_stmt.orelse, args) =>
+            {
+                return true;
+            }
+            Stmt::With(with_stmt) if body_has_annotated_tensor_return(&with_stmt.body, args) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn function_info_allows_alpha_equivalent_annotation(callee: &FunctionInfo) -> bool {
+    if callee.returns.is_some() || callee.args.args.is_empty() {
+        return true;
+    }
+    body_has_annotated_tensor_return(&callee.body, callee.args.as_ref())
+}
+
+fn assignment_value_allows_alpha_equivalent_annotation(
+    expr: &Expr,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> bool {
+    match expr {
+        Expr::Name(_) | Expr::Attribute(_) => true,
+        Expr::Call(call) => call_allows_alpha_equivalent_annotation(
+            call,
+            vars,
+            func_map,
+            imports,
+            module_cache,
+            module_path,
+        ),
+        _ => false,
+    }
+}
+
+fn assignment_can_rename_annotation_dims(
+    annotated: &Shape,
+    inferred: &Shape,
+    value: Option<&Expr>,
+    vars: &HashMap<Identifier, VarState>,
+    func_map: &FuncMap,
+    imports: &Imports,
+    module_cache: Option<&mut ModuleCache>,
+    module_path: Option<&Path>,
+) -> bool {
+    annotation_bindings(&annotated.dims, &inferred.dims).is_some()
+        && value
+            .map(|expr| {
+                assignment_value_allows_alpha_equivalent_annotation(
+                    expr,
+                    vars,
+                    func_map,
+                    imports,
+                    module_cache,
+                    module_path,
+                )
+            })
+            .unwrap_or(false)
 }
 
 fn is_concrete_dim(dim: &str) -> bool {
@@ -2578,6 +2742,7 @@ fn infer_call_return_from_info(
     for (idx, param) in callee_info.args.args.iter().enumerate().skip(param_offset) {
         let call_idx = idx.saturating_sub(param_offset);
         if let Some(arg_expr) = call.args.get(call_idx) {
+            let arg_callable = callable_signature_from_state(arg_expr, vars).cloned();
             if let Some(shape) = infer_expr_shape(
                 arg_expr,
                 vars,
@@ -2624,10 +2789,10 @@ fn infer_call_return_from_info(
                         annotated: None,
                         inferred: Some(shape),
                         resolved_module: None,
-                        callable: callable_signature_from_state(arg_expr, vars).cloned(),
+                        callable: arg_callable,
                     },
                 );
-            } else if let Some(callable) = callable_signature_from_state(arg_expr, vars).cloned() {
+            } else if let Some(callable) = arg_callable {
                 arg_shapes.insert(
                     param.def.arg.clone(),
                     VarState {

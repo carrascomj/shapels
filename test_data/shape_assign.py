@@ -143,3 +143,46 @@ def range_arange_concrete_shapes():
     range_two_args = torch.range(0, 10)
     range_point_one = torch.range(0, 10, 0.1)
     range_step_one_val = torch.range(0, 10, 1)
+
+# test 16
+import torch
+from jaxtyping import Float
+from torch import Tensor as T
+
+def some_fn():
+    B, X, Z = 2, 8, 16
+    return torch.zeros(B, X, Z)
+
+
+def reannotate_is_okay_alpha_equivalent_fn():
+    # this should be fine, equal number of dimensions
+    x: Float[T, "B O A"] = some_fn()
+
+
+# test 17
+import torch
+from jaxtyping import Float
+from torch import Tensor as T
+
+def some_mismatched_fn():
+    B, X, Z = 2, 8, 16
+    return torch.zeros(B, X, Z)
+
+
+def reannotate_is_wrong_not_alpha_equivalent_fn():
+    # this is not fine
+    x: Float[T, "B A"] = some_mismatched_fn()
+
+
+# test 18
+import torch
+from jaxtyping import Float
+from torch import Tensor as T
+
+def identity_function(x: Float[T, "B X A"]):
+    return x
+
+
+def reannotate_is_okay_alpha_equivalent_inferred_return_fn():
+    # this is not fine
+    x: Float[T, "B U I"] = identity_function(torch.zeros(5, 2, 9))
