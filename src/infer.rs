@@ -1448,7 +1448,7 @@ fn broadcastable_poswise(
 
 fn broadcast_dims(a: &[String], b: &[String]) -> Result<Vec<String>, String> {
     if a.is_empty() && b.is_empty() {
-        return Ok(vec!["".to_string()]);
+        return Ok(Vec::new());
     } else if a.is_empty() {
         return Ok(b.into());
     } else if b.is_empty() {

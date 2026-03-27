@@ -72,3 +72,14 @@ fn test_quantile_multi_q() {
     let (pat, expected) = ("z =", "3 2 1");
     assert!(is_hover_expected(&src, &analysis, pat, expected));
 }
+
+#[test]
+fn sum_dimension_0_after_matmul_t() {
+    for agg_fn in &AGGR_ALIASES {
+        let src = extract_test_case(VIEW_PY_DATA, 7).replace("mean", agg_fn);
+        let analysis = analyze_source(&src);
+        assert_eq!(analysis.diagnostics.len(), 0);
+        assert!(is_hover_expected(&src, &analysis, "q =", "mask_dim E"));
+        assert!(is_hover_expected(&src, &analysis, "out =", "E"));
+    }
+}

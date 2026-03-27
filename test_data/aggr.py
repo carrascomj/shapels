@@ -71,3 +71,15 @@ def quantile_multi_q():
     q = torch.tensor([0.25, 0.5, 0.75])
     z = torch.quantile(a, q, dim=1, keepdim=1)
     return z
+
+
+# test 7
+from jaxtyping import Float as F
+from torch import Tensor as T
+
+def sum_dimension_0_after_matmul_t(x: F[T, "N mask_dim"] , y: F[T, "N E"] ):
+    # this should be [mask_dim E] but it has an extra empty dim [ mask_dim E]
+    q = (x.T @ y)
+    # and this fails: instead of aggregating the mask_dim, it removes this empty dimension;
+    # in other words, out should be [E] but is [mask_dim E]
+    out = q.mean(0)
