@@ -26,7 +26,7 @@ use std::path::Path;
 mod broadcastable;
 pub use broadcastable::{ShapeOrExpr, infer_broadcastable_poswise};
 mod conv;
-pub use conv::{infer_conv, infer_conv_module};
+pub use conv::{infer_conv, infer_conv_module, infer_conv_transpose};
 mod index;
 pub use index::infer_index;
 mod pool;

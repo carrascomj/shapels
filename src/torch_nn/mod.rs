@@ -2,8 +2,8 @@ use crate::expr_tokens::{
     MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
 };
 use crate::infer::{
-    FlattenDims, PoolKind, Reduction, infer_batchnorm_module, infer_conv_module, infer_flatten,
-    infer_linear_module, infer_loss, infer_pool_module,
+    FlattenDims, PoolKind, Reduction, infer_batchnorm_module, infer_conv_module,
+    infer_conv_transpose, infer_flatten, infer_linear_module, infer_loss, infer_pool_module,
 };
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
@@ -30,16 +30,8 @@ pub(crate) enum TorchNNModule {
         dims: usize,
         num_features: Option<String>,
     },
-    Conv {
-        dims: usize,
-        in_channels: Option<String>,
-        out_channels: Option<String>,
-        kernel_size: Vec<String>,
-        stride: Vec<String>,
-        padding: Vec<String>,
-        dilation: Vec<String>,
-        groups: Option<String>,
-    },
+    Conv(ConvParams),
+    ConvTranspose(ConvParams),
     Pool {
         dims: usize,
         kind: PoolKind,
@@ -62,6 +54,69 @@ pub(crate) enum TorchNNModule {
     Noop,
     /// `torch.nn.Module` not implemented or unknown.
     Unknown,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConvParams {
+    pub dims: usize,
+    pub in_channels: Option<String>,
+    pub out_channels: Option<String>,
+    pub kernel_size: Vec<String>,
+    pub stride: Vec<String>,
+    pub padding: Vec<String>,
+    pub dilation: Vec<String>,
+    pub groups: Option<String>,
+    pub output_padding: Vec<String>,
+}
+
+impl ConvParams {
+    pub fn from_dim_call(dims: usize, call: &ExprCall, kind: ConvModuleKind) -> Self {
+        let output_padding_pos = kind.output_padding_pos();
+        Self {
+            dims,
+            in_channels: get_call_arg(call, "in_channels", 0).and_then(module_arg_token),
+            out_channels: get_call_arg(call, "out_channels", 1).and_then(module_arg_token),
+            kernel_size: get_call_arg(call, "kernel_size", 2)
+                .and_then(module_arg_tokens)
+                .unwrap_or_default(),
+            stride: get_call_arg(call, "stride", 3)
+                .and_then(module_arg_tokens)
+                .unwrap_or_default(),
+            padding: get_call_arg(call, "padding", 4)
+                .and_then(module_arg_tokens)
+                .unwrap_or_default(),
+            dilation: get_call_arg(call, "dilation", kind.dilation_pos())
+                .and_then(module_arg_tokens)
+                .unwrap_or_default(),
+            groups: get_call_arg(call, "groups", 6).and_then(module_arg_token),
+            output_padding: output_padding_pos
+                .and_then(|pos| get_call_arg(call, "output_padding", pos))
+                .and_then(module_arg_tokens)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ConvModuleKind {
+    Conv,
+    ConvTranspose,
+}
+
+impl ConvModuleKind {
+    fn dilation_pos(self) -> usize {
+        match self {
+            Self::Conv => 5,
+            Self::ConvTranspose => 8,
+        }
+    }
+
+    fn output_padding_pos(self) -> Option<usize> {
+        match self {
+            Self::Conv => None,
+            Self::ConvTranspose => Some(5),
+        }
+    }
 }
 
 pub(crate) fn module_from_constructor_call(
@@ -151,27 +206,20 @@ impl TorchNNModule {
             };
         }
 
+        if normalized.starts_with("convtranspose")
+            && let Some(dims) = parse_module_dims(&normalized, "convtranspose")
+        {
+            return Self::ConvTranspose(ConvParams::from_dim_call(
+                dims,
+                call,
+                ConvModuleKind::ConvTranspose,
+            ));
+        }
+
         if normalized.starts_with("conv")
             && let Some(dims) = parse_module_dims(&normalized, "conv")
         {
-            return Self::Conv {
-                dims,
-                in_channels: get_call_arg(call, "in_channels", 0).and_then(module_arg_token),
-                out_channels: get_call_arg(call, "out_channels", 1).and_then(module_arg_token),
-                kernel_size: get_call_arg(call, "kernel_size", 2)
-                    .and_then(module_arg_tokens)
-                    .unwrap_or_default(),
-                stride: get_call_arg(call, "stride", 3)
-                    .and_then(module_arg_tokens)
-                    .unwrap_or_default(),
-                padding: get_call_arg(call, "padding", 4)
-                    .and_then(module_arg_tokens)
-                    .unwrap_or_default(),
-                dilation: get_call_arg(call, "dilation", 5)
-                    .and_then(module_arg_tokens)
-                    .unwrap_or_default(),
-                groups: get_call_arg(call, "groups", 6).and_then(module_arg_token),
-            };
+            return Self::Conv(ConvParams::from_dim_call(dims, call, ConvModuleKind::Conv));
         }
 
         if let Some(pool) = pool_from_named_call(call, &normalized, PoolCallStyle::Module) {
@@ -254,7 +302,7 @@ impl TorchNNModule {
                 diagnostics,
                 source,
             ),
-            Self::Conv {
+            Self::Conv(ConvParams {
                 dims,
                 in_channels,
                 out_channels,
@@ -263,7 +311,8 @@ impl TorchNNModule {
                 padding,
                 dilation,
                 groups,
-            } => infer_conv_module(
+                ..
+            }) => infer_conv_module(
                 base_shape,
                 *dims,
                 in_channels.as_deref(),
@@ -277,6 +326,9 @@ impl TorchNNModule {
                 diagnostics,
                 source,
             ),
+            Self::ConvTranspose(params) => {
+                infer_conv_transpose(base_shape, params, range, diagnostics, source)
+            }
             Self::Pool {
                 dims,
                 kind,

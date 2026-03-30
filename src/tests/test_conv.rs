@@ -100,3 +100,47 @@ fn wrong_input_for_conv1d_module() {
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 1);
 }
+
+#[test]
+fn conv_transpose1d_module_with_concrete_dims() {
+    let src = extract_test_case(PY_DATA, 11);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "out =", "32 128 42"));
+}
+
+#[test]
+fn conv_transpose2d_module_with_mixed_dims() {
+    let src = extract_test_case(PY_DATA, 12);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "y =", "32 128 2*H 2*W"));
+}
+
+#[test]
+fn conv_transpose3d_module_with_concrete_dims() {
+    let src = extract_test_case(PY_DATA, 13);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "y =", "2 8 39 93 9"));
+}
+
+#[test]
+fn conv_transpose3d_module_with_mixed_dims() {
+    let src = extract_test_case(PY_DATA, 14);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "y =",
+        "2 8 2*D 3*H+5 W-2"
+    ));
+}
+
+#[test]
+fn wrong_input_for_conv_transpose1d_module() {
+    let src = extract_test_case(PY_DATA, 15);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}
