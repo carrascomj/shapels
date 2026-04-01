@@ -7,7 +7,7 @@ use phf::{Map, Set};
 use phf_macros::{phf_map, phf_set};
 use rustpython_parser::ast::{Expr, Identifier, Stmt, StmtImportFrom};
 
-use crate::infer::Transpose;
+use crate::infer::{LossExpectedInputs, Transpose};
 use crate::torch_nn::known_nn_modules::NOOP_NN_MODULES;
 
 /// Torch functions and operations whose inference is supported.
@@ -44,7 +44,10 @@ pub enum TorchOp {
     /// Conv1d, Conv2d, Conv3d
     Conv(usize),
     /// Losses from `torch.nn.functional`.
-    Loss { reduction_arg_pos: usize },
+    Loss {
+        reduction_arg_pos: usize,
+        expected: LossExpectedInputs,
+    },
     /// Pooling ops from `torch.nn.functional`.
     Pool { func_name: &'static str },
     /// `torch.repeat`
@@ -98,9 +101,10 @@ impl TorchOp {
             Self::Conv(3)
         } else if let Some(func_name) = POOL_FUNCTIONS.get_key(attr_name).copied() {
             Self::Pool { func_name }
-        } else if let Some(reduction_arg_pos) = LOSS_FUNCTIONS.get(attr_name) {
+        } else if let Some(&(reduction_arg_pos, expected)) = LOSS_FUNCTIONS.get(attr_name) {
             Self::Loss {
-                reduction_arg_pos: *reduction_arg_pos,
+                reduction_arg_pos,
+                expected,
             }
         } else if attr_name == "repeat" {
             Self::Repeat
@@ -208,10 +212,15 @@ impl TorchOp {
 
     fn loss_from_alias(func_name_id: &Identifier, imports: &Imports) -> Option<Self> {
         LOSS_FUNCTIONS.keys().find_map(|loss_name| {
-            Self::is_alias_of(loss_name, func_name_id, imports).then(|| Self::Loss {
-                reduction_arg_pos: *LOSS_FUNCTIONS
+            Self::is_alias_of(loss_name, func_name_id, imports).then(|| {
+                let (reduction_arg_pos, expected) = *LOSS_FUNCTIONS
                     .get(loss_name)
-                    .expect("loss key must be present in LOSS_FUNCTIONS"),
+                    .expect("loss key must be present in LOSS_FUNCTIONS");
+
+                Self::Loss {
+                    reduction_arg_pos,
+                    expected,
+                }
             })
         })
     }
@@ -441,28 +450,28 @@ pub static POOL_FUNCTIONS: Set<&'static str> = phf_set![
 /// [Losses in `torch.nn.functional`](https://docs.pytorch.org/docs/stable/nn.functional.html#loss-functions).
 ///
 /// They're mapped to the position of the argument `reduction` in each case.
-pub static LOSS_FUNCTIONS: Map<&'static str, usize> = phf_map![
-    "l1_loss" => 4,
-    "mse_loss" => 4,
-    "cross_entropy" => 6,
-    "ctc_loss" => 5,
-    "nll_loss" => 6,
-    "poisson_nll_loss" => 7,
-    "gaussian_nll_loss" => 5,
-    "kl_div" => 4,
-    "binary_cross_entropy" => 5,
-    "binary_cross_entropy_with_logits" => 5,
-    "margin_ranking_loss" => 6,
-    "hinge_embedding_loss" => 5,
-    "multilabel_margin_loss" => 4,
-    "huber_loss" => 2,
-    "smooth_l1_loss" => 4,
-    "soft_margin_loss" => 4,
-    "multilabel_soft_margin_loss" => 5,
-    "cosine_embedding_loss" => 6,
-    "multi_margin_loss" => 7,
-    "triplet_margin_loss" => 9,
-    "triplet_margin_with_distance_loss" => 6,
+pub static LOSS_FUNCTIONS: Map<&'static str, (usize, LossExpectedInputs)> = phf_map![
+    "l1_loss" => (4, LossExpectedInputs::const_default()),
+    "mse_loss" => (4, LossExpectedInputs::const_default()),
+    "cross_entropy" => (6, LossExpectedInputs::NllLike),
+    "ctc_loss" => (5, LossExpectedInputs::Ctc),
+    "nll_loss" => (6, LossExpectedInputs::NllLike),
+    "poisson_nll_loss" => (7, LossExpectedInputs::const_default()),
+    "gaussian_nll_loss" => (5, LossExpectedInputs::const_default()),
+    "kl_div" => (4, LossExpectedInputs::const_default()),
+    "binary_cross_entropy" => (5, LossExpectedInputs::const_default()),
+    "binary_cross_entropy_with_logits" => (5, LossExpectedInputs::const_default()),
+    "margin_ranking_loss" => (6, LossExpectedInputs::equal(0, 1, 3)),
+    "hinge_embedding_loss" => (5, LossExpectedInputs::const_default()),
+    "multilabel_margin_loss" => (4, LossExpectedInputs::equal(1, 2, 2)),
+    "huber_loss" => (2, LossExpectedInputs::const_default()),
+    "smooth_l1_loss" => (4, LossExpectedInputs::const_default()),
+    "soft_margin_loss" => (4, LossExpectedInputs::const_default()),
+    "multilabel_soft_margin_loss" => (5, LossExpectedInputs::equal(2, 2, 2)),
+    "cosine_embedding_loss" => (6, LossExpectedInputs::CosineEmbedding),
+    "multi_margin_loss" => (7, LossExpectedInputs::NllLike),
+    "triplet_margin_loss" => (9, LossExpectedInputs::Triplet),
+    "triplet_margin_with_distance_loss" => (6, LossExpectedInputs::TripletDistance),
 ];
 
 pub static TORCH_DTYPES: Set<&'static str> = phf_set![

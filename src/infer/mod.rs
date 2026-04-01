@@ -9,7 +9,6 @@
 #![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
 use crate::expr_tokens::{DIM_TOKEN_OPTIONS, expr_to_symbolic_token};
 use crate::op_groups::{RangeOps, SimpleDtype};
-use crate::torch_nn::get_call_arg;
 use crate::{
     ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg,
     get_dtype,
@@ -27,6 +26,8 @@ mod broadcastable;
 pub use broadcastable::{ShapeOrExpr, infer_broadcastable_poswise};
 mod conv;
 pub use conv::{infer_conv, infer_conv_module, infer_conv_transpose};
+mod loss;
+pub use loss::{LossExpectedInputs, LossParams, Reduction, infer_loss};
 mod index;
 pub use index::infer_index;
 mod pool;
@@ -57,16 +58,6 @@ fn expr_to_int(expr: &Expr, dims_len: Option<usize>) -> Option<i64> {
         }
         _ => None,
     }
-}
-
-pub fn shape_dims_equal(a: &Shape, b: &Shape) -> bool {
-    a.dims.iter().zip(b.dims.iter()).all(|(left, right)| {
-        match (left.parse::<i32>().is_ok(), right.parse::<i32>().is_ok()) {
-            (true, true) => left == right,
-            (false, false) => left == right,
-            _ => true,
-        }
-    })
 }
 
 fn concrete_dim_mismatch(actual: &str, expected: &str) -> bool {
@@ -1223,41 +1214,4 @@ pub fn infer_take(
         }
     }
     Some(index_shape)
-}
-
-/// Reduction argument for a [loss](https://docs.pytorch.org/docs/stable/nn.html#loss-functions).
-#[derive(Clone, Debug)]
-pub enum Reduction {
-    /// "none"
-    None,
-    /// any other ("mean", "sum")
-    Some,
-}
-
-impl Reduction {
-    pub fn loss_from_args(call: &ExprCall, reduction_arg_pos: usize) -> Reduction {
-        if let Some(Expr::Constant(ExprConstant {
-            value: Constant::Str(s),
-            ..
-        })) = get_call_arg(call, "reduction", reduction_arg_pos)
-            && s == "none"
-        {
-            Reduction::None
-        } else {
-            // default is "mean" (Some)
-            Reduction::Some
-        }
-    }
-}
-
-/// Infer a call to a loss (e. g., `torch.nn.MSELoss` or functional), either a NoOp
-/// or a reduction to a number.
-pub fn infer_loss(base_shape: Option<Shape>, reduction: &Reduction) -> Option<Shape> {
-    match reduction {
-        Reduction::None => base_shape,
-        Reduction::Some => Some(Shape {
-            dtype: base_shape.and_then(|sh| sh.dtype),
-            dims: Vec::new(),
-        }),
-    }
 }

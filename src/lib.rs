@@ -21,7 +21,7 @@ use crate::infer::{
     infer_condition, infer_conv, infer_creation_size, infer_flatten, infer_index, infer_loss,
     infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_repeat,
     infer_repeat_interleave, infer_squeeze, infer_take, infer_to, infer_unary_dtype,
-    infer_unsqueeze, infer_view_like, shape_dims_equal,
+    infer_unsqueeze, infer_view_like,
 };
 pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
@@ -33,7 +33,13 @@ pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
 use crate::torch_nn::functional_pool_from_call;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+/// Shape of a tensor that is shown on hovers and is used to run inference.
+///
+/// Equality of two `Shape`s means that they have the same lenght of dims
+/// and the dims are element-wise the same except when abstract
+/// and concrete types are mixed, which is always fine (dtype is not involved in
+/// checking [`PartialEq`]).
 pub struct Shape {
     pub dtype: Option<String>,
     pub dims: Vec<String>,
@@ -45,6 +51,31 @@ impl Shape {
     }
     pub fn dim_string(&self) -> String {
         self.dims.join(" ")
+    }
+}
+
+/// Check that each dim element in `a` exactly matches `b` except when abstract
+/// and concrete types are mixed, which is always fine.
+pub fn dims_equal(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(left, right)| {
+            match (left.parse::<i32>().is_ok(), right.parse::<i32>().is_ok()) {
+                (true, true) => left == right,
+                (false, false) => left == right,
+                _ => true,
+            }
+        })
+}
+
+impl PartialEq<Shape> for Shape {
+    fn eq(&self, other: &Shape) -> bool {
+        dims_equal(self.dims.as_slice(), other.dims.as_slice())
+    }
+}
+
+impl PartialEq<&[String]> for Shape {
+    fn eq(&self, other: &&[String]) -> bool {
+        dims_equal(self.dims.as_slice(), other)
     }
 }
 
@@ -687,7 +718,7 @@ fn simulate_block(
                         }
                     }
                     if let (Some(ann), Some(inf)) = (ann_shape.as_ref(), inferred.as_ref())
-                        && !shape_dims_equal(ann, inf)
+                        && ann != inf
                         && !assignment_can_rename_annotation_dims(
                             ann,
                             inf,
@@ -2011,7 +2042,7 @@ fn torch_op_to_shape(
             let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;
             lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_conv(shape, kernel.dims, call, d, diagnostics, source))
         }
-        (TorchOp::Loss { reduction_arg_pos }, _, _, Function) => {
+        (TorchOp::Loss { reduction_arg_pos, expected }, _, _, Function) => {
             let base_shape = infer_call_base_shape(
                 call,
                 vars,
@@ -2027,7 +2058,7 @@ fn torch_op_to_shape(
                 module_path,
             )?;
             let reduction = Reduction::loss_from_args(call, reduction_arg_pos);
-            infer_loss(Some(base_shape), &reduction)
+            infer_loss(base_shape, &reduction, &expected, call, vars, func_map, imports, class_map, call_stack, diagnostics, hover_entries, source, module_cache.as_deref_mut(), module_path)
         }
         (TorchOp::Pool { func_name }, _, _, Function) => {
             let pool = functional_pool_from_call(call, func_name)?;
@@ -2046,6 +2077,7 @@ fn torch_op_to_shape(
                 module_path,
             )?;
             pool.infer_builtin_module(
+                call,
                 base_shape,
                 vars,
                 func_map,
@@ -2983,6 +3015,7 @@ fn infer_user_class_member_call_return(
 }
 
 pub(crate) fn infer_resolved_module_shape(
+    call: &ExprCall<TextRange>,
     resolved_module: &ResolvedModule,
     base_shape: Shape,
     vars: &HashMap<Identifier, VarState>,
@@ -3014,6 +3047,7 @@ pub(crate) fn infer_resolved_module_shape(
             module_path,
         ),
         ResolvedModule::Builtin(module) => module.infer_builtin_module(
+            call,
             base_shape,
             vars,
             func_map,
@@ -3094,6 +3128,7 @@ fn infer_builtin_module_call_return(
     )?;
     module
         .infer_builtin_module(
+            call,
             base_shape,
             vars,
             func_map,

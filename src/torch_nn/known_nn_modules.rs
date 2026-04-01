@@ -1,6 +1,8 @@
 use phf::{Map, Set};
 use phf_macros::{phf_map, phf_set};
 
+use crate::infer::LossExpectedInputs;
+
 /// Builtin `torch.nn.Module`s that are safe to treat as shape no-ops.
 ///
 /// This list intentionally excludes:
@@ -62,27 +64,28 @@ pub static NOOP_NN_MODULES: Set<&'static str> = phf_set![
 /// [Losses in `torch.nn`](https://docs.pytorch.org/docs/stable/nn.html#loss-functions).
 ///
 /// They're mapped to the position of the argument "reduction" in each case.
-pub static LOSS_MODULES: Map<&'static str, usize> = phf_map![
-    "L1Loss" => 2,
-    "MSELoss" => 2,
-    "CrossEntropyLoss" => 4,
-    "CTCLoss" => 1,
-    "NLLLoss" => 4,
-    "PoissonNLLLoss" => 5,
+pub static LOSS_MODULES: Map<&'static str, (usize, LossExpectedInputs)> = phf_map![
+    "L1Loss" => (2, LossExpectedInputs::const_default()),
+    "MSELoss" => (2, LossExpectedInputs::const_default()),
+    "CrossEntropyLoss" => (4, LossExpectedInputs::NllLike),
+    "CTCLoss" => (1, LossExpectedInputs::Ctc),
+    "NLLLoss" => (4, LossExpectedInputs::NllLike),
+    "PoissonNLLLoss" => (5, LossExpectedInputs::const_default()),
     // this is by named arg only, but that's a task for a generalist LSP
-    "GaussianNLLLoss" => 2,
-    "KLDivLoss" => 2,
-    "BCELoss" => 3,
-    "BCEWithLogitsLoss" => 3,
-    "MarginRankingLoss" => 3,
-    "HingeEmbeddingLoss" => 3,
-    "MultiLabelMarginLoss" => 2,
-    "HuberLoss" => 0,
-    "SmoothL1Loss" => 2,
-    "SoftMarginLoss" => 2,
-    "MultiLabelSoftMarginLoss" => 3,
-    "CosineEmbeddingLoss" => 3,
-    "MultiMarginLoss" => 5,
-    "TripletMarginLoss" => 6,
-    "TripletMarginWithDistanceLoss" => 3,
+    "GaussianNLLLoss" => (2, LossExpectedInputs::const_default()),
+    "KLDivLoss" => (2, LossExpectedInputs::const_default()),
+    "BCELoss" => (3, LossExpectedInputs::const_default()),
+    "BCEWithLogitsLoss" => (3, LossExpectedInputs::const_default()),
+    "MarginRankingLoss" => (3, LossExpectedInputs::equal(0, 1, 3)),
+    "HingeEmbeddingLoss" => (3, LossExpectedInputs::const_default()),
+    "MultiLabelMarginLoss" => (2, LossExpectedInputs::equal(1, 2, 2)),
+    "HuberLoss" => (0, LossExpectedInputs::const_default()),
+    "SmoothL1Loss" => (2, LossExpectedInputs::const_default()),
+    "SoftMarginLoss" => (2, LossExpectedInputs::const_default()),
+    "MultiLabelSoftMarginLoss" => (3, LossExpectedInputs::equal(2, 2, 2)),
+    "CosineEmbeddingLoss" => (3, LossExpectedInputs::CosineEmbedding),
+    // TODO(carrascomj): without the dK part
+    "MultiMarginLoss" => (5, LossExpectedInputs::NllLike),
+    "TripletMarginLoss" => (6, LossExpectedInputs::Triplet),
+    "TripletMarginWithDistanceLoss" => (3, LossExpectedInputs::TripletDistance),
 ];

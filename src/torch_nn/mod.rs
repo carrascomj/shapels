@@ -2,7 +2,7 @@ use crate::expr_tokens::{
     MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
 };
 use crate::infer::{
-    FlattenDims, PoolKind, Reduction, infer_batchnorm_module, infer_conv_module,
+    FlattenDims, LossParams, PoolKind, Reduction, infer_batchnorm_module, infer_conv_module,
     infer_conv_transpose, infer_flatten, infer_linear_module, infer_loss, infer_pool_module,
 };
 use crate::module_resolution::{
@@ -46,9 +46,7 @@ pub(crate) enum TorchNNModule {
     },
     Sequential(Vec<ResolvedModule>),
     Flatten(FlattenDims<'static>),
-    Loss {
-        reduction: Reduction,
-    },
+    Loss(LossParams),
     /// `torch.nn.Module` that do not change shapes and do not require
     /// custom checks (or the checks are not yet implemented).
     Noop,
@@ -254,10 +252,13 @@ impl TorchNNModule {
             });
         }
 
-        if let Some(reduction_arg_pos) = known_nn_modules::LOSS_MODULES.get(constructor_name) {
-            return Self::Loss {
+        if let Some((reduction_arg_pos, expected_inputs)) =
+            known_nn_modules::LOSS_MODULES.get(constructor_name)
+        {
+            return Self::Loss(LossParams {
                 reduction: Reduction::loss_from_args(call, *reduction_arg_pos),
-            };
+                expected: *expected_inputs,
+            });
         }
 
         if known_nn_modules::NOOP_NN_MODULES.contains(constructor_name) {
@@ -269,6 +270,7 @@ impl TorchNNModule {
 
     pub(crate) fn infer_builtin_module(
         &self,
+        call: &ExprCall<TextRange>,
         base_shape: Shape,
         vars: &HashMap<Identifier, VarState>,
         func_map: &FuncMap,
@@ -360,6 +362,7 @@ impl TorchNNModule {
                 let mut current = base_shape;
                 for module in modules {
                     current = infer_resolved_module_shape(
+                        call,
                         module,
                         current,
                         vars,
@@ -380,7 +383,25 @@ impl TorchNNModule {
             Self::Flatten(flatten_dims) => {
                 infer_flatten(base_shape, &range, flatten_dims, diagnostics, source)
             }
-            Self::Loss { reduction } => infer_loss(Some(base_shape), reduction),
+            Self::Loss(LossParams {
+                reduction,
+                expected,
+            }) => infer_loss(
+                base_shape,
+                reduction,
+                expected,
+                call,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                source,
+                module_cache,
+                module_path,
+            ),
             Self::Noop | Self::Unknown => Some(base_shape),
         }
     }
