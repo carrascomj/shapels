@@ -1,6 +1,6 @@
 [package]
 name = "shapels"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 description = "Shape inference for torch on your editor"
 license = "Apache-2.0 OR MIT"
