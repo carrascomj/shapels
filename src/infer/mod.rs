@@ -1079,6 +1079,10 @@ fn base_shape_or_diag(
 /// in the arguments (possibly only a value for `input` and `other`) match.
 ///
 /// Also, the base_expr `condition` must be of dtype `bool`.
+///
+/// The inferred shape is of any dtype found in the `input` and `other`, by default, `Float`.
+/// At runtime, there is coercion to most precision and from integer to floats when
+/// `input.dtype != other.dtype`, but this is not model for now.
 pub fn infer_condition(
     base_expr: &Expr,
     call: &ExprCall<TextRange>,
@@ -1109,6 +1113,8 @@ pub fn infer_condition(
         module_cache.as_deref_mut(),
         module_path,
     );
+    // TODO(carrascomj): coercion of dtypes to the most precise and floaty.
+    let mut dtype = Some("Float".to_string());
     if let Some(base_shape) = maybe_base_shape.as_ref() {
         if let Some(SimpleDtype::Float | SimpleDtype::Int { .. }) = base_shape
             .dtype
@@ -1150,23 +1156,29 @@ pub fn infer_condition(
                             )
                         },
                     )
-                && arg_shape.dims != base_shape.dims
             {
-                push_error_diagnostic(
-                    diagnostics,
-                    expr_text_range(arg_expr),
-                    source,
-                    format!(
-                        "Condition vs {} must have the same shape: {} vs {}",
-                        arg_name,
-                        arg_shape.render(),
-                        base_shape.render()
-                    ),
-                )
+                if arg_shape.dims != base_shape.dims {
+                    push_error_diagnostic(
+                        diagnostics,
+                        expr_text_range(arg_expr),
+                        source,
+                        format!(
+                            "Condition vs {} must have the same shape: {} vs {}",
+                            arg_name,
+                            arg_shape.render(),
+                            base_shape.render()
+                        ),
+                    )
+                } else {
+                    dtype = arg_shape.dtype;
+                }
             }
         }
     }
-    maybe_base_shape
+    Some(Shape {
+        dtype,
+        dims: maybe_base_shape.map(|x| x.dims).unwrap_or_default(),
+    })
 }
 
 pub fn infer_take(

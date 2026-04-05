@@ -2,7 +2,7 @@
 //! require bound checks for the dimension if present.
 
 use crate::analyze_source;
-use crate::tests::{extract_test_case, is_hover_expected};
+use crate::tests::{extract_test_case, is_hover_dtype, is_hover_expected};
 use lsp_types::Position;
 
 const NOOP_PY_DATA: &str = include_str!("../../test_data/noop.py");
@@ -49,4 +49,11 @@ fn where_invalid_cases() {
     let src = extract_test_case(NOOP_PY_DATA, 4);
     let analysis = analyze_source(&src);
     assert_eq!(analysis.diagnostics.len(), 5);
+}
+
+#[test]
+fn where_inherits_dtype() {
+    let src = extract_test_case(NOOP_PY_DATA, 5);
+    let analysis = analyze_source(&src);
+    is_hover_dtype(src.as_str(), &analysis, "out_2 =", "torch.float16");
 }

@@ -57,3 +57,14 @@ def where_invalid_cases(x: Bool[T, "B X Y"], input: F[T, "B X Y"], other: F[T, "
     other_value = 32
     out_3 = torch.where(x.int(), input_wrong, 39)
     out_3 = x.int().where(input_wrong, 39)
+
+
+# test 5
+from jaxtyping import Float as F, Bool
+from torch import Tensor as T
+
+def where_default_dtype():
+    B, X, Y = 2, 5, 32
+    x = torch.Tensor(B, X, Y, dtype=torch.float16)
+    out_2 = torch.where(x > 4, x, -x)
+    return out_2
