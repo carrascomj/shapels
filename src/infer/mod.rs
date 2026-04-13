@@ -6,21 +6,18 @@
 //! However, in functions like (un)squeeze or reduce ops, shapels parses dim as i16 because
 //! i64 is excessive for operations that relate to the number of dimensions and
 //! not the dimenions themselves. This should be revisited if bugs come.
-#![allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
+#![allow(clippy::too_many_arguments)]
+use crate::context::ContextRef;
 use crate::expr_tokens::{DIM_TOKEN_OPTIONS, expr_to_symbolic_token};
 use crate::op_groups::{RangeOps, SimpleDtype};
-use crate::{
-    ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range, get_arg,
-    get_dtype,
-};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
+use crate::{Imports, Shape, VarState, expr_text_range, get_arg, get_dtype};
+use lsp_types::{Diagnostic, DiagnosticSeverity};
 use rustpython_parser::ast::{
     self, Constant, Expr, ExprCall, ExprConstant, ExprName, ExprSubscript, ExprUnaryOp, Identifier,
 };
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::path::Path;
 
 mod broadcastable;
 pub use broadcastable::{ShapeOrExpr, infer_broadcastable_poswise};
@@ -39,7 +36,7 @@ pub use squeeze::{infer_squeeze, infer_unsqueeze};
 mod view;
 pub use view::{Transpose, infer_permute, infer_view_like};
 
-use crate::{infer_expr_shape, lookup_shape, text_range_to_lsp};
+use crate::text_range_to_lsp;
 
 /// Specific to index/permute/transpose/etc. that need negative indexing normalization.
 fn expr_to_int(expr: &Expr, dims_len: Option<usize>) -> Option<i64> {
@@ -137,67 +134,17 @@ fn product_token(tokens: &[String]) -> String {
 pub fn infer_matmul_shapes(
     left: &Expr,
     right: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
     whole_range: TextRange,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let left_shape = lookup_shape(left, vars, hover_entries, record_hovers, source).or_else(|| {
-        infer_expr_shape(
-            left,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            false,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
-        )
-    });
-    let right_shape =
-        lookup_shape(right, vars, hover_entries, record_hovers, source).or_else(|| {
-            infer_expr_shape(
-                right,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        });
+    let left_shape = context.lookup_or_infer(left, record_hovers);
+    let right_shape = context.lookup_or_infer(right, record_hovers);
     match (left_shape, right_shape) {
         (Some(l), Some(r)) => match matmul(&l, &r) {
             Ok(shape) => Some(shape),
             Err(msg) => {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(whole_range, source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: msg,
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(whole_range, DiagnosticSeverity::ERROR, msg);
                 None
             }
         },
@@ -597,41 +544,26 @@ pub fn infer_to(
 pub fn infer_range_size(
     call: &ExprCall<TextRange>,
     range_op: RangeOps,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
     // helper function
-    let push_diag = |diag: &mut Vec<_>, range, msg: &str| {
-        diag.push(Diagnostic {
-            range: text_range_to_lsp(range, source),
-            severity: Some(DiagnosticSeverity::INFORMATION),
-            code: None,
-            code_description: None,
-            source: Some("shapels".into()),
-            message: msg.into(),
-            related_information: None,
-            tags: None,
-            data: None,
-        })
+    let push_diag = |context: &mut ContextRef<'_>, range, msg: &str| {
+        context.push_diagnostic_text(range, DiagnosticSeverity::INFORMATION, msg.into())
+    };
+    let parse_dim = |expr: &Expr, context: &mut ContextRef<'_>| {
+        let (vars, diagnostics, source) = context.vars_diagnostics_source();
+        expr_to_dim_token(expr, vars, diagnostics, source, &mut false).map(Cow::into_owned)
     };
 
-    if let Some(dim) = match range_op {
+    let dim_expr = match range_op {
         RangeOps::Randperm => get_arg(call, "n", 0).map(Cow::Borrowed).or_else(|| {
-            push_diag(diagnostics, call.range, "Failed shape init: `n` arg");
+            push_diag(&mut context, call.range, "Failed shape init: `n` arg");
             None
         }),
         RangeOps::Linspace | RangeOps::Logspace => {
             get_arg(call, "steps", 2).map(Cow::Borrowed).or_else(|| {
-                push_diag(diagnostics, call.range, "Failed shape init: `steps`");
+                push_diag(&mut context, call.range, "Failed shape init: `steps`");
                 None
             })
         }
@@ -656,19 +588,11 @@ pub fn infer_range_size(
                 start_expr = None;
             }
             let start = start_expr
-                .and_then(|expr| {
-                    expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
-                        .map(Cow::into_owned)
-                })
+                .and_then(|expr| parse_dim(expr, &mut context))
                 .unwrap_or_else(|| "0".to_string());
-            let end = end_expr.and_then(|expr| {
-                expr_to_dim_token(expr, vars, diagnostics, source, &mut false).map(Cow::into_owned)
-            });
+            let end = end_expr.and_then(|expr| parse_dim(expr, &mut context));
             let step = step_expr
-                .and_then(|expr| {
-                    expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
-                        .map(Cow::into_owned)
-                })
+                .and_then(|expr| parse_dim(expr, &mut context))
                 .unwrap_or_else(|| "1".to_string());
             if let Some(end) = end {
                 let is_range = range_op == RangeOps::Range;
@@ -704,41 +628,31 @@ pub fn infer_range_size(
                 None
             }
         }
-    }
-    .as_deref()
-    .and_then(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut false))
-    .or_else(|| {
-        push_diag(
-            diagnostics,
-            call.range,
-            "Argument was not understood as shape",
-        );
-        None
-    }) {
+    };
+    let dim = dim_expr
+        .as_deref()
+        .and_then(|expr| parse_dim(expr, &mut context))
+        .or_else(|| {
+            push_diag(
+                &mut context,
+                call.range,
+                "Argument was not understood as shape",
+            );
+            None
+        });
+    if let Some(dim) = dim {
         let dtype = get_arg(call, "dtype", range_op.dtype_arg_pos()).and_then(|expr| {
             // dtype as torch.Tensor.dtype
             let attr_dtype = if matches!(expr, Expr::Attribute(_)) {
-                infer_expr_shape(
-                    expr,
-                    vars,
-                    func_map,
-                    imports,
-                    class_map,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    module_cache.as_deref_mut(),
-                    module_path,
-                )
-                .and_then(|shape| shape.dtype)
+                context
+                    .infer_shape(expr, record_hovers)
+                    .and_then(|shape| shape.dtype)
             } else {
                 None
             };
-            attr_dtype.or_else(|| get_dtype(expr, imports).map(|x| x.to_string()))
+            attr_dtype.or_else(|| get_dtype(expr, context.imports).map(|x| x.to_string()))
         });
-        let dims = vec![dim.into_owned()];
+        let dims = vec![dim];
         Some(Shape { dtype, dims })
     } else {
         None
@@ -1028,47 +942,18 @@ pub fn infer_unary_dtype(
 
 fn base_shape_or_diag(
     base_expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let maybe_base_shape = lookup_shape(base_expr, vars, hover_entries, record_hovers, source)
-        .or_else(|| {
-            infer_expr_shape(
-                base_expr,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        });
+    let maybe_base_shape = context
+        .lookup_shape(base_expr, record_hovers)
+        .or_else(|| context.infer_shape(base_expr, false));
     if maybe_base_shape.is_none() {
-        diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(expr_text_range(base_expr), source),
-            severity: Some(DiagnosticSeverity::INFORMATION),
-            code: None,
-            code_description: None,
-            source: Some("shapels".into()),
-            message: String::from("Tensor shape unknown at this point"),
-            related_information: None,
-            tags: None,
-            data: None,
-        });
+        context.push_diagnostic_text(
+            expr_text_range(base_expr),
+            DiagnosticSeverity::INFORMATION,
+            String::from("Tensor shape unknown at this point"),
+        );
     }
     maybe_base_shape
 }
@@ -1086,33 +971,11 @@ fn base_shape_or_diag(
 pub fn infer_condition(
     base_expr: &Expr,
     call: &ExprCall<TextRange>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
     offset: usize,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let maybe_base_shape = base_shape_or_diag(
-        base_expr,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache.as_deref_mut(),
-        module_path,
-    );
+    let maybe_base_shape = base_shape_or_diag(base_expr, record_hovers, context.reborrow());
     // TODO(carrascomj): coercion of dtypes to the most precise and floaty.
     let mut dtype = Some("Float".to_string());
     if let Some(base_shape) = maybe_base_shape.as_ref() {
@@ -1121,47 +984,22 @@ pub fn infer_condition(
             .as_ref()
             .map(|x| SimpleDtype::from(x.as_str()))
         {
-            {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(expr_text_range(base_expr), source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: String::from("Condition must be of boolean dtype"),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
-            }
+            context.push_diagnostic_text(
+                expr_text_range(base_expr),
+                DiagnosticSeverity::ERROR,
+                String::from("Condition must be of boolean dtype"),
+            );
         }
         for (arg_name, off) in [("input", offset), ("other", offset + 1)] {
             if let Some(arg_expr) = get_arg(call, arg_name, off)
-                && let Some(arg_shape) =
-                    lookup_shape(arg_expr, vars, hover_entries, record_hovers, source).or_else(
-                        || {
-                            infer_expr_shape(
-                                arg_expr,
-                                vars,
-                                func_map,
-                                imports,
-                                class_map,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                false,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            )
-                        },
-                    )
+                && let Some(arg_shape) = context
+                    .lookup_shape(arg_expr, record_hovers)
+                    .or_else(|| context.infer_shape(arg_expr, false))
             {
                 if arg_shape.dims != base_shape.dims {
-                    push_error_diagnostic(
-                        diagnostics,
+                    context.push_diagnostic_text(
                         expr_text_range(arg_expr),
-                        source,
+                        DiagnosticSeverity::ERROR,
                         format!(
                             "Condition vs {} must have the same shape: {} vs {}",
                             arg_name,
@@ -1183,32 +1021,14 @@ pub fn infer_condition(
 
 pub fn infer_take(
     call: &ExprCall<TextRange>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
     offset: usize,
+    mut context: ContextRef,
 ) -> Option<Shape> {
     let index_shape = base_shape_or_diag(
         get_arg(call, "index", offset)?,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
         record_hovers,
-        source,
-        module_cache.as_deref_mut(),
-        module_path,
+        context.reborrow(),
     )?;
     if !index_shape
         .dtype
@@ -1216,14 +1036,11 @@ pub fn infer_take(
         .map(|x| SimpleDtype::from(x.as_str()).is_long())
         .unwrap_or(false)
     {
-        {
-            push_error_diagnostic(
-                diagnostics,
-                call.range,
-                source,
-                "Index must be of dtype long".to_string(),
-            );
-        }
+        context.push_diagnostic_text(
+            call.range,
+            DiagnosticSeverity::ERROR,
+            "Index must be of dtype long".to_string(),
+        );
     }
     Some(index_shape)
 }

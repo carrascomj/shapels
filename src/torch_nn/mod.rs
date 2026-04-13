@@ -1,3 +1,4 @@
+use crate::context::ContextRef;
 use crate::expr_tokens::{
     MODULE_ARG_TOKEN_OPTIONS, expr_to_symbolic_token, expr_to_symbolic_tokens,
 };
@@ -6,15 +7,13 @@ use crate::infer::{
     infer_conv_transpose, infer_flatten, infer_linear_module, infer_loss, infer_pool_module,
 };
 use crate::module_resolution::{
-    ClassMap, ClassRef, FuncMap, ModuleCache, ResolvedModule, imported_class_ref,
+    ClassMap, ClassRef, ModuleCache, ResolvedModule, imported_class_ref,
 };
 use crate::op_groups::Imports;
-use crate::{HoverInfo, Shape, VarState, infer_resolved_module_shape};
-use lsp_types::{Diagnostic, Range};
-use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant, Identifier};
+use crate::{Shape, infer_resolved_module_shape};
+use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant};
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::path::Path;
 
 pub(crate) mod known_nn_modules;
@@ -272,38 +271,35 @@ impl TorchNNModule {
         &self,
         call: &ExprCall<TextRange>,
         base_shape: Shape,
-        vars: &HashMap<Identifier, VarState>,
-        func_map: &FuncMap,
-        imports: &Imports,
-        class_map: &ClassMap,
-        call_stack: &mut Vec<Identifier>,
-        diagnostics: &mut Vec<Diagnostic>,
-        hover_entries: &mut Vec<(Range, HoverInfo)>,
-        source: &str,
         range: TextRange,
-        mut module_cache: Option<&mut ModuleCache>,
-        module_path: Option<&Path>,
+        mut context: ContextRef,
     ) -> Option<Shape> {
         match self {
             Self::Linear {
                 in_features,
                 out_features,
-            } => infer_linear_module(
-                base_shape,
-                in_features.as_deref(),
-                out_features.as_deref(),
-                range,
-                diagnostics,
-                source,
-            ),
-            Self::BatchNorm { dims, num_features } => infer_batchnorm_module(
-                base_shape,
-                *dims,
-                num_features.as_deref(),
-                range,
-                diagnostics,
-                source,
-            ),
+            } => {
+                let (diagnostics, source) = context.diagnostics_and_source();
+                infer_linear_module(
+                    base_shape,
+                    in_features.as_deref(),
+                    out_features.as_deref(),
+                    range,
+                    diagnostics,
+                    source,
+                )
+            }
+            Self::BatchNorm { dims, num_features } => {
+                let (diagnostics, source) = context.diagnostics_and_source();
+                infer_batchnorm_module(
+                    base_shape,
+                    *dims,
+                    num_features.as_deref(),
+                    range,
+                    diagnostics,
+                    source,
+                )
+            }
             Self::Conv(ConvParams {
                 dims,
                 in_channels,
@@ -314,21 +310,25 @@ impl TorchNNModule {
                 dilation,
                 groups,
                 ..
-            }) => infer_conv_module(
-                base_shape,
-                *dims,
-                in_channels.as_deref(),
-                out_channels.as_deref(),
-                kernel_size,
-                stride,
-                padding,
-                dilation,
-                groups.as_deref(),
-                range,
-                diagnostics,
-                source,
-            ),
+            }) => {
+                let (diagnostics, source) = context.diagnostics_and_source();
+                infer_conv_module(
+                    base_shape,
+                    *dims,
+                    in_channels.as_deref(),
+                    out_channels.as_deref(),
+                    kernel_size,
+                    stride,
+                    padding,
+                    dilation,
+                    groups.as_deref(),
+                    range,
+                    diagnostics,
+                    source,
+                )
+            }
             Self::ConvTranspose(params) => {
+                let (diagnostics, source) = context.diagnostics_and_source();
                 infer_conv_transpose(base_shape, params, range, diagnostics, source)
             }
             Self::Pool {
@@ -342,22 +342,25 @@ impl TorchNNModule {
                 output_ratio,
                 ceil_mode,
                 return_indices,
-            } => infer_pool_module(
-                base_shape,
-                *dims,
-                kind,
-                kernel_size,
-                stride,
-                padding,
-                dilation,
-                output_size,
-                output_ratio,
-                *ceil_mode,
-                *return_indices,
-                range,
-                diagnostics,
-                source,
-            ),
+            } => {
+                let (diagnostics, source) = context.diagnostics_and_source();
+                infer_pool_module(
+                    base_shape,
+                    *dims,
+                    kind,
+                    kernel_size,
+                    stride,
+                    padding,
+                    dilation,
+                    output_size,
+                    output_ratio,
+                    *ceil_mode,
+                    *return_indices,
+                    range,
+                    diagnostics,
+                    source,
+                )
+            }
             Self::Sequential(modules) => {
                 let mut current = base_shape;
                 for module in modules {
@@ -365,43 +368,20 @@ impl TorchNNModule {
                         call,
                         module,
                         current,
-                        vars,
-                        func_map,
-                        imports,
-                        class_map,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        source,
                         range,
-                        module_cache.as_deref_mut(),
-                        module_path,
+                        context.reborrow(),
                     )?;
                 }
                 Some(current)
             }
             Self::Flatten(flatten_dims) => {
+                let (diagnostics, source) = context.diagnostics_and_source();
                 infer_flatten(base_shape, &range, flatten_dims, diagnostics, source)
             }
             Self::Loss(LossParams {
                 reduction,
                 expected,
-            }) => infer_loss(
-                base_shape,
-                reduction,
-                expected,
-                call,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                source,
-                module_cache,
-                module_path,
-            ),
+            }) => infer_loss(base_shape, reduction, expected, call, context.reborrow()),
             Self::Noop | Self::Unknown => Some(base_shape),
         }
     }

@@ -1,15 +1,13 @@
 //! inference for indexing operations.
+use crate::context::ContextRef;
 use crate::expr_tokens::{SLICE_BOUND_TOKEN_OPTIONS, expr_to_symbolic_token};
 use crate::op_groups::SimpleDtype;
-use crate::{ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use rustpython_parser::ast::{self, Expr, Identifier};
+use crate::{Shape, expr_text_range};
+use lsp_types::DiagnosticSeverity;
+use rustpython_parser::ast::{self, Expr};
 use rustpython_parser::text_size::TextRange;
-use std::collections::HashMap;
-use std::path::Path;
 
 use super::expr_to_int;
-use crate::{infer_expr_shape, lookup_shape, text_range_to_lsp};
 
 #[derive(Debug, Clone)]
 enum IndexKind<'a> {
@@ -36,56 +34,25 @@ enum IndexKind<'a> {
 pub fn infer_index(
     base_expr: &Expr,
     slice: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let base_shape =
-        lookup_shape(base_expr, vars, hover_entries, record_hovers, source).or_else(|| {
-            infer_expr_shape(
-                base_expr,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        })?;
+    let base_shape = context
+        .lookup_shape(base_expr, record_hovers)
+        .or_else(|| context.infer_shape(base_expr, false))?;
 
     let mut indices: Vec<IndexKind<'_>> = match slice {
-        Expr::Tuple(t) => t.elts.iter().map(|e| parse_index_kind(e, source)).collect(),
-        other => vec![parse_index_kind(other, source)],
+        Expr::Tuple(t) => t
+            .elts
+            .iter()
+            .map(|e| parse_index_kind(e, context.source))
+            .collect(),
+        other => vec![parse_index_kind(other, context.source)],
     };
 
-    if let Some(shape) = infer_boolean_mask_index(
-        &base_shape,
-        &indices,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache.as_deref_mut(),
-        module_path,
-    ) {
+    if let Some(shape) =
+        infer_boolean_mask_index(&base_shape, &indices, record_hovers, context.reborrow())
+    {
         return Some(shape);
     }
 
@@ -128,20 +95,7 @@ pub fn infer_index(
             if prefix_len.is_none() {
                 prefix_len = Some(output_dims.len());
             }
-            if let Some(shape) = advanced_shape(
-                kind,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            ) {
+            if let Some(shape) = advanced_shape(kind, record_hovers, context.reborrow()) {
                 advanced_shapes.push(shape);
             }
             if consumes_axis(kind) {
@@ -163,17 +117,11 @@ pub fn infer_index(
                             if let Some(step_val) = step
                                 && *step_val <= 0
                             {
-                                diagnostics.push(Diagnostic {
-                                    range: text_range_to_lsp(*range, source),
-                                    severity: Some(DiagnosticSeverity::ERROR),
-                                    code: None,
-                                    code_description: None,
-                                    source: Some("shapels".into()),
-                                    message: "Slice step must be greater than 0".into(),
-                                    related_information: None,
-                                    tags: None,
-                                    data: None,
-                                });
+                                context.push_diagnostic_text(
+                                    *range,
+                                    DiagnosticSeverity::ERROR,
+                                    "Slice step must be greater than 0".into(),
+                                );
                             }
                             if let Ok(base_len) = dim.parse::<i64>() {
                                 let start_num = start.as_ref().and_then(|s| s.parse::<i64>().ok());
@@ -237,20 +185,14 @@ pub fn infer_index(
                         idx += base_len;
                     }
                     if idx < 0 || idx >= base_len {
-                        diagnostics.push(Diagnostic {
-                            range: text_range_to_lsp(*range, source),
-                            severity: Some(DiagnosticSeverity::ERROR),
-                            code: None,
-                            code_description: None,
-                            source: Some("shapels".into()),
-                            message: format!(
+                        context.push_diagnostic_text(
+                            *range,
+                            DiagnosticSeverity::ERROR,
+                            format!(
                                 "Index {} out of bounds for dimension size {}",
                                 value, base_len
                             ),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
+                        );
                     }
                 }
                 base_idx += 1;
@@ -288,17 +230,8 @@ pub fn infer_index(
 fn infer_boolean_mask_index<'a>(
     base_shape: &Shape,
     indices: &[IndexKind<'a>],
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
     if indices.len() != 1 {
         return None;
@@ -306,35 +239,18 @@ fn infer_boolean_mask_index<'a>(
     let IndexKind::Tensor(mask_expr) = &indices[0] else {
         return None;
     };
-    let mask_shape =
-        lookup_shape(mask_expr, vars, hover_entries, record_hovers, source).or_else(|| {
-            infer_expr_shape(
-                mask_expr,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        })?;
+    let mask_shape = context
+        .lookup_shape(mask_expr, record_hovers)
+        .or_else(|| context.infer_shape(mask_expr, false))?;
     let mask_dtype = mask_shape.dtype.as_deref()?;
     if !matches!(SimpleDtype::from(mask_dtype), SimpleDtype::Bool) {
         return None;
     }
     if mask_shape.dims.is_empty() || mask_shape.dims.len() > base_shape.dims.len() {
-        diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(expr_text_range(mask_expr), source),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: None,
-            code_description: None,
-            source: Some("shapels".into()),
-            message: format!(
+        context.push_diagnostic_text(
+            expr_text_range(mask_expr),
+            DiagnosticSeverity::ERROR,
+            format!(
                 "Boolean mask shape {} is incompatible with indexed tensor shape {}",
                 Shape {
                     dtype: mask_shape.dtype.clone(),
@@ -343,20 +259,14 @@ fn infer_boolean_mask_index<'a>(
                 .render(),
                 base_shape.render()
             ),
-            related_information: None,
-            tags: None,
-            data: None,
-        });
+        );
         return None;
     }
     if !mask_matches_prefix(&mask_shape.dims, &base_shape.dims) {
-        diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(expr_text_range(mask_expr), source),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: None,
-            code_description: None,
-            source: Some("shapels".into()),
-            message: format!(
+        context.push_diagnostic_text(
+            expr_text_range(mask_expr),
+            DiagnosticSeverity::ERROR,
+            format!(
                 "Boolean mask shape {} must match the leading dimensions of indexed tensor shape {}",
                 Shape {
                     dtype: mask_shape.dtype.clone(),
@@ -365,10 +275,7 @@ fn infer_boolean_mask_index<'a>(
                 .render(),
                 base_shape.render()
             ),
-            related_information: None,
-            tags: None,
-            data: None,
-        });
+        );
         return None;
     }
 
@@ -470,35 +377,13 @@ fn bound_token(expr: &Expr, source: &str) -> String {
 
 fn advanced_shape<'a>(
     kind: &IndexKind<'a>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Vec<String>> {
     match kind {
         IndexKind::Bool(b) => Some(vec![(if *b { "1" } else { "0" }).to_string()]),
         IndexKind::Tensor(expr) => {
-            if let Some(shape) = infer_expr_shape(
-                expr,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            ) {
+            if let Some(shape) = context.infer_shape(expr, record_hovers) {
                 return Some(shape.dims);
             }
             literal_shape(expr)

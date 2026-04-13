@@ -6,6 +6,7 @@
 //! - and cache that work across LSP requests.
 
 use crate::VarState;
+use crate::context::ContextRef;
 use crate::expr_text_range;
 use crate::infer::infer_creation_size;
 use crate::infer_expr_shape;
@@ -374,6 +375,36 @@ impl<'a> ResolvedModuleRef<'a> {
 
 /// Look up the metadata behind a [`ClassRef`], loading the defining module if needed.
 pub(crate) fn with_class_info<R, F>(
+    class_ref: &ClassRef,
+    mut context: ContextRef,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce(
+        &ClassInfo,
+        &str,
+        &FuncMap,
+        &Imports,
+        &ClassMap,
+        Option<&Path>,
+        &mut Option<&mut ModuleCache>,
+    ) -> R,
+{
+    let (_, func_map, imports, class_map, _, _, _, source, mut module_cache, module_path) =
+        context.module_infer_parts();
+    with_class_info_parts(
+        class_ref,
+        source,
+        func_map,
+        imports,
+        class_map,
+        &mut module_cache,
+        module_path,
+        f,
+    )
+}
+
+pub(crate) fn with_class_info_parts<R, F>(
     class_ref: &ClassRef,
     source: &str,
     func_map: &FuncMap,
@@ -815,21 +846,11 @@ fn get_or_collect_self_attr_module(
 fn resolve_cached_self_attr_state(
     base_class_ref: &ClassRef,
     target_attr: &Identifier,
-    source: &str,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    module_cache: &mut Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    context: ContextRef,
 ) -> Option<VarState> {
     with_class_info(
         base_class_ref,
-        source,
-        func_map,
-        imports,
-        class_map,
-        module_cache,
-        module_path,
+        context,
         |class_info,
          callee_source,
          _callee_func_map,
@@ -861,7 +882,7 @@ fn resolve_cached_self_attr_module(
     module_cache: &mut Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<Rc<ResolvedModule>> {
-    with_class_info(
+    with_class_info_parts(
         base_class_ref,
         source,
         func_map,
@@ -917,39 +938,26 @@ pub(crate) fn self_attr_module_from_self(
 }
 
 /// Resolve an attribute access such as `self.weight` to the cached state from `__init__`.
-pub(crate) fn attr_state_from_expr(
-    expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    source: &str,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-) -> Option<VarState> {
+pub(crate) fn attr_state_from_expr(expr: &Expr, mut context: ContextRef) -> Option<VarState> {
     let Expr::Attribute(attr) = expr else {
         return None;
     };
-    let base_module = resolve_module_expr(
-        attr.value.as_ref(),
-        vars,
-        source,
-        func_map,
-        imports,
-        class_map,
-        module_cache.as_deref_mut(),
-        module_path,
-    )?;
-    resolve_cached_self_attr_state(
-        base_module.as_ref().as_user()?,
-        &attr.attr,
-        source,
-        func_map,
-        imports,
-        class_map,
-        &mut module_cache,
-        module_path,
-    )
+    let base_class_ref = {
+        let (vars, func_map, imports, class_map, _, _, _, source, module_cache, module_path) =
+            context.module_infer_parts();
+        let base_module = resolve_module_expr(
+            attr.value.as_ref(),
+            vars,
+            source,
+            func_map,
+            imports,
+            class_map,
+            module_cache,
+            module_path,
+        )?;
+        base_module.as_ref().as_user()?.clone()
+    };
+    resolve_cached_self_attr_state(&base_class_ref, &attr.attr, context.reborrow())
 }
 
 fn resolve_module_expr<'a>(

@@ -1,13 +1,12 @@
 //! Inference for squeeze, reduce/aggregation functions (like sum, mean) and unsqueeze.
-use crate::{ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, expr_text_range};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
+use crate::{Shape, VarState, expr_text_range, text_range_to_lsp};
+use lsp_types::{Diagnostic, DiagnosticSeverity};
 use rustpython_parser::ast::{Constant, Expr, ExprBinOp, ExprConstant, Identifier, Operator};
 use rustpython_parser::text_size::TextRange;
 use std::collections::HashMap;
-use std::path::Path;
 
 use super::{base_shape_or_diag, expr_to_dim_token, infer_matmul_shapes};
-use crate::{lookup_shape, text_range_to_lsp};
+use crate::context::ContextRef;
 
 /// Shared logic for squeeze (enforce_one = true) and aggregation (enforce_one = false).
 ///
@@ -17,67 +16,31 @@ pub fn infer_squeeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
     q_arg: Option<&Expr>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
     whole_range: TextRange,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
     enforce_one: bool,
     keepdim: Option<&Expr>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let diag_before = diagnostics.len();
-    let base_shape = base_shape_or_diag(
-        base_expr,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache.as_deref_mut(),
-        module_path,
-    )
-    .or_else(|| {
-        infer_shallow_shape(
-            base_expr,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            record_hovers,
-            source,
-            module_cache,
-            module_path,
-        )
-    })?;
+    let diag_before = context.diagnostics.len();
+    let base_shape = base_shape_or_diag(base_expr, record_hovers, context.reborrow())
+        .or_else(|| infer_shallow_shape(base_expr, record_hovers, context.reborrow()))?;
 
     let q_arg_dims = q_arg.map(|q_expr| {
         // Scalar q keeps the same reduction behavior as regular aggregations.
+        let (vars, diagnostics, source) = context.vars_diagnostics_source();
         if expr_to_dim_token(q_expr, vars, diagnostics, source, &mut false)
             .is_some_and(|token| token.parse::<f64>().is_ok())
         {
             Vec::new()
-        } else if let Some(shape) = lookup_shape(q_expr, vars, hover_entries, record_hovers, source)
-        {
+        } else if let Some(shape) = context.lookup_shape(q_expr, record_hovers) {
             shape.dims
         } else {
             vec!["q".to_string()]
         }
     });
     let dims_to_remove = if let Some(dim) = dim_arg {
+        let (vars, diagnostics, source) = context.vars_diagnostics_source();
         match parse_dims(dim, base_shape.dims.len(), vars, diagnostics, source) {
             Ok(v) => v,
             Err(_) => return None,
@@ -107,32 +70,20 @@ pub fn infer_squeeze(
                     Constant::Bool(b) => *b,
                     Constant::Int(i) => i.to_string() != "0",
                     _ => {
-                        diagnostics.push(Diagnostic {
-                            range: text_range_to_lsp(whole_range, source),
-                            severity: Some(DiagnosticSeverity::INFORMATION),
-                            code: None,
-                            code_description: None,
-                            source: Some("shapels".into()),
-                            message: "keepdim argument was not understood; only constant False/True or 0/1 are supported.".into(),
-                            related_information: None,
-                            tags: None,
-                            data: None,
-                        });
+                        context.push_diagnostic_text(
+                            whole_range,
+                            DiagnosticSeverity::INFORMATION,
+                            "keepdim argument was not understood; only constant False/True or 0/1 are supported.".into(),
+                        );
                         false
                     }
                 }
             } else {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(whole_range, source),
-                    severity: Some(DiagnosticSeverity::INFORMATION),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "keepdim argument was not understood; only constant False/True or 0/1 are supported.".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(
+                    whole_range,
+                    DiagnosticSeverity::INFORMATION,
+                    "keepdim argument was not understood; only constant False/True or 0/1 are supported.".into(),
+                );
                 false
             }
         })
@@ -140,35 +91,21 @@ pub fn infer_squeeze(
     let mut dims = base_shape.dims.clone();
     for idx in dims_to_remove.into_iter().rev() {
         if idx >= dims.len() {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: "Invalid dim".into(),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
+            context.push_diagnostic_text(
+                whole_range,
+                DiagnosticSeverity::ERROR,
+                "Invalid dim".into(),
+            );
             continue;
         }
         if let Some(d) = dims.get(idx) {
             if enforce_one && d != "1" {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(whole_range, source),
-                    severity: Some(
-                        d.parse::<i32>()
-                            .map_or(DiagnosticSeverity::WARNING, |_| DiagnosticSeverity::ERROR),
-                    ),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "Cannot squeeze dimension not equal to 1".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(
+                    whole_range,
+                    d.parse::<i32>()
+                        .map_or(DiagnosticSeverity::WARNING, |_| DiagnosticSeverity::ERROR),
+                    "Cannot squeeze dimension not equal to 1".into(),
+                );
                 continue;
             } else if keepdim {
                 dims[idx] = String::from("1");
@@ -186,18 +123,12 @@ pub fn infer_squeeze(
         dims,
     })
     .or_else(|| {
-        if diagnostics.len() == diag_before {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
-                severity: Some(DiagnosticSeverity::ERROR),
-                code: None,
-                code_description: None,
-                source: Some("shapels".into()),
-                message: "Invalid dim".into(),
-                related_information: None,
-                tags: None,
-                data: None,
-            });
+        if context.diagnostics.len() == diag_before {
+            context.push_diagnostic_text(
+                whole_range,
+                DiagnosticSeverity::ERROR,
+                "Invalid dim".into(),
+            );
         }
         None
     })
@@ -206,34 +137,14 @@ pub fn infer_squeeze(
 pub fn infer_unsqueeze(
     base_expr: &Expr,
     dim_arg: Option<&Expr>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let base_shape = base_shape_or_diag(
-        base_expr,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache,
-        module_path,
-    )?;
-    let dim =
-        dim_arg.and_then(|expr| expr_to_dim_token(expr, vars, diagnostics, source, &mut false))?;
+    let base_shape = base_shape_or_diag(base_expr, record_hovers, context.reborrow())?;
+    let dim = dim_arg.and_then(|expr| {
+        let (vars, diagnostics, source) = context.vars_diagnostics_source();
+        expr_to_dim_token(expr, vars, diagnostics, source, &mut false)
+    })?;
     let dim_i: i16 = dim.parse().ok()?;
     let idx = normalize_dim_index_unsqueeze(dim_i, base_shape.dims.len())?;
     let mut dims = base_shape.dims.clone();
@@ -244,20 +155,7 @@ pub fn infer_unsqueeze(
     })
 }
 
-fn infer_shallow_shape(
-    expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-    module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
-) -> Option<Shape> {
+fn infer_shallow_shape(expr: &Expr, record_hovers: bool, mut context: ContextRef) -> Option<Shape> {
     match expr {
         Expr::BinOp(ExprBinOp {
             left,
@@ -266,26 +164,11 @@ fn infer_shallow_shape(
             range,
         }) => {
             if matches!(op, Operator::MatMult) {
-                return infer_matmul_shapes(
-                    left,
-                    right,
-                    vars,
-                    func_map,
-                    imports,
-                    class_map,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    *range,
-                    module_cache,
-                    module_path,
-                );
+                return infer_matmul_shapes(left, right, record_hovers, *range, context);
             }
             None
         }
-        _ => lookup_shape(expr, vars, hover_entries, record_hovers, source),
+        _ => context.lookup_shape(expr, record_hovers),
     }
 }
 

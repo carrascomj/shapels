@@ -27,11 +27,13 @@ pub use crate::module_resolution::ModuleCache;
 use crate::module_resolution::{
     ClassMap, ClassRef, FuncMap, FunctionInfo, ResolvedModule, attr_state_from_expr,
     class_ref_from_annotation, collect_class_defs, collect_function_defs, method_param_offset,
-    resolved_module_from_expr, self_attr_module_from_self, with_class_info,
+    resolved_module_from_expr, self_attr_module_from_self, with_class_info_parts,
 };
 pub use crate::op_groups::AGGR_ALIASES;
 use crate::op_groups::{BroadcastOp, Imports, TORCH_DTYPES, TorchOp, collect_imports};
 use crate::torch_nn::functional_pool_from_call;
+mod context;
+use crate::context::ContextRef;
 
 #[derive(Debug, Clone)]
 /// Shape of a tensor that is shown on hovers and is used to run inference.
@@ -1135,6 +1137,18 @@ pub(crate) fn infer_expr_shape(
     mut module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<Shape> {
+    let mut context = ContextRef::new(
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        source,
+        module_cache.as_deref_mut(),
+        module_path,
+    );
     match expr {
         Expr::BinOp(ExprBinOp {
             left,
@@ -1151,19 +1165,10 @@ pub(crate) fn infer_expr_shape(
             | Operator::Mod => infer_broadcastable_poswise(
                 &ShapeOrExpr::Expr(left),
                 right,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 *expr_range,
-                module_cache.as_deref_mut(),
-                module_path,
                 BroadcastOp::Arithmetic,
+                context,
             ),
             Operator::BitAnd
             | Operator::BitXor
@@ -1172,36 +1177,14 @@ pub(crate) fn infer_expr_shape(
             | Operator::RShift => infer_broadcastable_poswise(
                 &ShapeOrExpr::Expr(left),
                 right,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 *expr_range,
-                module_cache.as_deref_mut(),
-                module_path,
                 BroadcastOp::Bitwise { only_right: false },
+                context,
             ),
-            Operator::MatMult => infer_matmul_shapes(
-                left,
-                right,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                *expr_range,
-                module_cache.as_deref_mut(),
-                module_path,
-            ),
+            Operator::MatMult => {
+                infer_matmul_shapes(left, right, record_hovers, *expr_range, context)
+            }
         },
         Expr::Compare(ExprCompare {
             left: init_left,
@@ -1216,19 +1199,10 @@ pub(crate) fn infer_expr_shape(
             let init = infer_broadcastable_poswise(
                 &ShapeOrExpr::Expr(init_left.as_ref()),
                 first_right,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 *expr_range,
-                module_cache.as_deref_mut(),
-                module_path,
                 BroadcastOp::Eq,
+                context.reborrow(),
             );
 
             // second, fold with Shape and Expr
@@ -1236,40 +1210,15 @@ pub(crate) fn infer_expr_shape(
                 infer_broadcastable_poswise(
                     &ShapeOrExpr::Shape(left.as_ref()),
                     right,
-                    vars,
-                    func_map,
-                    imports,
-                    class_map,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
                     record_hovers,
-                    source,
                     *expr_range,
-                    module_cache.as_deref_mut(),
-                    module_path,
                     BroadcastOp::Eq,
+                    context.reborrow(),
                 )
             })
         }
         Expr::UnaryOp(unary) => {
-            let base = lookup_shape(&unary.operand, vars, hover_entries, record_hovers, source)
-                .or_else(|| {
-                    infer_expr_shape(
-                        &unary.operand,
-                        vars,
-                        func_map,
-                        imports,
-                        class_map,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                })?;
+            let base = context.lookup_or_infer(&unary.operand, record_hovers)?;
             infer_unary_dtype(unary.op, base, unary.range, diagnostics, source)
         }
         Expr::Call(call) => {
@@ -1595,53 +1544,21 @@ pub(crate) fn infer_expr_shape(
                 hover_entries,
                 record_hovers,
                 source,
-                module_cache.as_deref_mut(),
+                module_cache,
                 module_path,
             ) {
                 return ret.first().cloned();
             }
             None
         }
-        Expr::Subscript(sub) => infer_index(
-            &sub.value,
-            &sub.slice,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            record_hovers,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
-        ),
+        Expr::Subscript(sub) => infer_index(&sub.value, &sub.slice, record_hovers, context),
         Expr::Attribute(attr) => {
-            if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
+            if report_unbound_self_diagnostic(expr, vars, context.diagnostics, source) {
                 return None;
             }
             let attr_name: &str = attr.attr.as_ref();
             if attr_name == "T" {
-                let base_hint =
-                    lookup_shape(&attr.value, vars, hover_entries, record_hovers, source).or_else(
-                        || {
-                            infer_expr_shape(
-                                &attr.value,
-                                vars,
-                                func_map,
-                                imports,
-                                class_map,
-                                call_stack,
-                                diagnostics,
-                                hover_entries,
-                                false,
-                                source,
-                                module_cache.as_deref_mut(),
-                                module_path,
-                            )
-                        },
-                    );
+                let base_hint = context.lookup_or_infer(&attr.value, record_hovers);
                 let order_args: Vec<&Expr> = Vec::new();
                 let res = infer_permute(
                     &attr.value,
@@ -1661,38 +1578,13 @@ pub(crate) fn infer_expr_shape(
                 }
                 return res;
             } else if attr_name == "shape" || attr_name == "dtype" {
-                return lookup_shape(&attr.value, vars, hover_entries, record_hovers, source)
-                    .or_else(|| {
-                        infer_expr_shape(
-                            &attr.value,
-                            vars,
-                            func_map,
-                            imports,
-                            class_map,
-                            call_stack,
-                            diagnostics,
-                            hover_entries,
-                            false,
-                            source,
-                            module_cache,
-                            module_path,
-                        )
-                    });
+                return context.lookup_or_infer(&attr.value, record_hovers);
             }
-            if let Some(shape) = lookup_shape(expr, vars, hover_entries, record_hovers, source) {
+            if let Some(shape) = context.lookup_shape(expr, record_hovers) {
                 return Some(shape);
             }
-            let shape = attr_state_from_expr(
-                expr,
-                vars,
-                source,
-                func_map,
-                imports,
-                class_map,
-                module_cache,
-                module_path,
-            )
-            .and_then(|state| state_shape(&state).cloned());
+            let shape =
+                attr_state_from_expr(expr, context).and_then(|state| state_shape(&state).cloned());
             if record_hovers && let Some(s) = shape.clone() {
                 let range = text_range_to_lsp(expr_text_range(expr), source);
                 hover_entries.push((range, HoverInfo { shape: Some(s) }));
@@ -1700,11 +1592,11 @@ pub(crate) fn infer_expr_shape(
             shape
         }
         Expr::Name(expr_name) => {
-            if report_unbound_self_diagnostic(expr, vars, diagnostics, source) {
+            if report_unbound_self_diagnostic(expr, vars, context.diagnostics, source) {
                 return None;
             }
             let _ = expr_name;
-            lookup_shape(expr, vars, hover_entries, record_hovers, source)
+            context.lookup_shape(expr, record_hovers)
         }
         _ => None,
     }
@@ -1739,22 +1631,25 @@ fn torch_op_to_shape(
         Function => (call.args.first(), call.args.get(1), 1),
         Method => (maybe_attr.map(|x| x.value.as_ref()), call.args.first(), 0),
     };
+    let mut context = ContextRef::new(
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        source,
+        module_cache.as_deref_mut(),
+        module_path,
+    );
     match (torch_op, may_arg0, may_arg1, &op_kind) {
         (TorchOp::MatMul, Some(arg0), Some(arg1), _) => infer_matmul_shapes(
             arg0,
             arg1,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
             record_hovers,
-            source,
             call.range,
-            module_cache.as_deref_mut(),
-            module_path,
+            context.reborrow(),
         ),
         (op @ (TorchOp::Squeeze | TorchOp::Aggr | TorchOp::Quantile), Some(arg0), _, _) => {
             let (offset, q_arg) = if matches!(op, TorchOp::Quantile) {(offset + 1, get_arg(call, "q", offset))} else {(offset, None)};
@@ -1762,20 +1657,11 @@ fn torch_op_to_shape(
                 arg0,
                 get_arg(call, "dim", offset),
                 q_arg,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 call.range,
-                module_cache.as_deref_mut(),
-                module_path,
                 matches!(op, TorchOp::Squeeze),
                 get_arg(call, "keepdim", offset + 1),
+                context.reborrow(),
             )
         }
         (TorchOp::NoopDim, Some(base), _, _) => {
@@ -1870,17 +1756,8 @@ fn torch_op_to_shape(
         (TorchOp::RangeOp(range_op), _, _, Function) => infer_range_size(
             call,
             range_op,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
             record_hovers,
-            source,
-            module_cache.as_deref_mut(),
-            module_path,
+            context.reborrow(),
         ),
         (TorchOp::NoArg { predef_dtype }, Some(base), _, _)
             // only `.to` (no predef type) is allowed as Function
@@ -1922,41 +1799,16 @@ fn torch_op_to_shape(
             infer_broadcastable_poswise(
                 &ShapeOrExpr::Expr(left),
                 right,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 call.range,
-                module_cache.as_deref_mut(),
-                module_path,
                 broadcast_op,
+                context.reborrow(),
             )
         }
         (op @ (TorchOp::View | TorchOp::Expand), Some(base), _, kind)
             if matches!(kind, Method) || matches!(op, TorchOp::View) =>
         {
-            let base_hint =
-                lookup_shape(base, vars, hover_entries, record_hovers, source).or_else(|| {
-                    infer_expr_shape(
-                        base,
-                        vars,
-                        func_map,
-                        imports,
-                        class_map,
-                        call_stack,
-                        diagnostics,
-                        hover_entries,
-                        false,
-                        source,
-                        module_cache.as_deref_mut(),
-                        module_path,
-                    )
-                });
+            let base_hint = context.lookup_or_infer(base, record_hovers);
             infer_view_like(
                 base,
                 &call.args.iter().collect::<Vec<_>>(),
@@ -2019,24 +1871,15 @@ fn torch_op_to_shape(
             infer_unsqueeze(
                 base,
                 dim_arg,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
+                context.reborrow(),
             )
         }
         (TorchOp::Condition, Some(base), _, _) => {
-            infer_condition(base, call, vars, func_map, imports, class_map, call_stack, diagnostics, hover_entries, record_hovers, source, module_cache.as_deref_mut(), module_path, offset)
+            infer_condition(base, call, record_hovers, offset, context.reborrow())
         }
         (TorchOp::Take, _, _, _) => {
-            infer_take(call, vars, func_map, imports, class_map, call_stack, diagnostics, hover_entries, record_hovers, source, module_cache.as_deref_mut(), module_path, offset)
+            infer_take(call, record_hovers, offset, context.reborrow())
         }
         (TorchOp::Conv(d), Some(base), _, Function) => {
             let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;
@@ -2045,51 +1888,24 @@ fn torch_op_to_shape(
         (TorchOp::Loss { reduction_arg_pos, expected }, _, _, Function) => {
             let base_shape = infer_call_base_shape(
                 call,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
+                context.reborrow(),
             )?;
             let reduction = Reduction::loss_from_args(call, reduction_arg_pos);
-            infer_loss(base_shape, &reduction, &expected, call, vars, func_map, imports, class_map, call_stack, diagnostics, hover_entries, source, module_cache.as_deref_mut(), module_path)
+            infer_loss(base_shape, &reduction, &expected, call, context.reborrow())
         }
         (TorchOp::Pool { func_name }, _, _, Function) => {
             let pool = functional_pool_from_call(call, func_name)?;
             let base_shape = infer_call_base_shape(
                 call,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
+                context.reborrow(),
             )?;
             pool.infer_builtin_module(
                 call,
                 base_shape,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                source,
                 call.range,
-                module_cache.as_deref_mut(),
-                module_path,
+                context.reborrow(),
             )
         }
         (TorchOp::Repeat, Some(base), _, Method) => {
@@ -2940,17 +2756,8 @@ fn infer_user_class_member_call_return(
     call: &ExprCall<TextRange>,
     class_ref: &ClassRef,
     callable: ModuleCallable<'_>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<ReturnValue> {
     let callee_name = match callable {
         ModuleCallable::Forward => class_ref.name.clone(),
@@ -2958,7 +2765,19 @@ fn infer_user_class_member_call_return(
             Identifier::from(format!("{}::{}", class_ref.name, method_name))
         }
     };
-    with_class_info(
+    let (
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        source,
+        mut module_cache,
+        module_path,
+    ) = context.module_infer_parts();
+    with_class_info_parts(
         class_ref,
         source,
         func_map,
@@ -3018,130 +2837,65 @@ pub(crate) fn infer_resolved_module_shape(
     call: &ExprCall<TextRange>,
     resolved_module: &ResolvedModule,
     base_shape: Shape,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    source: &str,
     range: TextRange,
-    module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
     match resolved_module {
-        ResolvedModule::User(class_ref) => infer_user_class_shape_from_base(
-            class_ref,
-            base_shape,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            source,
-            range,
-            module_cache,
-            module_path,
-        ),
-        ResolvedModule::Builtin(module) => module.infer_builtin_module(
-            call,
-            base_shape,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            source,
-            range,
-            module_cache,
-            module_path,
-        ),
+        ResolvedModule::User(class_ref) => {
+            let (
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                source,
+                module_cache,
+                module_path,
+            ) = context.module_infer_parts();
+            infer_user_class_shape_from_base(
+                class_ref,
+                base_shape,
+                vars,
+                func_map,
+                imports,
+                class_map,
+                call_stack,
+                diagnostics,
+                hover_entries,
+                source,
+                range,
+                module_cache,
+                module_path,
+            )
+        }
+        ResolvedModule::Builtin(module) => {
+            module.infer_builtin_module(call, base_shape, range, context)
+        }
     }
 }
 
 fn infer_call_base_shape(
     call: &ExprCall<TextRange>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
     let base_expr = call.args.first()?;
-    lookup_shape(base_expr, vars, hover_entries, record_hovers, source).or_else(|| {
-        infer_expr_shape(
-            base_expr,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            false,
-            source,
-            module_cache,
-            module_path,
-        )
-    })
+    context
+        .lookup_shape(base_expr, record_hovers)
+        .or_else(|| context.infer_shape(base_expr, false))
 }
 
 fn infer_builtin_module_call_return(
     module: &crate::torch_nn::TorchNNModule,
     call: &ExprCall<TextRange>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<ReturnValue> {
-    let base_shape = infer_call_base_shape(
-        call,
-        vars,
-        func_map,
-        imports,
-        class_map,
-        call_stack,
-        diagnostics,
-        hover_entries,
-        record_hovers,
-        source,
-        module_cache.as_deref_mut(),
-        module_path,
-    )?;
+    let base_shape = infer_call_base_shape(call, record_hovers, context.reborrow())?;
     module
-        .infer_builtin_module(
-            call,
-            base_shape,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            source,
-            call.range,
-            module_cache,
-            module_path,
-        )
+        .infer_builtin_module(call, base_shape, call.range, context)
         .map(|shape| ReturnValue::from_shape(Some(shape)))
 }
 
@@ -3164,7 +2918,7 @@ fn infer_user_class_shape_from_base(
     if call_stack.iter().any(|id| id == &callee_name) {
         return None;
     }
-    with_class_info(
+    with_class_info_parts(
         class_ref,
         source,
         func_map,
@@ -3286,55 +3040,28 @@ fn infer_module_call_return(
     module_cache: Option<&mut ModuleCache>,
     module_path: Option<&Path>,
 ) -> Option<ReturnValue> {
+    let context = ContextRef::new(
+        vars,
+        func_map,
+        imports,
+        class_map,
+        call_stack,
+        diagnostics,
+        hover_entries,
+        source,
+        module_cache,
+        module_path,
+    );
     match resolved_module {
-        ResolvedModule::User(class_ref) => infer_user_class_member_call_return(
-            call,
-            class_ref,
-            callable,
-            vars,
-            func_map,
-            imports,
-            class_map,
-            call_stack,
-            diagnostics,
-            hover_entries,
-            record_hovers,
-            source,
-            module_cache,
-            module_path,
-        ),
+        ResolvedModule::User(class_ref) => {
+            infer_user_class_member_call_return(call, class_ref, callable, record_hovers, context)
+        }
         ResolvedModule::Builtin(module) => match callable {
-            ModuleCallable::Forward => infer_builtin_module_call_return(
-                module,
-                call,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                record_hovers,
-                source,
-                module_cache,
-                module_path,
-            ),
+            ModuleCallable::Forward => {
+                infer_builtin_module_call_return(module, call, record_hovers, context)
+            }
             ModuleCallable::Method(method_name) if method_name.as_str() == "forward" => {
-                infer_builtin_module_call_return(
-                    module,
-                    call,
-                    vars,
-                    func_map,
-                    imports,
-                    class_map,
-                    call_stack,
-                    diagnostics,
-                    hover_entries,
-                    record_hovers,
-                    source,
-                    module_cache,
-                    module_path,
-                )
+                infer_builtin_module_call_return(module, call, record_hovers, context)
             }
             ModuleCallable::Method(_) => None,
         },

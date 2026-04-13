@@ -1,13 +1,9 @@
+use crate::context::ContextRef;
 use crate::torch_nn::get_call_arg;
-use crate::{ClassMap, FuncMap, HoverInfo, Imports, ModuleCache, Shape, VarState, get_arg};
-use lsp_types::{Diagnostic, Range};
-use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant, Identifier};
+use crate::{Shape, dims_equal, get_arg};
+use lsp_types::DiagnosticSeverity;
+use rustpython_parser::ast::{Constant, Expr, ExprCall, ExprConstant};
 use rustpython_parser::text_size::TextRange;
-use std::collections::HashMap;
-use std::path::Path;
-
-use super::push_error_diagnostic;
-use crate::{dims_equal, infer_expr_shape, lookup_shape};
 
 /// Information required to know the expected inputs and output of a [loss](https://docs.pytorch.org/docs/stable/nn.html#loss-functions.
 #[derive(Clone, Debug)]
@@ -71,10 +67,25 @@ impl Reduction {
         {
             Reduction::None
         } else {
-            // default is "mean" (Some)
             Reduction::Some
         }
     }
+}
+
+fn get_arg_shape(
+    call: &ExprCall<TextRange>,
+    pos: usize,
+    key: &'static str,
+    context: &mut ContextRef,
+) -> Option<Shape> {
+    let expr = get_arg(call, key, pos)?;
+    context
+        .lookup_shape(expr, true)
+        .or_else(|| context.infer_shape(expr, false))
+}
+
+fn push_error(context: &mut ContextRef, range: TextRange, msg: String) {
+    context.push_diagnostic_text(range, DiagnosticSeverity::ERROR, msg);
 }
 
 /// Infer a call to a loss (e. g., `torch.nn.MSELoss` or functional), either a NoOp
@@ -84,45 +95,16 @@ pub fn infer_loss(
     reduction: &Reduction,
     expected: &LossExpectedInputs,
     call: &ExprCall<TextRange>,
-    vars: &HashMap<Identifier, VarState>,
-    func_map: &FuncMap,
-    imports: &Imports,
-    class_map: &ClassMap,
-    call_stack: &mut Vec<Identifier>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    source: &str,
-    mut module_cache: Option<&mut ModuleCache>,
-    module_path: Option<&Path>,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let mut get_arg_shape = |pos: usize, key: &'static str, diagnostics: &mut Vec<Diagnostic>| {
-        let expr = get_arg(call, key, pos)?;
-        lookup_shape(expr, vars, hover_entries, true, source).or_else(|| {
-            infer_expr_shape(
-                expr,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
-                false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
-            )
-        })
-    };
     let base_len = base_shape.dims.len();
     let mut reported_diagnostics = false;
     let unreduced = match expected {
         LossExpectedInputs::Equal { min, max, inputs } => {
             if &base_len < min || &base_len > max {
-                push_error_diagnostic(
-                    diagnostics,
+                push_error(
+                    &mut context,
                     call.range,
-                    source,
                     format!(
                         "Invalid number of dims {} for input ∉ [{min}, {max}]",
                         base_shape.render()
@@ -131,20 +113,18 @@ pub fn infer_loss(
                 reported_diagnostics = true;
             }
 
-            for pos in 1..(*inputs) {
+            for pos in 1..*inputs {
                 let key = match pos {
                     1 => "target",
                     2 => "input2",
-                    // this should never happen
                     _ => break,
                 };
 
-                if let Some(target) = get_arg_shape(inputs - pos, key, diagnostics) {
+                if let Some(target) = get_arg_shape(call, inputs - pos, key, &mut context) {
                     if target != base_shape {
-                        push_error_diagnostic(
-                            diagnostics,
+                        push_error(
+                            &mut context,
                             call.range,
-                            source,
                             format!(
                                 "Input and {key} must have the same shape, found {} vs. {}",
                                 base_shape.render(),
@@ -154,12 +134,7 @@ pub fn infer_loss(
                         reported_diagnostics = true;
                     }
                 } else {
-                    push_error_diagnostic(
-                        diagnostics,
-                        call.range,
-                        source,
-                        format!("Missing `{key}` input"),
-                    );
+                    push_error(&mut context, call.range, format!("Missing `{key}` input"));
                     reported_diagnostics = true;
                 }
             }
@@ -176,10 +151,9 @@ pub fn infer_loss(
                 }
             };
             if unreduced.is_none() {
-                push_error_diagnostic(
-                    diagnostics,
+                push_error(
+                    &mut context,
                     call.range,
-                    source,
                     format!(
                         "Invalid number of dims {} for NLL-like loss input",
                         base_shape.render()
@@ -188,14 +162,13 @@ pub fn infer_loss(
                 reported_diagnostics = true;
             }
 
-            if let Some(target) = get_arg_shape(1, "target", diagnostics) {
+            if let Some(target) = get_arg_shape(call, 1, "target", &mut context) {
                 if let Some(expected_target) = unreduced.as_ref()
                     && target != expected_target.as_slice()
                 {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "NLL-like loss target must have shape [{}], found {}",
                             expected_target.join(" "),
@@ -205,10 +178,9 @@ pub fn infer_loss(
                     reported_diagnostics = true;
                 }
             } else {
-                push_error_diagnostic(
-                    diagnostics,
+                push_error(
+                    &mut context,
                     call.range,
-                    source,
                     "Missing `target` input".to_string(),
                 );
                 reported_diagnostics = true;
@@ -221,10 +193,9 @@ pub fn infer_loss(
                 2 => false,
                 3 => true,
                 _ => {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "CTCLoss expects input of rank 2 or 3, found {}",
                             base_shape.render()
@@ -240,26 +211,34 @@ pub fn infer_loss(
             } else {
                 Vec::new()
             };
-            let (target, input_lengths, target_lengths) = {
-                let mut require_arg_shape = |pos: usize, key: &'static str| {
-                    let shape = get_arg_shape(pos, key, diagnostics);
-                    if shape.is_none() {
-                        push_error_diagnostic(
-                            diagnostics,
-                            call.range,
-                            source,
-                            format!("Missing `{key}` input"),
-                        );
-                        reported_diagnostics = true;
-                    }
-                    shape
-                };
-                (
-                    require_arg_shape(1, "target"),
-                    require_arg_shape(2, "input_lengths"),
-                    require_arg_shape(3, "target_lengths"),
-                )
-            };
+
+            let target = get_arg_shape(call, 1, "target", &mut context);
+            if target.is_none() {
+                push_error(
+                    &mut context,
+                    call.range,
+                    "Missing `target` input".to_string(),
+                );
+                reported_diagnostics = true;
+            }
+            let input_lengths = get_arg_shape(call, 2, "input_lengths", &mut context);
+            if input_lengths.is_none() {
+                push_error(
+                    &mut context,
+                    call.range,
+                    "Missing `input_lengths` input".to_string(),
+                );
+                reported_diagnostics = true;
+            }
+            let target_lengths = get_arg_shape(call, 3, "target_lengths", &mut context);
+            if target_lengths.is_none() {
+                push_error(
+                    &mut context,
+                    call.range,
+                    "Missing `target_lengths` input".to_string(),
+                );
+                reported_diagnostics = true;
+            }
 
             if let Some(target) = target {
                 let valid_target_rank = if is_batched {
@@ -268,10 +247,9 @@ pub fn infer_loss(
                     target.dims.len() == 1
                 };
                 if !valid_target_rank {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "CTCLoss target must be 1D{} , found {}",
                             if is_batched { " or 2D" } else { "" },
@@ -283,10 +261,9 @@ pub fn infer_loss(
                     && target.dims.len() == 2
                     && !dims_equal(&target.dims[..1], &base_shape.dims[1..2])
                 {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "CTCLoss padded target batch dim must match input batch dim, found {} vs. [{}]",
                             target.render(),
@@ -304,10 +281,9 @@ pub fn infer_loss(
                 if let Some(shape) = shape.as_ref()
                     && shape != &length_dims.as_slice()
                 {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "CTCLoss {key} must have shape [{}], found {}",
                             length_dims.join(" "),
@@ -322,10 +298,9 @@ pub fn infer_loss(
         }
         LossExpectedInputs::CosineEmbedding => {
             if !matches!(base_len, 1 | 2) {
-                push_error_diagnostic(
-                    diagnostics,
+                push_error(
+                    &mut context,
                     call.range,
-                    source,
                     format!(
                         "CosineEmbeddingLoss expects input rank 1 or 2, found {}",
                         base_shape.render()
@@ -334,15 +309,14 @@ pub fn infer_loss(
                 reported_diagnostics = true;
             }
 
-            let input2 = get_arg_shape(1, "input2", diagnostics);
-            let target = get_arg_shape(2, "target", diagnostics);
+            let input2 = get_arg_shape(call, 1, "input2", &mut context);
+            let target = get_arg_shape(call, 2, "target", &mut context);
 
             if let Some(input2) = input2 {
                 if input2 != base_shape {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "CosineEmbeddingLoss inputs must have the same shape, found {} vs. {}",
                             base_shape.render(),
@@ -352,10 +326,9 @@ pub fn infer_loss(
                     reported_diagnostics = true;
                 }
             } else {
-                push_error_diagnostic(
-                    diagnostics,
+                push_error(
+                    &mut context,
                     call.range,
-                    source,
                     "Missing `input2` input".to_string(),
                 );
                 reported_diagnostics = true;
@@ -368,10 +341,9 @@ pub fn infer_loss(
             };
             if let Some(target) = target {
                 if target != unreduced.as_slice() {
-                    push_error_diagnostic(
-                        diagnostics,
+                    push_error(
+                        &mut context,
                         call.range,
-                        source,
                         format!(
                             "CosineEmbeddingLoss target must have shape [{}], found {}",
                             unreduced.join(" "),
@@ -381,10 +353,9 @@ pub fn infer_loss(
                     reported_diagnostics = true;
                 }
             } else {
-                push_error_diagnostic(
-                    diagnostics,
+                push_error(
+                    &mut context,
                     call.range,
-                    source,
                     "Missing `target` input".to_string(),
                 );
                 reported_diagnostics = true;
@@ -418,39 +389,27 @@ pub fn infer_loss(
             };
 
             if !valid_rank {
-                push_error_diagnostic(diagnostics, call.range, source, rank_message);
+                push_error(&mut context, call.range, rank_message);
                 reported_diagnostics = true;
             }
 
-            {
-                let mut check_pair_input = |pos: usize, key: &'static str| {
-                    if let Some(arg) = get_arg_shape(pos, key, diagnostics) {
-                        if arg != base_shape {
-                            push_error_diagnostic(
-                                diagnostics,
-                                call.range,
-                                source,
-                                format!(
-                                    "{loss_name} {key} must have shape {}, found {}",
-                                    base_shape.render(),
-                                    arg.render()
-                                ),
-                            );
-                            reported_diagnostics = true;
-                        }
-                    } else {
-                        push_error_diagnostic(
-                            diagnostics,
+            for (pos, key) in [(1usize, "positive"), (2usize, "negative")] {
+                if let Some(arg) = get_arg_shape(call, pos, key, &mut context) {
+                    if arg != base_shape {
+                        push_error(
+                            &mut context,
                             call.range,
-                            source,
-                            format!("Missing `{key}` input"),
+                            format!(
+                                "{loss_name} {key} must have shape {}, found {}",
+                                base_shape.render(),
+                                arg.render()
+                            ),
                         );
                         reported_diagnostics = true;
                     }
-                };
-
-                for (pos, key) in [(1usize, "positive"), (2usize, "negative")] {
-                    check_pair_input(pos, key);
+                } else {
+                    push_error(&mut context, call.range, format!("Missing `{key}` input"));
+                    reported_diagnostics = true;
                 }
             }
 
