@@ -1565,12 +1565,9 @@ pub(crate) fn infer_expr_shape(
                     &order_args,
                     Transpose::T,
                     base_hint,
-                    vars,
-                    diagnostics,
-                    hover_entries,
                     record_hovers,
-                    source,
                     attr.range,
+                    context,
                 );
                 if record_hovers && let Some(s) = res.clone() {
                     let range = text_range_to_lsp(attr.range, source);
@@ -1814,12 +1811,9 @@ fn torch_op_to_shape(
                 &call.args.iter().collect::<Vec<_>>(),
                 &op,
                 base_hint,
-                vars,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 call.range,
+                context,
             )
         }
         (TorchOp::Transpose(transpose), Some(base), _, _) => {
@@ -1839,31 +1833,18 @@ fn torch_op_to_shape(
                 // no args
                 Transpose::T => Vec::new(),
             };
-            let base_hint = infer_expr_shape(
+            let base_hint = context.infer_shape(
                 base,
-                vars,
-                func_map,
-                imports,
-                class_map,
-                call_stack,
-                diagnostics,
-                hover_entries,
                 false,
-                source,
-                module_cache.as_deref_mut(),
-                module_path,
             );
             infer_permute(
                 base,
                 &order_args,
                 transpose,
                 base_hint,
-                vars,
-                diagnostics,
-                hover_entries,
                 record_hovers,
-                source,
                 call.range,
+                context,
             )
         }
         (TorchOp::Unsqueeze, Some(base), _, _) => {
@@ -1882,8 +1863,8 @@ fn torch_op_to_shape(
             infer_take(call, record_hovers, offset, context.reborrow())
         }
         (TorchOp::Conv(d), Some(base), _, Function) => {
-            let kernel = lookup_shape(get_arg(call, "weight", 1)?, vars, hover_entries, record_hovers, source)?;
-            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_conv(shape, kernel.dims, call, d, diagnostics, source))
+            let kernel = context.lookup_shape(get_arg(call, "weight", 1)?, record_hovers)?;
+            context.lookup_shape(base, record_hovers).and_then(|shape| infer_conv(shape, kernel.dims, call, d, diagnostics, source))
         }
         (TorchOp::Loss { reduction_arg_pos, expected }, _, _, Function) => {
             let base_shape = infer_call_base_shape(
@@ -1909,17 +1890,17 @@ fn torch_op_to_shape(
             )
         }
         (TorchOp::Repeat, Some(base), _, Method) => {
-            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))
+            context.lookup_shape(base, record_hovers).and_then(|shape| infer_repeat(shape, call, vars, diagnostics, source))
         }
         (TorchOp::RepeatInterleave, Some(base), _, _) => {
-            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| {
+            context.lookup_shape(base, record_hovers).and_then(|shape| {
                 infer_repeat_interleave(shape, call, offset, diagnostics, source)
             })
         }
         (TorchOp::Flatten, Some(base), _, _) => {
-            let flatten_dims = get_flatten_dims(offset, call, vars, diagnostics, source);
+            let flatten_dims = get_flatten_dims(offset, call, vars, context.diagnostics, source);
             // TODO(carrascomj): ravel is function-onlyj
-            lookup_shape(base, vars, hover_entries, record_hovers, source).and_then(|shape| infer_flatten(shape, &call.range, &flatten_dims, diagnostics, source))
+            context.lookup_shape(base, record_hovers).and_then(|shape| infer_flatten(shape, &call.range, &flatten_dims, diagnostics, source))
         }
         (TorchOp::Unknown, _, _, Function) => {
             // TODO(carrascomj): check if emitting diagnostics here
@@ -3299,22 +3280,6 @@ fn tensor_or_shape_as_arg(
         ),
         _ => None,
     }
-}
-
-fn lookup_shape(
-    expr: &Expr,
-    vars: &HashMap<Identifier, VarState>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
-    record_hovers: bool,
-    source: &str,
-) -> Option<Shape> {
-    let key = expr_var_key(expr)?;
-    let shape = vars.get(&key).and_then(state_shape).cloned();
-    if record_hovers && let Some(s) = shape.clone() {
-        let range = text_range_to_lsp(expr_text_range(expr), source);
-        hover_entries.push((range, HoverInfo { shape: Some(s) }));
-    }
-    shape
 }
 
 /// An operation might be a function `torch.FUNCTION` (might be imported and

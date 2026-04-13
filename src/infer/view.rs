@@ -1,14 +1,13 @@
 //! Inference for view/reshape and permute/transpose.
-use crate::{HoverInfo, Shape, VarState, expr_text_range};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Range};
-use rustpython_parser::ast::{Expr, Identifier};
+use crate::context::ContextRef;
+use crate::{Shape, expr_text_range};
+use lsp_types::{Diagnostic, DiagnosticSeverity};
+use rustpython_parser::ast::Expr;
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use super::expr_to_int;
 use super::{expr_to_dim_token, text_range_to_lsp};
-use crate::lookup_shape;
 use crate::op_groups::TorchOp;
 
 /// Inference for `torch.view`, `torch.reshape` and `torch.expand`.
@@ -17,18 +16,22 @@ pub fn infer_view_like(
     args: &[&Expr],
     torch_op: &TorchOp,
     base_hint: Option<Shape>,
-    vars: &HashMap<Identifier, VarState>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
     whole_range: TextRange,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let base_shape =
-        base_hint.or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source));
+    let base_shape = base_hint.or_else(|| context.lookup_shape(base_expr, record_hovers));
     let target_tokens = args
         .iter()
-        .map(|e| expr_to_dim_token(e, vars, diagnostics, source, &mut false))
+        .map(|e| {
+            expr_to_dim_token(
+                e,
+                context.vars,
+                context.diagnostics,
+                context.source,
+                &mut false,
+            )
+        })
         .collect::<Option<Vec<_>>>()?;
 
     if target_tokens.is_empty() {
@@ -42,8 +45,8 @@ pub fn infer_view_like(
     match res {
         Ok(shape) => Some(shape),
         Err(msg) => {
-            diagnostics.push(Diagnostic {
-                range: text_range_to_lsp(whole_range, source),
+            context.diagnostics.push(Diagnostic {
+                range: text_range_to_lsp(whole_range, context.source),
                 severity: Some(DiagnosticSeverity::ERROR),
                 code: None,
                 code_description: None,
@@ -71,31 +74,21 @@ pub fn infer_permute(
     order_args: &[&Expr],
     transpose: Transpose,
     base_hint: Option<Shape>,
-    vars: &HashMap<Identifier, VarState>,
-    diagnostics: &mut Vec<Diagnostic>,
-    hover_entries: &mut Vec<(Range, HoverInfo)>,
     record_hovers: bool,
-    source: &str,
     whole_range: TextRange,
+    mut context: ContextRef,
 ) -> Option<Shape> {
-    let base_shape = base_hint
-        .or_else(|| lookup_shape(base_expr, vars, hover_entries, record_hovers, source))?;
+    let base_shape = base_hint.or_else(|| context.lookup_shape(base_expr, record_hovers))?;
     let dims_len = base_shape.dims.len();
     let mut order = Vec::new();
     match transpose {
         Transpose::Explicit => {
             if order_args.len() != 2 {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(whole_range, source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "transpose expects exactly two dimensions".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(
+                    whole_range,
+                    DiagnosticSeverity::ERROR,
+                    "transpose expects exactly two dimensions".into(),
+                );
                 return None;
             }
             let mut dims = Vec::with_capacity(2);
@@ -104,31 +97,19 @@ pub fn infer_permute(
                     dims.push(val as usize);
                     continue;
                 }
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(expr_text_range(expr), source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "Invalid transpose index".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(
+                    expr_text_range(expr),
+                    DiagnosticSeverity::ERROR,
+                    "Invalid transpose index".into(),
+                );
                 return None;
             }
             if dims.iter().any(|&d| d >= base_shape.dims.len()) || dims[0] == dims[1] {
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(whole_range, source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "Invalid transpose dimensions".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(
+                    whole_range,
+                    DiagnosticSeverity::ERROR,
+                    "Invalid transpose dimensions".into(),
+                );
                 return None;
             }
             order = (0..base_shape.dims.len()).collect();
@@ -148,17 +129,11 @@ pub fn infer_permute(
                     order.push(val as usize);
                     continue;
                 }
-                diagnostics.push(Diagnostic {
-                    range: text_range_to_lsp(expr_text_range(expr), source),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    code: None,
-                    code_description: None,
-                    source: Some("shapels".into()),
-                    message: "Invalid permute index".into(),
-                    related_information: None,
-                    tags: None,
-                    data: None,
-                });
+                context.push_diagnostic_text(
+                    expr_text_range(expr),
+                    DiagnosticSeverity::ERROR,
+                    "Invalid permute index".into(),
+                );
                 return None;
             }
         }
@@ -173,21 +148,15 @@ pub fn infer_permute(
             uniq.len() != order.len()
         }
     {
-        diagnostics.push(Diagnostic {
-            range: text_range_to_lsp(whole_range, source),
-            severity: Some(DiagnosticSeverity::ERROR),
-            code: None,
-            code_description: None,
-            source: Some("shapels".into()),
-            message: if !matches!(transpose, Transpose::Permute) {
+        context.push_diagnostic_text(
+            whole_range,
+            DiagnosticSeverity::ERROR,
+            if !matches!(transpose, Transpose::Permute) {
                 "Invalid transpose dimensions".into()
             } else {
                 "Invalid permute dimensions".into()
             },
-            related_information: None,
-            tags: None,
-            data: None,
-        });
+        );
         return None;
     }
 

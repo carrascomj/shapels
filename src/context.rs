@@ -9,16 +9,16 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{
-    HoverInfo, ModuleCache, Shape, VarState, infer_expr_shape, lookup_shape,
+    HoverInfo, ModuleCache, Shape, VarState, expr_text_range, expr_var_key, infer_expr_shape,
     module_resolution::{ClassMap, FuncMap},
     op_groups::Imports,
-    text_range_to_lsp,
+    state_shape, text_range_to_lsp,
 };
 
 /// State passed through and mutated by the inference stack.
 pub(crate) struct ContextRef<'ctx> {
     /// Variable states visible at the current inference site.
-    vars: &'ctx HashMap<Identifier, VarState>,
+    pub vars: &'ctx HashMap<Identifier, VarState>,
     /// Functions available for local or cross-module symbolic dispatch.
     func_map: &'ctx FuncMap,
     /// Import metadata used to resolve names, aliases, and dtypes.
@@ -90,13 +90,14 @@ impl<'ctx> ContextRef<'ctx> {
     }
 
     pub fn lookup_shape(&mut self, expr: &Expr, record_hovers: bool) -> Option<Shape> {
-        lookup_shape(
-            expr,
-            self.vars,
-            self.hover_entries,
-            record_hovers,
-            self.source,
-        )
+        let key = expr_var_key(expr)?;
+        let shape = self.vars.get(&key).and_then(state_shape).cloned();
+        if record_hovers && let Some(s) = shape.clone() {
+            let range = text_range_to_lsp(expr_text_range(expr), self.source);
+            self.hover_entries
+                .push((range, HoverInfo { shape: Some(s) }));
+        }
+        shape
     }
 
     pub fn infer_shape(&mut self, expr: &Expr, record_hovers: bool) -> Option<Shape> {
