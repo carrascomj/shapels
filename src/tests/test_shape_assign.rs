@@ -253,3 +253,31 @@ fn reannotate_is_okay_alpha_equivalent_inferred_return_fn() {
     let analysis = analyze_source(&src);
     assert!(analysis.diagnostics.is_empty());
 }
+
+#[test]
+fn partial_reannotation_works() {
+    let src = extract_test_case(PY_DATA, 19);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(
+        &src,
+        &analysis,
+        "a =",
+        "B C Height Width"
+    ));
+}
+
+#[test]
+fn partial_annotation_results_in_ellipsis() {
+    let src = extract_test_case(PY_DATA, 20);
+    let analysis = analyze_source(&src);
+    assert!(analysis.diagnostics.is_empty());
+    assert!(is_hover_expected(&src, &analysis, "y =", "C Batch ..."));
+}
+
+#[test]
+fn oob_partial_reannotation_raises() {
+    let src = extract_test_case(PY_DATA, 21);
+    let analysis = analyze_source(&src);
+    assert_eq!(analysis.diagnostics.len(), 1);
+}

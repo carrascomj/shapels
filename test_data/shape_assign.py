@@ -186,3 +186,36 @@ def identity_function(x: Float[T, "B X A"]):
 def reannotate_is_okay_alpha_equivalent_inferred_return_fn():
     # this is not fine
     x: Float[T, "B U I"] = identity_function(torch.zeros(5, 2, 9))
+
+
+# test 19
+import torch
+
+def hover_after_partial_reannotation_is_expected(x: torch.Tensor):
+    """No results should be returned on adim hover, but the tensor should be assigned."""
+    x: Float[Tensor, "Batch Channels Height Width"]
+    # hovering anywhere on the following returs 'Channels Height Widt', this is wrong!
+    B, C = x.shape[0], x.shape[1]
+    a = x
+
+
+# test 20
+import torch
+
+def partial_assignemnt_results_in_ellipsis(x: torch.Tensor):
+    """No results should be returned on adim hover, but the tensor should be assigned."""
+    Batch, C = x.shape[0], x.shape[1]
+    y = x.transpose(1, 0)
+
+
+# test 21
+import torch
+
+def oob_partial_reannotation_raises(x: torch.Tensor):
+    """No results should be returned on adim hover, but the tensor should be assigned."""
+    x: Float[Tensor, "Batch Channels Height Width"]
+    # hovering anywhere on the following returs 'Channels Height Widt', this is wrong!
+    B, C = x.shape[0], x.shape[5]
+    a = x
+
+

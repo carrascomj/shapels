@@ -17,10 +17,10 @@ mod module_resolution;
 pub mod op_groups;
 mod torch_nn;
 use crate::infer::{
-    Reduction, ShapeOrExpr, Transpose, get_flatten_dims, infer_broadcastable_poswise,
-    infer_condition, infer_conv, infer_creation_size, infer_flatten, infer_index, infer_loss,
-    infer_matmul_shapes, infer_noop, infer_permute, infer_range_size, infer_repeat,
-    infer_repeat_interleave, infer_squeeze, infer_take, infer_to, infer_unary_dtype,
+    Reduction, ShapeOrExpr, Transpose, get_flatten_dims, indexed_shape_assignment,
+    infer_broadcastable_poswise, infer_condition, infer_conv, infer_creation_size, infer_flatten,
+    infer_index, infer_loss, infer_matmul_shapes, infer_noop, infer_permute, infer_range_size,
+    infer_repeat, infer_repeat_interleave, infer_squeeze, infer_take, infer_to, infer_unary_dtype,
     infer_unsqueeze, infer_view_like,
 };
 pub use crate::module_resolution::ModuleCache;
@@ -3316,43 +3316,35 @@ fn assignment_shape_checks(
     if dims.len() != tup.elts.len() || dims.is_empty() {
         return false;
     }
-    let Expr::Attribute(attr) = value else {
-        return false;
-    };
-    if attr.attr.as_str() != "shape" {
-        return false;
-    }
-    let Some(base_id) = name_from_expr(&attr.value) else {
-        return false;
+
+    let (base_id, assignments, must_match_rank, base_range) = match value {
+        Expr::Attribute(attr) if attr.attr.as_str() == "shape" => {
+            let Some(base_id) = name_from_expr(&attr.value) else {
+                return false;
+            };
+            (
+                base_id,
+                dims.iter().cloned().enumerate().collect(),
+                true,
+                expr_text_range(&attr.value),
+            )
+        }
+        _ => {
+            let Some((base_id, assignments)) = indexed_shape_assignment(target, value) else {
+                return false;
+            };
+            let Some(base_range) = indexed_shape_base_range(value) else {
+                return false;
+            };
+            (base_id, assignments, false, base_range)
+        }
     };
 
     let range = text_range_to_lsp(expr_text_range(value), source);
-    let existing_state = vars.get(&base_id);
-    let existing_shape = existing_state.and_then(state_shape);
+    let existing_shape = vars.get(&base_id).and_then(state_shape).cloned();
 
-    if let Some(shape) = existing_shape {
-        if shape.dims.len() == dims.len() {
-            let mut new_shape = shape.clone();
-            new_shape.dims = dims.iter().map(|d| d.to_string()).collect();
-            vars.insert(
-                base_id.clone(),
-                VarState {
-                    annotated: None,
-                    inferred: Some(new_shape.clone()),
-                    resolved_module: None,
-                    callable: None,
-                },
-            );
-            if record_hovers {
-                let hrange = text_range_to_lsp(expr_text_range(&attr.value), source);
-                hover_entries.push((
-                    hrange,
-                    HoverInfo {
-                        shape: Some(new_shape),
-                    },
-                ));
-            }
-        } else {
+    let new_shape = if let Some(shape) = existing_shape {
+        if must_match_rank && shape.dims.len() != assignments.len() {
             diagnostics.push(Diagnostic {
                 range,
                 severity: Some(DiagnosticSeverity::ERROR),
@@ -3364,32 +3356,87 @@ fn assignment_shape_checks(
                 tags: None,
                 data: None,
             });
+            return true;
         }
+        let mut new_shape = shape;
+        for (index, dim) in &assignments {
+            let Some(existing_dim) = new_shape.dims.get_mut(*index) else {
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: Some("shapels".into()),
+                    message: format!("No dim found at .shape `{index}`"),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                });
+                return true;
+            };
+            *existing_dim = dim.to_string();
+        }
+        new_shape
     } else {
-        let new_shape = Shape {
+        Shape {
             dtype: None,
-            dims: dims.iter().map(|d| d.to_string()).collect(),
-        };
-        vars.insert(
-            base_id.clone(),
-            VarState {
-                annotated: None,
-                inferred: Some(new_shape.clone()),
-                resolved_module: None,
-                callable: None,
+            dims: if must_match_rank {
+                assignments.iter().map(|(_, dim)| dim.to_string()).collect()
+            } else {
+                unknown_shape_from_index_assignments(&assignments)
             },
-        );
-        if record_hovers {
-            let hrange = text_range_to_lsp(expr_text_range(&attr.value), source);
-            hover_entries.push((
-                hrange,
-                HoverInfo {
-                    shape: Some(new_shape),
-                },
-            ));
         }
+    };
+    vars.insert(
+        base_id,
+        VarState {
+            annotated: None,
+            inferred: Some(new_shape.clone()),
+            resolved_module: None,
+            callable: None,
+        },
+    );
+    if record_hovers {
+        hover_entries.push((
+            text_range_to_lsp(base_range, source),
+            HoverInfo {
+                shape: Some(new_shape),
+            },
+        ));
     }
     true
+}
+
+fn indexed_shape_base_range(value: &Expr) -> Option<TextRange> {
+    let Expr::Tuple(tuple) = value else {
+        return None;
+    };
+    let Expr::Subscript(subscript) = tuple.elts.first()? else {
+        return None;
+    };
+    let Expr::Attribute(attr) = subscript.value.as_ref() else {
+        return None;
+    };
+    Some(expr_text_range(&attr.value))
+}
+
+/// Model an unknown tensor after indexed shape assignment. Ellipses retain the
+/// unassigned dimensions while keeping explicitly indexed dimensions in place.
+fn unknown_shape_from_index_assignments(assignments: &[(usize, Identifier)]) -> Vec<String> {
+    let mut assignments = assignments.to_vec();
+    assignments.sort_by_key(|(index, _)| *index);
+
+    let mut dims = Vec::with_capacity(assignments.len() + 1);
+    let mut next_index = 0;
+    for (index, dim) in assignments {
+        if index > next_index {
+            dims.push("...".to_string());
+        }
+        dims.push(dim.to_string());
+        next_index = index + 1;
+    }
+    dims.push("...".to_string());
+    dims
 }
 
 fn parse_shape_annotation(expr: &Expr) -> Option<Shape> {

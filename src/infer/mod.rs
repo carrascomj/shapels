@@ -13,7 +13,8 @@ use crate::op_groups::{RangeOps, SimpleDtype};
 use crate::{Imports, Shape, VarState, expr_text_range, get_arg, get_dtype};
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use rustpython_parser::ast::{
-    self, Constant, Expr, ExprCall, ExprConstant, ExprName, ExprSubscript, ExprUnaryOp, Identifier,
+    self, Constant, Expr, ExprAttribute, ExprCall, ExprConstant, ExprName, ExprSubscript,
+    ExprUnaryOp, Identifier,
 };
 use rustpython_parser::text_size::TextRange;
 use std::borrow::Cow;
@@ -37,6 +38,64 @@ mod view;
 pub use view::{Transpose, infer_permute, infer_view_like};
 
 use crate::text_range_to_lsp;
+
+/// A destructuring assignment whose values are dimensions read from the same
+/// tensor's `.shape`, such as `B, C = x.shape[0], x.shape[1]`.
+///
+/// Keeping this small bit of syntax recognition with inference utilities lets
+/// assignment handling reuse the normal shape-state update path.
+pub(crate) fn indexed_shape_assignment(
+    target: &Expr,
+    value: &Expr,
+) -> Option<(Identifier, Vec<(usize, Identifier)>)> {
+    let Expr::Tuple(targets) = target else {
+        return None;
+    };
+    let Expr::Tuple(values) = value else {
+        return None;
+    };
+    if targets.elts.is_empty() || targets.elts.len() != values.elts.len() {
+        return None;
+    }
+
+    let mut base_id = None;
+    let mut assignments = Vec::with_capacity(targets.elts.len());
+    for (target, value) in targets.elts.iter().zip(&values.elts) {
+        let Expr::Name(target_name) = target else {
+            return None;
+        };
+        let (base, index) = shape_index(value)?;
+        if base_id.as_ref().is_some_and(|known| known != &base) {
+            return None;
+        }
+        base_id = Some(base);
+        assignments.push((index, target_name.id.clone()));
+    }
+    Some((base_id?, assignments))
+}
+
+fn shape_index(expr: &Expr) -> Option<(Identifier, usize)> {
+    let Expr::Subscript(ExprSubscript { value, slice, .. }) = expr else {
+        return None;
+    };
+    let Expr::Attribute(ExprAttribute { value, attr, .. }) = value.as_ref() else {
+        return None;
+    };
+    let Expr::Name(base) = value.as_ref() else {
+        return None;
+    };
+    let Expr::Constant(ExprConstant {
+        value: Constant::Int(index),
+        ..
+    }) = slice.as_ref()
+    else {
+        return None;
+    };
+    (attr.as_str() == "shape")
+        .then(|| usize::try_from(index).ok())
+        .flatten()
+        .map(|index| (base.id.clone(), index))
+}
 
 /// Specific to index/permute/transpose/etc. that need negative indexing normalization.
 fn expr_to_int(expr: &Expr, dims_len: Option<usize>) -> Option<i64> {
